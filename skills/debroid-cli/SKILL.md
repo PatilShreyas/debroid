@@ -70,7 +70,7 @@ debroid pause-state <session_id> <thread_id>
 
 ### Step 6: Mutate or Step
 - Mutate memory: `debroid set-var <session_id> <thread_id> <variableName> <newValue>`
-- Evaluate: `debroid eval <session_id> <thread_id> "myObj.getVal()"`
+- Evaluate: `debroid eval <session_id> <thread_id> "myObj.getVal()"` (Note: Dot-notation property access like `obj.field` is **not supported**. If you need to see an object's fields, use the `inspect` command instead.)
 - Step execution: `debroid step <session_id> <thread_id> <ACTION>` (Actions: `STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME`)
 
 ### Step 7: Clean Up
@@ -83,6 +83,7 @@ debroid detach <session_id>
 - **Error: "Failed to communicate with daemon"**: The daemon isn't running. Run `debroid daemon &`.
 - **Error: "AbsentInformationException"**: The app is not debuggable or was obfuscated by ProGuard. Ensure `android:debuggable="true"` in the Manifest.
 - **Missing Local Variables**: If locals are empty, you might be at a method entry point. Run a `STEP_OVER` and check again.
+- **Error: "EVALUATION_FAILED" on object properties**: The `eval` command cannot evaluate object fields using dot notation (e.g. `user.name`). To see an object's properties, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
 
 ## 📖 Complete CLI Command Reference
 Here is the full list of commands and their signatures:
