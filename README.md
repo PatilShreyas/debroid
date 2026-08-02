@@ -4,13 +4,6 @@
 
 It uses a background Daemon and a lightweight CLI to allow AI coding assistants to set breakpoints, inspect runtime stack frames, mutate variables live in thread memory, catch uncaught exceptions, and step through code execution.
 
-## Features ✨
-
-* **JDWP & ADB Orchestration:** Automated process discovery, port forwarding, and JDI socket attachment.
-* **Smart Context Bounds:** Shallow variable inspection and paginated object property drilling to prevent LLM context window bloat.
-* **Live In-Memory Mutation:** Change variable values in thread stack memory on the fly.
-* **Exception Traps & Watchpoints:** Catch uncaught exceptions and pause execution on field modifications.
-* **Kotlin Coroutines Support:** Extract local state from compiler-generated `$continuation` objects.
 
 ## 🛠️ Installation & Build
 
