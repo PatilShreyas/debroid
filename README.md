@@ -1,6 +1,6 @@
 # Debroid 🤖⚡
 
-**Debroid** (*DEBug + AnDROID*) is an autonomous, headless Android debugging CLI utility designed specifically for AI Agents (Antigravity, Cursor, etc.) to debug Android applications.
+**Debroid** (*DEBug + AnDROID*) is an autonomous, headless Android debugging CLI utility designed specifically for AI Agents (Claude Code, Codex, Cursor, OpenCode, Antigravity, etc.) to debug Android applications.
 
 It uses a background Daemon and a lightweight CLI to allow AI coding assistants to set breakpoints, inspect runtime stack frames, mutate variables live in thread memory, catch uncaught exceptions, and step through code execution.
 
@@ -30,7 +30,7 @@ Debroid is designed to be operated autonomously by AI agents (like Antigravity o
 We have included a highly-optimized skill file at `skills/debroid-cli/SKILL.md`.
 
 **To install the skill:**
-Simply copy the contents of `skills/debroid-cli/SKILL.md` into your agent's context, prompt, or custom instructions/rules file (e.g., `.cursorrules` or `.antigravity/rules.md`). This gives the LLM explicit instructions on how to orchestrate the background daemon, set breakpoints, and poll the JDWP event queue without hallucinations or infinite loops.
+Simply copy the contents of `skills/debroid-cli/SKILL.md` into your agent's context, prompt, or custom instructions/rules file. This gives the LLM explicit instructions on how to orchestrate the background daemon, set breakpoints, and poll the JDWP event queue without hallucinations or infinite loops.
 
 ## 🔌 How it Works
 
