@@ -83,3 +83,26 @@ debroid detach <session_id>
 - **Error: "Failed to communicate with daemon"**: The daemon isn't running. Run `debroid daemon &`.
 - **Error: "AbsentInformationException"**: The app is not debuggable or was obfuscated by ProGuard. Ensure `android:debuggable="true"` in the Manifest.
 - **Missing Local Variables**: If locals are empty, you might be at a method entry point. Run a `STEP_OVER` and check again.
+
+## 📖 Complete CLI Command Reference
+Here is the full list of commands and their signatures:
+| Command | Signature | Description |
+| :--- | :--- | :--- |
+| `daemon` | `debroid daemon` | Starts the persistent background daemon |
+| `launch` | `debroid launch <app_id>` | Launches app suspended and attaches |
+| `attach` | `debroid attach <app_id>` | Attaches to running app |
+| `detach` | `debroid detach <session_id>` | Safely detaches debugger |
+| `break` | `debroid break <session_id> <file> <line>` | Sets a line breakpoint |
+| `catch-exception` | `debroid catch-exception <session_id> [class_name]` | Sets an exception breakpoint |
+| `watch` | `debroid watch <session_id> <class_name> <field_name>` | Sets a field watchpoint |
+| `threads` | `debroid threads <session_id>` | Lists active threads |
+| `locals` | `debroid locals <session_id> <thread_id>` | Gets shallow local variables |
+| `pause-state` | `debroid pause-state <session_id> <thread_id>` | Gets frames, locals, and instance state |
+| `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value>` | Mutates local variable |
+| `eval` | `debroid eval <session_id> <thread_id> <expression...>` | Evaluates string expression |
+| `resume` | `debroid resume <session_id> [thread_id=1]` | Resumes thread execution |
+| `poll` | `debroid poll <session_id> [cursor=0] [--with-stacktrace]` | Polls for asynchronous debugger events |
+| `frames` | `debroid frames <session_id> <thread_id>` | Retrieves thread stack frames |
+| `coroutine` | `debroid coroutine <session_id> <continuation_id>` | Retrieves locals from a Continuation object |
+| `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>]` | Inspects deep object fields |
+| `step` | `debroid step <session_id> <thread_id> <action>` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME`, `RESUME_ALL`) |
