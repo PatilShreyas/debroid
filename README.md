@@ -18,15 +18,26 @@ It uses a background Daemon and a lightweight CLI to allow AI coding assistants 
 * Java JDK 21+ (`JAVA_HOME`)
 * Android SDK & `adb`
 
-### Build CLI
+### Install the CLI
+To build the CLI and install it as a standalone executable in your `/usr/local/bin`, simply run:
 ```bash
-./gradlew installDist
+./install.sh
+```
+*Note: This script will prompt for your `sudo` password to move the binary to your local bin.*
+
+Once installed, you can use the CLI from anywhere:
+```bash
+debroid --help
 ```
 
-*Note: You can run the CLI from `./cli/build/install/cli/bin/cli` or by using Gradle:*
-```bash
-./gradlew run --args="--help"
-```
+## 🧠 AI Agent Skill Setup
+
+Debroid is designed to be operated autonomously by AI agents (like Antigravity or Cursor). To teach your agent how to use Debroid effectively, you need to provide it with the skill instructions.
+
+We have included a highly-optimized skill file at `skills/debroid-cli/SKILL.md`.
+
+**To install the skill:**
+Simply copy the contents of `skills/debroid-cli/SKILL.md` into your agent's context, prompt, or custom instructions/rules file (e.g., `.cursorrules` or `.antigravity/rules.md`). This gives the LLM explicit instructions on how to orchestrate the background daemon, set breakpoints, and poll the JDWP event queue without hallucinations or infinite loops.
 
 ## 🔌 How it Works
 
