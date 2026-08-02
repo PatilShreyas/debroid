@@ -9,6 +9,28 @@ application {
     applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
 }
 
+val cliVersion = file("version.txt").readText().trim()
+
+val generateVersionInfo by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/source/version/main/kotlin/dev/shreyaspatil/debroid/cli").get().asFile
+    inputs.file(file("version.txt"))
+    outputs.dir(outputDir)
+    doLast {
+        outputDir.mkdirs()
+        File(outputDir, "Version.kt").writeText("""
+            package dev.shreyaspatil.debroid.cli
+            
+            const val VERSION = "$cliVersion"
+        """.trimIndent())
+    }
+}
+
+sourceSets {
+    main {
+        kotlin.srcDir(generateVersionInfo)
+    }
+}
+
 dependencies {
     implementation(project(":core"))
 
@@ -39,5 +61,5 @@ tasks.jar {
     
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     archiveBaseName.set("debroid")
-    archiveVersion.set("0.0.1")
+    archiveVersion.set(cliVersion)
 }

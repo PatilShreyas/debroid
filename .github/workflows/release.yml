@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cli/version.txt'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Read version
+        id: get_version
+        run: |
+          VERSION=$(cat cli/version.txt | xargs)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Build CLI
+        run: ./gradlew :cli:jar
+
+      - name: Rename JAR for release
+        run: mv cli/build/libs/debroid-${{ env.VERSION }}.jar debroid.jar
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Debroid v${{ env.VERSION }}
+          files: debroid.jar

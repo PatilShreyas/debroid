@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
-echo "🔨 Building Debroid CLI..."
+VERSION=$(cat cli/version.txt | xargs)
+echo "🔨 Building Debroid CLI v$VERSION..."
 ./gradlew :cli:jar
 
-JAR_FILE="cli/build/libs/debroid-0.0.1.jar"
+JAR_FILE="cli/build/libs/debroid-$VERSION.jar"
 
 if [ ! -f "$JAR_FILE" ]; then
     echo "❌ Build failed: JAR not found at $JAR_FILE"
