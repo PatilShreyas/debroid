@@ -17,7 +17,7 @@ local.properties
 .DS_Store
 
 # Generated standalone executable
-debroid
+/debroid
 stub.sh
 
 # Logs
