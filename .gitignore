@@ -1,0 +1,24 @@
+# Gradle
+.gradle
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Local configuration
+local.properties
+
+# macOS
+.DS_Store
+
+# Generated standalone executable
+debroid
+stub.sh
+
+# Logs
+*.log
