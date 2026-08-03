@@ -1,6 +1,6 @@
 ---
 name: Debroid CLI Debugger
-description: "Orchestrate headless Android debugging. Use this skill when asked to debug an Android app, set breakpoints, catch exceptions, inspect variables, or evaluate expressions live."
+description: "Orchestrate headless Android debugging via JDWP. ACTIVATE this skill whenever asked to debug an Android application, set line or exception breakpoints, inspect runtime variables or Jetpack Compose state, step through execution, evaluate live expressions, watch fields, or diagnose runtime crashes."
 ---
 
 # Debroid CLI Debugger Skill
@@ -8,12 +8,14 @@ description: "Orchestrate headless Android debugging. Use this skill when asked 
 This skill provides mandatory instructions for AI agents to use the `debroid` CLI for headless Android debugging. **Follow these instructions strictly to avoid context window bloat and execution errors.**
 
 ## 🎯 Trigger Conditions
-Use this skill when the user asks to:
-- "Debug the Android app"
-- "Set a breakpoint in MainActivity"
-- "Catch why the app is crashing"
-- "Check the value of X live"
-- "Step through the Android code"
+Activate this skill whenever the user or task involves:
+- Debugging an Android application or process live
+- Setting line breakpoints in Kotlin or Java source files (`debroid break`)
+- Catching uncaught or caught runtime exceptions (`debroid catch-exception`)
+- Inspecting live variables, object memory, or Jetpack Compose state (`debroid locals`, `pause-state`, `inspect`)
+- Stepping through Kotlin/Java code execution (`debroid step`)
+- Monitoring field access or modifications with watchpoints (`debroid watch`)
+- Evaluating expressions or mutating variable values in runtime memory (`debroid eval`, `set-var`)
 
 ## ⚠️ Critical Agent Rules (DO NOT IGNORE)
 1. **Always use `--with-stacktrace`** when polling to get immediate context.
