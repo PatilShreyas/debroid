@@ -26,14 +26,6 @@ Issues remaining after the B1–B6 blocker fixes. Grouped by severity.
 The daemon listens on `127.0.0.1:9876` with no auth, no encryption, and exposes `eval` (which uses `ObjectReference.invokeMethod` to call arbitrary zero-arg methods) — i.e., effectively arbitrary method invocation inside the debugged app and access to thread memory. On a shared dev box any local process can connect. For a public-released tool that's worth flagging.
 **Fix:** at minimum document the trust model in README ("only run on a machine where every local user is fully trusted"). Better: a Unix-domain socket at `$XDG_RUNTIME_DIR/debroid.sock` with `0600` perms, plus a token written to a file readable only by the invoking user.
 
-### H8. README/SKILL/command names are inconsistent
-`README.md:39` says `debroid breakpoint`, `debroid locals`, `debroid poll`. The actual command is `break` (`BreakCommand`). SKILL uses `break` correctly. This will confuse agents that read README.
-**Fix:** align README wording with the actual commands (`break`, `pause-state`, `step`, …).
-
-### H9. Documentation/SKILL says step actions include `RESUME` but enum has `RESUME_THREAD` and `RESUME_ALL`
-`StepAction` enum: `STEP_OVER, STEP_INTO, STEP_OUT, RESUME_THREAD, RESUME_ALL`. The `step` enum arg parses these exactly. But SKILL line 74 lists `RESUME` as a valid action — wrong. `ResumeCommand` is the dedicated resume command (defaults thread to "1"), which calls `RESUME_ALL` ignoring the thread arg — see H10.
-**Fix:** SKILL command reference table also lists `RESUME` only — update to `RESUME_THREAD, RESUME_ALL`.
-
 ### H10. `resume` command ignores the `threadId` argument
 `CliRunner.ResumeCommand` (`CliRunner.kt:224`) takes `threadId` arg (default "1") but `DaemonServer.processCommand` for `DaemonRequest.Resume` calls `session.stepExecution(request.threadId, StepAction.RESUME_ALL)` — it ignores the per-thread id and resumes all threads regardless. The SKILL tells agents to use `resume <session> [thread_id=1]` expecting per-thread semantics.
 **Fix:** differentiate `RESUME_THREAD` vs `RESUME_ALL`. Either: have `resume` use `RESUME_THREAD`, or change resume to `RESUME_ALL` and drop the thread_id arg (cleaner), or accept `--all`.
@@ -151,6 +143,8 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **B6.** `remove-break`, `remove-catch-exception`, `remove-watch` commands added; all JDI requests tracked and deletable; orphaned `ClassPrepareRequest` auto-disabled when deferral queue empties.
 - **H2.** `debroid stop` daemon shutdown command added (`DaemonRequest.Shutdown`); detaches all active debug sessions, cleans up ADB port forwards, and gracefully shuts down the background server process.
 - **H4.** `pollEvents` thread safety and JMM visibility fixed in `JdiSession.kt`: synchronized `pushEvent` and `pollEvents` buffer snapshot on `eventQueueLock` using `ArrayDeque` with `@Volatile eventQueueOffset`.
+- **H8.** Command names in `README.md` aligned with actual CLI subcommands (`break`, `stop`, `pause-state`, `step`, etc.).
+- **H9.** Step actions in `SKILL.md` and `README.md` verified and aligned with `StepAction` enum values (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`).
 
 Additional hardening during integration testing:
 - JDI `InternalError` from ART's `SourceDebugExtension` parser no longer kills the event listener thread (catch `Throwable` in event loop + `safeSourceName()` helper).

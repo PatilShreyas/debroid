@@ -52,12 +52,13 @@ Agents can use the CLI to orchestrate the debug session. The daemon is auto-star
 ### Daemon Lifecycle
 - **Auto-start**: The daemon starts automatically on the first CLI command if it isn't running.
 - **Manual start**: `debroid daemon` (run in background or as a background task).
-- **Stop**: Kill the process or close the terminal. There is no dedicated stop command yet.
+- **Stop**: `debroid stop` (shuts down daemon and detaches active debug sessions).
 
 ### Full Command List
 | Command | Signature | Description |
 | :--- | :--- | :--- |
 | `daemon` | `debroid daemon` | Starts the persistent background daemon |
+| `stop` | `debroid stop` | Shuts down background daemon and detaches all active sessions |
 | `launch` | `debroid launch <app_id>` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
 | `attach` | `debroid attach <app_id>` | Attaches to a running app |
 | `detach` | `debroid detach <session_id>` | Safely detaches debugger; for `launch` sessions also clears `am set-debug-app` |
