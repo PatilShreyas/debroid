@@ -111,6 +111,13 @@ open class JdiSessionManager(
         return true
     }
 
+    fun detachAllSessions() {
+        val activeIds = sessions.keys.toList()
+        for (id in activeIds) {
+            detachSession(id)
+        }
+    }
+
     private fun findAvailableLocalPort(): Int {
         ServerSocket(0).use { socket ->
             return socket.localPort

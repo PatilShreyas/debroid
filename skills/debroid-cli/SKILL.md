@@ -117,6 +117,7 @@ Here is the full list of commands and their signatures:
 | Command | Signature | Description |
 | :--- | :--- | :--- |
 | `daemon` | `debroid daemon` | Starts the persistent background daemon |
+| `stop` | `debroid stop` | Shuts down background daemon and detaches all active sessions |
 | `launch` | `debroid launch <app_id>` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
 | `attach` | `debroid attach <app_id>` | Attaches to a running app |
 | `detach` | `debroid detach <session_id>` | Safely detaches debugger; for `launch` sessions also clears `am set-debug-app` |

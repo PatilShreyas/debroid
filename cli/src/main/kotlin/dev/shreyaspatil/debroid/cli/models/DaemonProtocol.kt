@@ -11,6 +11,8 @@ sealed class DaemonRequest {
 
     @Serializable data class Detach(val sessionId: String) : DaemonRequest()
 
+    @Serializable data class Shutdown(val force: Boolean = false) : DaemonRequest()
+
     @Serializable data class Break(val sessionId: String, val file: String, val line: Int) : DaemonRequest()
 
     @Serializable data class RemoveBreak(val sessionId: String, val breakpointId: String) : DaemonRequest()

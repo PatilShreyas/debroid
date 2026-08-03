@@ -81,6 +81,17 @@ object DaemonServer {
                     val ok = sessionManager.detachSession(request.sessionId)
                     json.encodeToString(CliDetachedResult(ok))
                 }
+                is DaemonRequest.Shutdown -> {
+                    sessionManager.detachAllSessions()
+                    val result = json.encodeToString(CliShutdownResult(true, "Daemon shut down successfully"))
+                    Thread {
+                        try {
+                            Thread.sleep(100)
+                        } catch (_: Throwable) {}
+                        kotlin.system.exitProcess(0)
+                    }.start()
+                    result
+                }
                 is DaemonRequest.Break -> {
                     val session = sessionManager.getSession(request.sessionId)
                     val bp = session.setBreakpoint(file = request.file, line = request.line, condition = null)

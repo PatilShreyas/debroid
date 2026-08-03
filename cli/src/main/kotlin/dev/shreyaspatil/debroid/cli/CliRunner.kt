@@ -12,6 +12,7 @@ import com.github.ajalt.clikt.parameters.options.versionOption
 import com.github.ajalt.clikt.parameters.types.enum
 import com.github.ajalt.clikt.parameters.types.int
 import dev.shreyaspatil.debroid.cli.models.CliDebugError
+import dev.shreyaspatil.debroid.cli.models.CliShutdownResult
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
 import dev.shreyaspatil.debroid.models.StepAction
 import kotlinx.serialization.encodeToString
@@ -98,6 +99,21 @@ object CliRunner {
     ) {
         override fun run() {
             DaemonServer.startDaemon()
+        }
+    }
+
+    class ShutdownCommand : CliktCommand(
+        name = "stop",
+        help = "Shuts down the Debroid persistent background daemon and detaches all active sessions.",
+        epilog = "Safely disposes all active debug sessions and closes ADB port forwards."
+    ) {
+        override fun run() {
+            if (!DaemonServer.isDaemonRunning()) {
+                val jsonRes = Json { prettyPrint = true }
+                println(jsonRes.encodeToString(CliShutdownResult(shutdown = true, message = "Daemon is not running")))
+                return
+            }
+            ensureDaemonAndSend(DaemonRequest.Shutdown())
         }
     }
 
@@ -339,6 +355,7 @@ object CliRunner {
         return DebroidCli()
             .subcommands(
                 DaemonCommand(),
+                ShutdownCommand(),
                 LaunchCommand(),
                 AttachCommand(),
                 DetachCommand(),

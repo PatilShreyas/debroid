@@ -19,6 +19,9 @@ data class CliStatusResult(val status: String)
 data class CliDetachedResult(val detached: Boolean)
 
 @Serializable
+data class CliShutdownResult(val shutdown: Boolean, val message: String = "Daemon shut down successfully")
+
+@Serializable
 data class CliExceptionBreakpointResult(val exceptionBreakpointId: String)
 
 @Serializable

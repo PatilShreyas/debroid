@@ -10,10 +10,6 @@ Issues remaining after the B1–B6 blocker fixes. Grouped by severity.
 `CliRunner.ensureDaemonAndSend` (`CliRunner.kt:45`) does `redirectError(DISCARD); redirectOutput(DISCARD)` on the auto-spawned daemon. If the daemon fails (port in use, JDK missing, JDI init error), agents get only "Failed to start background daemon" with zero diagnostic detail.
 **Fix:** redirect to `~/.debroid/daemon.log` (rotate on each start). Add `debroid daemon-logs` command to print it.
 
-### H2. Daemon has no shutdown command
-There's no `debroid stop` / `debroid daemon-stop`. With `launchAppSuspended` leaving `set-debug-app` set (B4) and adb port forwards leaked if daemon is `kill`-ed, this is a real cleanup problem. Agents have no clean way to dispose the daemon.
-**Fix:** add a `DaemonRequest.Shutdown` (print "ack", close server socket, dispose all sessions, un-forward all ports), exposed as `debroid daemon-stop` (or `debroid shutdown`).
-
 ### H3. No CLI tests; daemon/serialization are unverified
 `cli` has zero tests. Polymorphic `DaemonRequest` serialization, `Cli*` conversions, `DemoCLI.parse` arg handling — all unverified. The test coverage in `core` is decent but the reflection-based test hack (`JdiSessionTest.kt:298`) accessing the private buffer has an unchecked-cast warning and is brittle.
 **Fix:** add cli tests: polymorphic round-trip of every `DaemonRequest` subtype, `CliModels` `toCli()` conversions, argparse of each subcommand, and replace the reflection hack with a test-visible `pushEvent`/`peekEvents` API.
@@ -157,6 +153,7 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **B4.** `detach` auto-runs `am clear-debug-app` when session was launched via `launch` (not `attach`).
 - **B5.** Deferred watchpoints use per-class list (`Map<String, List<DeferredWatchpoint>>`); multiple watchpoints per class no longer overwrite.
 - **B6.** `remove-break`, `remove-catch-exception`, `remove-watch` commands added; all JDI requests tracked and deletable; orphaned `ClassPrepareRequest` auto-disabled when deferral queue empties.
+- **H2.** `debroid stop` daemon shutdown command added (`DaemonRequest.Shutdown`); detaches all active debug sessions, cleans up ADB port forwards, and gracefully shuts down the background server process.
 
 Additional hardening during integration testing:
 - JDI `InternalError` from ART's `SourceDebugExtension` parser no longer kills the event listener thread (catch `Throwable` in event loop + `safeSourceName()` helper).
