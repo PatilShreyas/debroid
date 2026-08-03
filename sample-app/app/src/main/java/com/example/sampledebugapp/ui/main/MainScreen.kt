@@ -13,12 +13,19 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.sampledebugapp.data.DefaultDataRepository
 
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+
 @Composable
 fun MainScreen(
     modifier: Modifier = Modifier,
     viewModel: MainScreenViewModel = viewModel { MainScreenViewModel(DefaultDataRepository()) },
 ) {
     val orderStatus by viewModel.orderStatus.collectAsStateWithLifecycle()
+    var clickCount by remember { mutableIntStateOf(0) }
+    var userNote by remember { mutableStateOf("Initial Compose Note") }
 
     Column(
         modifier = modifier.fillMaxSize().padding(16.dp),
@@ -35,6 +42,16 @@ fun MainScreen(
             text = orderStatus,
             style = MaterialTheme.typography.bodyLarge
         )
+        Spacer(modifier = Modifier.height(16.dp))
+
+        ComposeStateWidget(
+            clickCount = clickCount,
+            userNote = userNote,
+            onIncrement = {
+                clickCount++
+                userNote = "Updated Note #$clickCount"
+            }
+        )
         Spacer(modifier = Modifier.height(24.dp))
 
         Button(onClick = { viewModel.onProcessOrderClicked("GOLD", 100.0) }) {
@@ -49,6 +66,25 @@ fun MainScreen(
 
         Button(onClick = { viewModel.onProcessOrderClicked("UNKNOWN_TYPE", 50.0) }) {
             Text("Trigger Exception Order")
+        }
+    }
+}
+
+@Composable
+fun ComposeStateWidget(
+    clickCount: Int,
+    userNote: String,
+    onIncrement: () -> Unit
+) {
+    val displayText = "Compose Clicks: $clickCount | Note: $userNote"
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = displayText,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Button(onClick = onIncrement) {
+            Text("Increment Compose State")
         }
     }
 }
