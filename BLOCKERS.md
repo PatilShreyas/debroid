@@ -42,11 +42,6 @@ The daemon listens on `127.0.0.1:9876` with no auth, no encryption, and exposes 
 ### H16. Event buffering has no "stale cursor" signal
 When `cursor < eventQueueOffset` (the cursor points to an event that aged out of the 1000-slot buffer), `pollEvents` silently replays surviving events from index 0. The agent has no way to know it missed events. Add a `droppedEventsSinceLastPoll: Long` field to `EventPollResult` and surface it in the SKILL.
 
-### H17. CI detekt has no teeth
-Root `build.gradle.kts:40` sets `ignoreFailures = true`. The build emits a long list of violations (magic numbers, wildcard imports, unused params, MaxLineLength) but the build stays green. For an FOSS release, either:
-- Fix the existing violations and set `ignoreFailures = false`, OR
-- Keep `ignoreFailures = true` but re-add it as an explicit decision with a comment, plus run detekt reports in PR comments. Right now the file lies to contributors.
-
 ### H18. Release pipeline only ships the JAR
 `release.yml` uploads `debroid.jar`. The `install.sh` self-extracting-stub approach means users on Linux/WSL/Windows need to wrap the jar themselves. Either:
 - Build the combined `debroid` executable in release.yml and attach it as `debroid-linux`, `debroid-macos`, `debroid` (it's actually platform-agnostic bash+jar — just attach one).
@@ -133,6 +128,7 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **H9.** Step actions in `SKILL.md` and `README.md` verified and aligned with `StepAction` enum values (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`).
 - **H12.** `isAppDebuggable` rewritten in `AdbManager.kt`: uses Android's native `run-as <app_id> true` check as primary mechanism, with package flags check (`flags=[` / `pkgFlags=[`) as fallback.
 - **H14.** Expression evaluation upgraded to JDK internal JDI `ExpressionParser` via `JdiExpressionEvaluator.java` Java bridge; supports full method calls, arithmetic, logic, parameter passing, and string operations using Java syntax.
+- **H17.** Detekt `ignoreFailures` set to `false` in `build.gradle.kts` so detekt violations fail the build as expected.
 
 Additional hardening during integration testing:
 - JDI `InternalError` from ART's `SourceDebugExtension` parser no longer kills the event listener thread (catch `Throwable` in event loop + `safeSourceName()` helper).

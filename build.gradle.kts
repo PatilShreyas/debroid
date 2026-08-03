@@ -37,6 +37,6 @@ subprojects {
         config.setFrom(files("$rootDir/config/detekt/detekt.yml"))
         buildUponDefaultConfig = true
         autoCorrect = true
-        ignoreFailures = true
+        ignoreFailures = false
     }
 }
