@@ -21,7 +21,7 @@ To build the CLI and install it as a standalone executable in your `/usr/local/b
 On Linux or if you prefer not to use `sudo`, you can install to a user-writable directory:
 ```bash
 ./gradlew :cli:jar
-VERSION=$(cat cli/version.txt | tr -d '[:space:]')
+VERSION=$(cat version.txt | tr -d '[:space:]')
 # Create a self-extracting bash+jar executable
 printf '#!/usr/bin/env bash\nexec java --enable-native-access=ALL-UNNAMED -jar "$0" "$@"\n' > ~/.local/bin/debroid
 cat cli/build/libs/debroid-$VERSION.jar >> ~/.local/bin/debroid

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-VERSION=$(cat cli/version.txt | xargs)
+VERSION=$(cat version.txt | xargs)
 echo "🔨 Building Debroid CLI v$VERSION..."
 if ./gradlew :cli:jar --quiet --console=plain; then
     echo "✅ CLI build successful!"

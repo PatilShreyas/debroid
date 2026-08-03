@@ -12,11 +12,12 @@ application {
     )
 }
 
-val cliVersion = file("version.txt").readText().trim()
+val versionFile = rootProject.file("version.txt")
+val cliVersion = versionFile.readText().trim()
 
 val generateVersionInfo by tasks.registering {
     val outputDir = layout.buildDirectory.dir("generated/source/version/main/kotlin/dev/shreyaspatil/debroid/cli").get().asFile
-    inputs.file(file("version.txt"))
+    inputs.file(versionFile)
     outputs.dir(outputDir)
     doLast {
         outputDir.mkdirs()
