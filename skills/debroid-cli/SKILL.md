@@ -38,7 +38,9 @@ You must attach the debugger to obtain a `sessionId`.
 - **If the user wants to debug app startup:**
   ```bash
   debroid launch <app_id>
+  debroid resume <session_id>
   ```
+  > ⚠️ `launch` starts the app suspended via `am set-debug-app -w`. **Always call `debroid resume <session_id>` right after `launch`** so the VM completes startup and loads application classes.
   > ⚠️ `launch` uses `am set-debug-app -w`. Debroid **automatically** clears this flag when you call `detach`, so the next normal (non-debug) launch of the app will not hang. Do not call `am clear-debug-app` yourself.
 - **If the app is already running:**
   ```bash
@@ -103,6 +105,7 @@ debroid detach <session_id>
 - **Error: "EVALUATION_FAILED" on object properties**: The `eval` command cannot evaluate object fields using dot notation (e.g. `user.name`). To see an object's properties, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
 - **`break` returns `verified=false`**: NOT a failure — the class will be loaded later and the breakpoint will be bound automatically. Keep your `bp` id and proceed.
 - **A trap no longer needed**: Remove it. Lingering exception traps in particular can fire on every exception the app throws, flooding your poll results.
+- **Autonomous UI Interaction**: Instead of asking the user to click buttons on the device, inspect the UI bounds using `android layout --pretty` (prefer `android-cli` if installed) or `adb shell uiautomator dump /sdcard/window_dump.xml && adb shell cat /sdcard/window_dump.xml`, locate the target element's `bounds="[minX,minY][maxX,maxY]"`, calculate the center coordinates `(minX + maxX)/2`, and simulate a tap with `adb shell input tap X Y`.
 - **`detached` of `launch`'d session and app won't start normally**: Should not happen — `detach` clears `am set-debug-app`. If it does (e.g. daemon was forcibly killed), run `adb shell am clear-debug-app` once.
 
 ## 📖 Complete CLI Command Reference

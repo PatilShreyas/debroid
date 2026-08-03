@@ -120,26 +120,25 @@ class JdiSession(
         val classBasename = file.substringAfterLast('/').substringAfterLast('\\').substringBeforeLast('.')
         val classBasenameKt = "${classBasename}Kt"
         val matchingClasses = vm.allClasses().filter { ref ->
+            val name = try { ref.name() } catch (_: Throwable) { return@filter false }
+            val simpleName = name.substringAfterLast('.')
+            val nameMatchesHeuristic = simpleName == classBasename ||
+                simpleName == classBasenameKt ||
+                simpleName.startsWith("$classBasename$") ||
+                simpleName.startsWith("$classBasenameKt$")
+
+            if (nameMatchesHeuristic) {
+                return@filter true
+            }
+
+            if (isFrameworkClass(name)) {
+                return@filter false
+            }
+
             try {
                 ref.sourceName() == file
-            } catch (e: com.sun.jdi.AbsentInformationException) {
-                // Fallback to name heuristics if sourceName is absent
-                val name = ref.name()
-                val simpleName = name.substringAfterLast('.')
-                simpleName == classBasename ||
-                    simpleName == classBasenameKt ||
-                    simpleName.startsWith("$classBasename$") ||
-                    simpleName.startsWith("$classBasenameKt$")
-            } catch (e: Throwable) {
-                // Some ART-loaded classes throw non-AbsentInformationException from sourceName()
-                // (e.g. InternalError, ClassNotLoadedException). Treat as no-match rather than
-                // letting the exception escape and stall the calling socket handler (B-hardening).
-                val name = try { ref.name() } catch (_: Throwable) { return@filter false }
-                val simpleName = name.substringAfterLast('.')
-                simpleName == classBasename ||
-                    simpleName == classBasenameKt ||
-                    simpleName.startsWith("$classBasename$") ||
-                    simpleName.startsWith("$classBasenameKt$")
+            } catch (_: Throwable) {
+                false
             }
         }
 
@@ -738,6 +737,22 @@ class JdiSession(
         } catch (e: Throwable) {
             loc.declaringType().name()
         }
+    }
+
+    private fun isFrameworkClass(name: String): Boolean {
+        return name.startsWith("java.") ||
+            name.startsWith("javax.") ||
+            name.startsWith("android.") ||
+            name.startsWith("androidx.") ||
+            name.startsWith("kotlin.") ||
+            name.startsWith("kotlinx.") ||
+            name.startsWith("sun.") ||
+            name.startsWith("com.sun.") ||
+            name.startsWith("dalvik.") ||
+            name.startsWith("libcore.") ||
+            name.startsWith("com.google.") ||
+            name.startsWith("org.apache.") ||
+            name.startsWith("org.json.")
     }
 
     fun pollEvents(sinceCursor: String, withStacktrace: Boolean = false): EventPollResult {

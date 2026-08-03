@@ -86,6 +86,44 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `setBreakpoint skips framework classes without calling sourceName`() {
+        val frameworkType = mockk<ReferenceType>(relaxed = true)
+        val appType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { frameworkType.name() } returns "android.view.View"
+        every { appType.name() } returns "com.test.CustomHelper"
+        every { appType.sourceName() } returns "DataRepository.kt"
+        every { appType.locationsOfLine(42) } returns listOf(location)
+        every { vm.allClasses() } returns listOf(frameworkType, appType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(file = "DataRepository.kt", line = 42, condition = null)
+
+        assertTrue(info.verified)
+        verify(exactly = 0) { frameworkType.sourceName() }
+        verify(exactly = 1) { appType.sourceName() }
+    }
+
+    @Test
+    fun `setBreakpoint matches by simple name heuristic without calling sourceName`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { refType.name() } returns "com.test.MainActivity"
+        every { refType.locationsOfLine(42) } returns listOf(location)
+        every { vm.allClasses() } returns listOf(refType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42, condition = null)
+
+        assertTrue(info.verified)
+        verify(exactly = 0) { refType.sourceName() }
+    }
+
+    @Test
     fun `setBreakpoint defers if class not found`() {
         every { vm.allClasses() } returns emptyList()
 
