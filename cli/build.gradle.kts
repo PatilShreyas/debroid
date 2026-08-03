@@ -6,7 +6,10 @@ plugins {
 
 application {
     mainClass = "dev.shreyaspatil.debroid.MainKt"
-    applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
+    applicationDefaultJvmArgs = listOf(
+        "--enable-native-access=ALL-UNNAMED",
+        "--add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED"
+    )
 }
 
 val cliVersion = file("version.txt").readText().trim()

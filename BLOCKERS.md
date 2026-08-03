@@ -36,12 +36,6 @@ The daemon listens on `127.0.0.1:9876` with no auth, no encryption, and exposes 
 ### H13. `findPid` ps fallback is loose
 `AdbManager.kt:101`: `firstOrNull { it.contains(appId) }` will match an unrelated process whose name contains `appId` as a substring (`com.foo` will match `com.foo.bar` and `com.foo.sync`). Use exact match on the last whitespace-separated column, or even tighter match by user+name.
 
-### H14. `evaluateExpression` is barely a real evaluator
-- Triggered by `expr.contains("+") || expr.contains("\"")`, so any expression with a quote enters the concat path even if it's a method call.
-- `foo + bar` where both are ints produces `"35"` (string "35"), a String, not an int — incorrect typing.
-- No arithmetic, no comparison, no nested field/property access (documented, but still very limited).
-For agents this is the highest-value inspection surface; the current impl will frustrate them. Consider using JDI's `ExpressionParser`/`com.sun.tools.example.expr` (in `jdk.jdi`'s `tools` module under `com.sun.tools.example.debug.expr`) for real expression evaluation with a ClassFilter. Even partial support (chained `obj.method().field`) would be transformational.
-
 ### H15. `formatValue` marks `StringReference` as `isPrimitive = true`
 `JdiSession.kt:525`. Strings are reference types; an agent may decide not to `inspect` a string it thinks is primitive, or pipeline tooling that renders refs differently from primitives will misclassify. Set `isPrimitive = false` for `StringReference`.
 
@@ -138,6 +132,7 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **H8.** Command names in `README.md` aligned with actual CLI subcommands (`break`, `stop`, `pause-state`, `step`, etc.).
 - **H9.** Step actions in `SKILL.md` and `README.md` verified and aligned with `StepAction` enum values (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`).
 - **H12.** `isAppDebuggable` rewritten in `AdbManager.kt`: uses Android's native `run-as <app_id> true` check as primary mechanism, with package flags check (`flags=[` / `pkgFlags=[`) as fallback.
+- **H14.** Expression evaluation upgraded to JDK internal JDI `ExpressionParser` via `JdiExpressionEvaluator.java` Java bridge; supports full method calls, arithmetic, logic, parameter passing, and string operations using Java syntax.
 
 Additional hardening during integration testing:
 - JDI `InternalError` from ART's `SourceDebugExtension` parser no longer kills the event listener thread (catch `Throwable` in event loop + `safeSourceName()` helper).

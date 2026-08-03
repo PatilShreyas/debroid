@@ -88,7 +88,13 @@ debroid pause-state <session_id> <thread_id>
 
 ### Step 6: Mutate or Step
 - Mutate memory: `debroid set-var <session_id> <thread_id> <variableName> <newValue>`
-- Evaluate: `debroid eval <session_id> <thread_id> "myObj.getVal()"` (Note: Dot-notation property access like `obj.field` is **not supported**. If you need to see an object's fields, use the `inspect` command instead — or `pause-state` for the top-level locals + instance variables in one call.)
+- Evaluate expressions: `debroid eval <session_id> <thread_id> "<expression>"`
+  - **Expression Engine**: Evaluates full expressions using standard Java syntax.
+  - **Evaluating Kotlin Code using Java Syntax**:
+    - **Properties & Getters**: Access Kotlin properties via their generated Java getter methods (e.g., `order.getAmount()` or `user.getName()` instead of synthetic property syntax `order.amount` or `user.name`).
+    - **Method Calls & Arithmetic**: Supports method invocations, parameter passing, and math operators (e.g., `order.getAmount() * 0.15`, `Math.max(x, y)`).
+    - **String Operations & Logic**: Supports boolean logic and string method invocations (e.g., `order.getCustomerType().equals("GOLD")`).
+    - **Field Inspection**: To view an object's instance fields without getter methods, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
 - Step execution: `debroid step <session_id> <thread_id> <ACTION>` (Actions: `STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`)
 - Resume all threads: `debroid resume <session_id> [thread_id]`
   > Note: `resume` currently resumes **all** threads in the VM regardless of the (optional) `thread_id` argument. For per-thread resume, use `step <session_id> <thread_id> RESUME_THREAD`.
@@ -104,7 +110,7 @@ debroid detach <session_id>
 - **Error: "Failed to communicate with daemon"**: The daemon isn't running. Run `debroid daemon &`.
 - **Error: "AbsentInformationException"**: The app is not debuggable or was obfuscated by ProGuard. Ensure `android:debuggable="true"` in the Manifest.
 - **Missing Local Variables**: If locals are empty, you might be at a method entry point. Run a `STEP_OVER` and check again.
-- **Error: "EVALUATION_FAILED" on object properties**: The `eval` command cannot evaluate object fields using dot notation (e.g. `user.name`). To see an object's properties, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
+- **Error: "EVALUATION_FAILED" on Kotlin properties**: The `eval` engine evaluates Java syntax. Kotlin properties with backing getters must be called as Java methods (e.g., `user.getName()` instead of `user.name`). Alternatively, retrieve the `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
 - **`break` returns `verified=false`**: NOT a failure — the class will be loaded later and the breakpoint will be bound automatically. Keep your `bp` id and proceed.
 - **A trap no longer needed**: Remove it. Lingering exception traps in particular can fire on every exception the app throws, flooding your poll results.
 - **Jetpack Compose Breakpoints**: Place line breakpoints on executable statements inside `@Composable` function bodies (e.g. `val x = ...`), not on the `@Composable fun Name(...)` signature header line where no bytecode is generated.

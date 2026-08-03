@@ -36,6 +36,7 @@ object CliRunner {
             val builder = ProcessBuilder(
                 javaBin,
                 "--enable-native-access=ALL-UNNAMED",
+                "--add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED",
                 "-cp",
                 classPath,
                 "dev.shreyaspatil.debroid.MainKt",

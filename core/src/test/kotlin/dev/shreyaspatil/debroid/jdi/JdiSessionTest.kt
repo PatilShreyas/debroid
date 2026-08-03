@@ -6,12 +6,14 @@ import com.sun.jdi.request.EventRequest
 import com.sun.jdi.request.EventRequestManager
 import com.sun.jdi.request.StepRequest
 import dev.shreyaspatil.debroid.adb.AdbManager
+import dev.shreyaspatil.debroid.adb.DebugException
 import dev.shreyaspatil.debroid.models.*
 import io.mockk.*
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 
 class JdiSessionTest {
 
@@ -199,13 +201,18 @@ class JdiSessionTest {
         every { frame.getValue(local) } returns value
         every { value.value() } returns "hello"
         every { value.uniqueID() } returns 99L
+        
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("myString", vm, frame) } returns value
 
         val result = session.evaluateExpression("1", "myString")
 
-        assertEquals("myString", result.name)
+        assertEquals("evaluatedResult", result.name)
         assertEquals("String", result.type)
         assertEquals("\"hello\"", result.valuePreview)
         assertTrue(result.isPrimitive)
+        
+        unmockkStatic(JdiExpressionEvaluator::class)
     }
 
     @Test
@@ -223,6 +230,10 @@ class JdiSessionTest {
         val mirrorStr = mockk<StringReference>(relaxed = true)
         every { vm.mirrorOf("hello world") } returns mirrorStr
         every { mirrorStr.uniqueID() } returns 100L
+        every { mirrorStr.value() } returns "hello world"
+        
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("\"hello\" + \" \" + \"world\"", vm, frame) } returns mirrorStr
 
         val result = session.evaluateExpression("1", "\"hello\" + \" \" + \"world\"")
 
@@ -230,6 +241,113 @@ class JdiSessionTest {
         assertEquals("String", result.type)
         assertEquals("\"hello world\"", result.valuePreview)
         assertTrue(result.isPrimitive)
+        
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `evaluateExpression falls back to local variable when evaluator fails`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        val value = mockk<StringReference>(relaxed = true)
+
+        every { thread.frame(0) } returns frame
+        every { frame.thisObject() } returns null
+        every { local.name() } returns "myVar"
+        every { frame.visibleVariables() } returns listOf(local)
+        every { frame.getValue(local) } returns value
+        every { value.value() } returns "fallbackValue"
+        every { value.uniqueID() } returns 101L
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("myVar", vm, frame) } throws RuntimeException("Parser syntax error")
+
+        val result = session.evaluateExpression("1", "myVar")
+
+        assertEquals("myVar", result.name)
+        assertEquals("String", result.type)
+        assertEquals("\"fallbackValue\"", result.valuePreview)
+
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `evaluateExpression falls back to instance field when evaluator fails`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val thisObj = mockk<ObjectReference>(relaxed = true)
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val field = mockk<Field>(relaxed = true)
+        val value = mockk<StringReference>(relaxed = true)
+
+        every { thread.frame(0) } returns frame
+        every { frame.thisObject() } returns thisObj
+        every { frame.visibleVariables() } returns emptyList()
+        every { thisObj.referenceType() } returns refType
+        every { refType.fieldByName("myField") } returns field
+        every { field.name() } returns "myField"
+        every { thisObj.getValue(field) } returns value
+        every { value.value() } returns "fieldValue"
+        every { value.uniqueID() } returns 102L
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("myField", vm, frame) } throws RuntimeException("Parser error")
+
+        val result = session.evaluateExpression("1", "myField")
+
+        assertEquals("myField", result.name)
+        assertEquals("String", result.type)
+        assertEquals("\"fieldValue\"", result.valuePreview)
+
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `evaluateExpression throws DebugException when evaluation completely fails`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.thisObject() } returns null
+        every { frame.visibleVariables() } returns emptyList()
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("unknownExpr", vm, frame) } throws RuntimeException("Unknown identifier")
+
+        val ex = assertThrows<DebugException> {
+            session.evaluateExpression("1", "unknownExpr")
+        }
+
+        assertEquals(ErrorCode.EVALUATION_FAILED, ex.code)
+        assertTrue(ex.message!!.contains("unknownExpr"))
+
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `evaluateExpression throws DebugException when thread is not suspended`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns false
+        every { vm.allThreads() } returns listOf(thread)
+
+        val ex = assertThrows<DebugException> {
+            session.evaluateExpression("1", "order.getAmount()")
+        }
+
+        assertEquals(ErrorCode.THREAD_NOT_SUSPENDED, ex.code)
     }
 
     @Test
@@ -322,15 +440,15 @@ class JdiSessionTest {
 
     @Test
     fun `pollEvents filters stacktrace correctly based on flag`() {
-        val payload = dev.shreyaspatil.debroid.models.DebugEventPayload(
-            eventType = dev.shreyaspatil.debroid.models.EventType.BREAKPOINT_HIT,
+        val payload = DebugEventPayload(
+            eventType = EventType.BREAKPOINT_HIT,
             sessionId = "sess_1",
             threadId = "1",
             threadName = "main",
             location = "Main.kt:10",
             className = "Main",
             stacktrace = listOf(
-                dev.shreyaspatil.debroid.models.StackFrameInfo(0, "run", "Main", "Main.kt", 10, null)
+                StackFrameInfo(0, "run", "Main", "Main.kt", 10, null)
             )
         )
 

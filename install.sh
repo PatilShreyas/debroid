@@ -17,7 +17,7 @@ echo "📦 Creating standalone executable..."
 # Create the bash stub that launches the JAR
 cat << 'EOF' > stub.sh
 #!/usr/bin/env bash
-exec java --enable-native-access=ALL-UNNAMED -jar "$0" "$@"
+exec java --enable-native-access=ALL-UNNAMED --add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED -jar "$0" "$@"
 EOF
 
 # Concatenate the stub and the JAR to create a single executable

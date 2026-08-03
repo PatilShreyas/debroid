@@ -367,79 +367,31 @@ class JdiSession(
         if (!thread.isSuspended) {
             throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread $threadId is not suspended.")
         }
-        val frame = thread.frame(0)
-        val thisObj = frame.thisObject()
 
-        // 1. Compound String concatenation evaluation
-        if (expr.contains("+") || expr.contains("\"")) {
-            val tokens = expr.split("+").map { it.trim() }
-            val sb = StringBuilder()
-            val visVars = try { frame.visibleVariables() } catch (
-                e: com.sun.jdi.AbsentInformationException
-            ) { emptyList() }
-            val fields = thisObj?.referenceType()?.fields() ?: emptyList()
-            val fieldValues = if (thisObj != null) thisObj.getValues(fields) else emptyMap()
-
-            for (token in tokens) {
-                if (token.startsWith("\"") && token.endsWith("\"")) {
-                    sb.append(token.substring(1, token.length - 1))
-                } else {
-                    val v = visVars.find { it.name() == token }
-                    if (v != null) {
-                        val valRef = frame.getValue(v)
-                        sb.append(valRef?.toString()?.removeSurrounding("\"") ?: "null")
-                    } else {
-                        val field = fields.find { it.name() == token }
-                        if (field != null) {
-                            val valRef = fieldValues[field]
-                            sb.append(valRef?.toString()?.removeSurrounding("\"") ?: "null")
-                        } else {
-                            sb.append(token)
-                        }
-                    }
+        return try {
+            val value = JdiExpressionEvaluator.evaluate(expr, vm, thread.frame(0))
+            formatValue("evaluatedResult", value)
+        } catch (e: Exception) {
+            // Fallback to local variable or field lookup if ExpressionParser fails
+            val frame = thread.frame(0)
+            val thisObj = frame.thisObject()
+            val visVar = try {
+                frame.visibleVariables()
+            } catch (_: com.sun.jdi.AbsentInformationException) { emptyList() }.find { it.name() == expr }
+            if (visVar != null) {
+                return formatValue(visVar.name(), frame.getValue(visVar))
+            }
+            if (thisObj != null) {
+                val field = thisObj.referenceType().fieldByName(expr)
+                if (field != null) {
+                    return formatValue(field.name(), thisObj.getValue(field))
                 }
             }
-            val evaluatedString = sb.toString()
-            val stringRef = vm.mirrorOf(evaluatedString)
-            return VariableInfo(
-                "evaluatedResult",
-                "String",
-                "\"$evaluatedString\"",
-                true,
-                stringRef.uniqueID().toString()
+            throw DebugException(
+                ErrorCode.EVALUATION_FAILED,
+                "Expression '$expr' could not be evaluated: ${e.message}"
             )
         }
-
-        // 2. Method invocation on 'this' if zero-arg method exists
-        if (thisObj != null) {
-            val methodName = if (expr.endsWith("()")) expr.substringBefore("()") else expr
-            val method = thisObj.referenceType().methodsByName(
-                methodName
-            ).firstOrNull { it.argumentTypeNames().isEmpty() }
-            if (method != null) {
-                val result = thisObj.invokeMethod(thread, method, emptyList(), ObjectReference.INVOKE_SINGLE_THREADED)
-                return formatValue(methodName, result)
-            }
-        }
-
-        // 3. Visible local variable or instance field lookup
-        val visVar = try {
-            frame.visibleVariables()
-        } catch (e: com.sun.jdi.AbsentInformationException) { emptyList() }.find { it.name() == expr }
-        if (visVar != null) {
-            val value = frame.getValue(visVar)
-            return formatValue(visVar.name(), value)
-        }
-
-        if (thisObj != null) {
-            val field = thisObj.referenceType().fieldByName(expr)
-            if (field != null) {
-                val value = thisObj.getValue(field)
-                return formatValue(field.name(), value)
-            }
-        }
-
-        throw DebugException(ErrorCode.EVALUATION_FAILED, "Expression '$expr' could not be evaluated.")
     }
 
     /**
