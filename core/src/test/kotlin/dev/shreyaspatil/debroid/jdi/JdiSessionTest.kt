@@ -1,16 +1,46 @@
 package dev.shreyaspatil.debroid.jdi
 
-import com.sun.jdi.*
-import com.sun.jdi.request.*
+import com.sun.jdi.Field
+import com.sun.jdi.IntegerValue
+import com.sun.jdi.LocalVariable
+import com.sun.jdi.Location
+import com.sun.jdi.Method
+import com.sun.jdi.ObjectReference
+import com.sun.jdi.PrimitiveValue
+import com.sun.jdi.ReferenceType
+import com.sun.jdi.StackFrame
+import com.sun.jdi.StringReference
+import com.sun.jdi.ThreadReference
+import com.sun.jdi.VMDisconnectedException
+import com.sun.jdi.VirtualMachine
+import com.sun.jdi.request.AccessWatchpointRequest
+import com.sun.jdi.request.BreakpointRequest
+import com.sun.jdi.request.ClassPrepareRequest
 import com.sun.jdi.request.EventRequest
 import com.sun.jdi.request.EventRequestManager
+import com.sun.jdi.request.ExceptionRequest
+import com.sun.jdi.request.ModificationWatchpointRequest
 import com.sun.jdi.request.StepRequest
 import dev.shreyaspatil.debroid.adb.AdbManager
 import dev.shreyaspatil.debroid.adb.DebugException
-import dev.shreyaspatil.debroid.models.*
-import io.mockk.*
+import dev.shreyaspatil.debroid.models.DebugEventPayload
+import dev.shreyaspatil.debroid.models.ErrorCode
+import dev.shreyaspatil.debroid.models.EventType
+import dev.shreyaspatil.debroid.models.StackFrameInfo
+import dev.shreyaspatil.debroid.models.StepAction
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import io.mockk.unmockkStatic
+import io.mockk.verify
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -28,7 +58,13 @@ class JdiSessionTest {
         vm = mockk(relaxed = true)
         erm = mockk(relaxed = true)
         every { vm.eventRequestManager() } returns erm
-        session = JdiSession(sessionId = "sess_1", appId = "com.test.app", localPort = 8080, vm = vm, adbManager = adbManager)
+        session = JdiSession(
+            sessionId = "sess_1",
+            appId = "com.test.app",
+            localPort = 8080,
+            vm = vm,
+            adbManager = adbManager
+        )
     }
 
     @AfterEach
@@ -201,7 +237,7 @@ class JdiSessionTest {
         every { frame.getValue(local) } returns value
         every { value.value() } returns "hello"
         every { value.uniqueID() } returns 99L
-        
+
         mockkStatic(JdiExpressionEvaluator::class)
         every { JdiExpressionEvaluator.evaluate("myString", vm, frame) } returns value
 
@@ -211,7 +247,7 @@ class JdiSessionTest {
         assertEquals("String", result.type)
         assertEquals("\"hello\"", result.valuePreview)
         assertTrue(result.isPrimitive)
-        
+
         unmockkStatic(JdiExpressionEvaluator::class)
     }
 
@@ -231,7 +267,7 @@ class JdiSessionTest {
         every { vm.mirrorOf("hello world") } returns mirrorStr
         every { mirrorStr.uniqueID() } returns 100L
         every { mirrorStr.value() } returns "hello world"
-        
+
         mockkStatic(JdiExpressionEvaluator::class)
         every { JdiExpressionEvaluator.evaluate("\"hello\" + \" \" + \"world\"", vm, frame) } returns mirrorStr
 
@@ -241,7 +277,7 @@ class JdiSessionTest {
         assertEquals("String", result.type)
         assertEquals("\"hello world\"", result.valuePreview)
         assertTrue(result.isPrimitive)
-        
+
         unmockkStatic(JdiExpressionEvaluator::class)
     }
 
@@ -323,8 +359,9 @@ class JdiSessionTest {
         every { frame.thisObject() } returns null
         every { frame.visibleVariables() } returns emptyList()
 
-        mockkStatic(JdiExpressionEvaluator::class)
-        every { JdiExpressionEvaluator.evaluate("unknownExpr", vm, frame) } throws RuntimeException("Unknown identifier")
+        every {
+            JdiExpressionEvaluator.evaluate("unknownExpr", vm, frame)
+        } throws RuntimeException("Unknown identifier")
 
         val ex = assertThrows<DebugException> {
             session.evaluateExpression("1", "unknownExpr")
@@ -473,7 +510,10 @@ class JdiSessionTest {
 
     @Test
     fun `pollEvents is thread safe and calculates cursors correctly during concurrent pushes and evictions`() {
-        val pushMethod = JdiSession::class.java.getDeclaredMethod("pushEvent", dev.shreyaspatil.debroid.models.DebugEventPayload::class.java)
+        val pushMethod = JdiSession::class.java.getDeclaredMethod(
+            "pushEvent",
+            DebugEventPayload::class.java
+        )
         pushMethod.isAccessible = true
 
         val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
@@ -632,7 +672,7 @@ class JdiSessionTest {
     // ---------------- B5: multiple deferred watchpoints per class ---------
 
     @Test
-    fun `setWatchpoint on same not-yet-loaded class keeps both deferred entries and arms a single ClassPrepareRequest`() {
+    fun `setWatchpoint on deferred class arms single ClassPrepareRequest`() {
         every { vm.classesByName("com.example.Foo") } returns emptyList()
         val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
         every { erm.createClassPrepareRequest() } returns classPrepReq

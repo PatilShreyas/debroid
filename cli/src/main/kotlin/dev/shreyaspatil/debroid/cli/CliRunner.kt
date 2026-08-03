@@ -1,6 +1,11 @@
 package dev.shreyaspatil.debroid.cli
 
-import com.github.ajalt.clikt.core.*
+import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.CliktError
+import com.github.ajalt.clikt.core.PrintHelpMessage
+import com.github.ajalt.clikt.core.PrintMessage
+import com.github.ajalt.clikt.core.UsageError
+import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.default
 import com.github.ajalt.clikt.parameters.arguments.multiple
@@ -27,6 +32,7 @@ object CliRunner {
 
     private val json = Json { encodeDefaults = true }
 
+    @Suppress("MagicNumber", "MaxLineLength", "TooGenericExceptionCaught")
     private fun ensureDaemonAndSend(request: DaemonRequest) {
         if (!DaemonServer.isDaemonRunning()) {
             val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
@@ -49,11 +55,12 @@ object CliRunner {
             builder.start()
 
             var started = false
-            for (i in 1..50) {
+            var attempts = 0
+            while (!started && attempts < 50) {
+                attempts++
                 Thread.sleep(100)
                 if (DaemonServer.isDaemonRunning()) {
                     started = true
-                    break
                 }
             }
             if (!started) {
@@ -79,14 +86,15 @@ object CliRunner {
         }
     }
 
-    class DebroidCli : CliktCommand(
+    @Suppress("MagicNumber")
+    class DebroidCommand : CliktCommand(
         name = "debroid",
         help = "🤖 Debroid - Autonomous Debugger for Android"
     ) {
         init {
             versionOption(VERSION)
         }
-        private val port by option("--port", "-p", help = "Daemon server port").int().default(9876)
+        private val port by option("--port", "-p", help = "Daemon server port").int().default(DaemonConfig.PORT)
 
         override fun run() {
             DaemonConfig.PORT = port
@@ -121,7 +129,8 @@ object CliRunner {
     class LaunchCommand : CliktCommand(
         name = "launch",
         help = "Launches an application in suspended mode and attaches the debugger.",
-        epilog = "This is the safest way to debug initialization code. It forces the app to wait for the debugger before executing."
+        epilog = "This is the safest way to debug initialization code. " +
+            "It forces the app to wait for the debugger before executing."
     ) {
         private val appId by argument("app_id", help = "The Android Application ID (e.g., com.example.app) to launch.")
         override fun run() = ensureDaemonAndSend(DaemonRequest.Launch(appId))
@@ -169,12 +178,14 @@ object CliRunner {
     class CatchExceptionCommand : CliktCommand(
         name = "catch-exception",
         help = "Sets a breakpoint that triggers when an exception is thrown.",
-        epilog = "By default only UNCAUGHT exceptions are trapped. Use --caught to also trap caught exceptions, and (optionally) restrict to a specific exception class."
+        epilog = "By default only UNCAUGHT exceptions are trapped. Use --caught to also trap caught exceptions, " +
+            "and (optionally) restrict to a specific exception class."
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val className by argument(
             "class_name",
-            help = "Optional fully qualified exception class name (e.g., java.lang.NullPointerException). If omitted, traps all matching exceptions."
+            help = "Optional fully qualified exception class name (e.g., java.lang.NullPointerException). " +
+                "If omitted, traps all matching exceptions."
         ).optional()
         private val caught by option("--caught").flag("--no-caught", default = false)
         private val uncaught by option("--uncaught").flag("--no-uncaught", default = true)
@@ -352,6 +363,10 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Step(sessionId, threadId, action))
     }
 
+    class DebroidCli : CliktCommand(name = "debroid") {
+        override fun run() = Unit
+    }
+
     private fun createCli(): CliktCommand {
         return DebroidCli()
             .subcommands(
@@ -380,6 +395,7 @@ object CliRunner {
             )
     }
 
+    @Suppress("TooGenericExceptionCaught")
     fun execute(args: Array<String>) {
         val cli = createCli()
         if (args.isEmpty()) {

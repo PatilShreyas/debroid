@@ -1,11 +1,19 @@
 package dev.shreyaspatil.debroid.cli
 
 import dev.shreyaspatil.debroid.adb.DebugException
-import dev.shreyaspatil.debroid.cli.models.*
+import dev.shreyaspatil.debroid.cli.models.CliDebugError
+import dev.shreyaspatil.debroid.cli.models.CliDetachedResult
+import dev.shreyaspatil.debroid.cli.models.CliExceptionBreakpointResult
+import dev.shreyaspatil.debroid.cli.models.CliShutdownResult
+import dev.shreyaspatil.debroid.cli.models.CliStatusResult
+import dev.shreyaspatil.debroid.cli.models.CliWatchpointResult
+import dev.shreyaspatil.debroid.cli.models.DaemonRequest
+import dev.shreyaspatil.debroid.cli.models.toCli
 import dev.shreyaspatil.debroid.jdi.JdiSessionManager
-import dev.shreyaspatil.debroid.models.*
+import dev.shreyaspatil.debroid.models.StepAction
+import dev.shreyaspatil.debroid.models.VariableScope
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -24,7 +32,7 @@ object DaemonServer {
     fun isDaemonRunning(): Boolean {
         return try {
             Socket(DaemonConfig.HOST, DaemonConfig.PORT).use { true }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
@@ -45,6 +53,7 @@ object DaemonServer {
         }
     }
 
+    @Suppress("TooGenericExceptionCaught", "SwallowedException")
     private fun handleClient(socket: Socket) {
         try {
             val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
@@ -66,6 +75,7 @@ object DaemonServer {
         }
     }
 
+    @Suppress("TooGenericExceptionCaught", "MagicNumber", "LongMethod", "CyclomaticComplexMethod")
     private fun processCommand(request: DaemonRequest): String {
         return try {
             when (request) {

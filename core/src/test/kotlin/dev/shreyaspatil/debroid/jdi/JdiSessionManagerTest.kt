@@ -2,9 +2,15 @@ package dev.shreyaspatil.debroid.jdi
 
 import dev.shreyaspatil.debroid.adb.AdbManager
 import dev.shreyaspatil.debroid.adb.DebugException
-import io.mockk.*
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.unmockkAll
+import io.mockk.verify
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -44,7 +50,9 @@ class JdiSessionManagerTest {
         every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
         every {
             adbManager.findPid(any())
-        } returns Result.failure(DebugException(dev.shreyaspatil.debroid.models.ErrorCode.APP_NOT_DEBUGGABLE, "not currently running"))
+        } returns Result.failure(
+            DebugException(dev.shreyaspatil.debroid.models.ErrorCode.APP_NOT_DEBUGGABLE, "not currently running")
+        )
 
         val exception = assertThrows<DebugException> {
             sessionManager.attachToRunningApp("com.test.app")

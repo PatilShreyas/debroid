@@ -1,19 +1,47 @@
 package dev.shreyaspatil.debroid.jdi
 
-import com.sun.jdi.*
-import com.sun.jdi.event.*
+import com.sun.jdi.AbsentInformationException
+import com.sun.jdi.ArrayReference
+import com.sun.jdi.Location
+import com.sun.jdi.ObjectReference
+import com.sun.jdi.PrimitiveValue
+import com.sun.jdi.ReferenceType
+import com.sun.jdi.StringReference
+import com.sun.jdi.ThreadReference
+import com.sun.jdi.Value
+import com.sun.jdi.VirtualMachine
+import com.sun.jdi.event.AccessWatchpointEvent
+import com.sun.jdi.event.BreakpointEvent
+import com.sun.jdi.event.ClassPrepareEvent
+import com.sun.jdi.event.ExceptionEvent
+import com.sun.jdi.event.ModificationWatchpointEvent
+import com.sun.jdi.event.StepEvent
+import com.sun.jdi.event.VMDeathEvent
+import com.sun.jdi.event.VMDisconnectEvent
 import com.sun.jdi.request.BreakpointRequest
+import com.sun.jdi.request.ClassPrepareRequest
 import com.sun.jdi.request.EventRequest
 import com.sun.jdi.request.ExceptionRequest
 import com.sun.jdi.request.StepRequest
 import com.sun.jdi.request.WatchpointRequest
 import dev.shreyaspatil.debroid.adb.AdbManager
 import dev.shreyaspatil.debroid.adb.DebugException
-import dev.shreyaspatil.debroid.models.*
+import dev.shreyaspatil.debroid.models.BreakpointInfo
+import dev.shreyaspatil.debroid.models.DebugEventPayload
+import dev.shreyaspatil.debroid.models.ErrorCode
+import dev.shreyaspatil.debroid.models.EventPollResult
+import dev.shreyaspatil.debroid.models.EventType
+import dev.shreyaspatil.debroid.models.ObjectInspectionResult
+import dev.shreyaspatil.debroid.models.PauseStateResult
+import dev.shreyaspatil.debroid.models.SessionStatus
+import dev.shreyaspatil.debroid.models.StackFrameInfo
+import dev.shreyaspatil.debroid.models.StepAction
+import dev.shreyaspatil.debroid.models.VariableInfo
+import dev.shreyaspatil.debroid.models.VariableScope
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class JdiSession(
     val sessionId: String,
@@ -33,9 +61,7 @@ class JdiSession(
     private val deferredWatchpoints = ConcurrentHashMap<String, MutableList<DeferredWatchpoint>>()
     private val exceptionRequests = ConcurrentHashMap<String, ExceptionRequest>()
     private val watchpointRequests = ConcurrentHashMap<String, MutableList<WatchpointRequest>>()
-    private val classPrepareRequest = java.util.concurrent.atomic.AtomicReference<com.sun.jdi.request.ClassPrepareRequest?>(
-        null
-    )
+    private val classPrepareRequest = AtomicReference<ClassPrepareRequest?>(null)
 
     private data class DeferredBreakpoint(val id: String, val file: String, val line: Int)
     private data class DeferredWatchpoint(
@@ -51,13 +77,13 @@ class JdiSession(
     // Event buffer for polling
     private val eventQueueLock = Any()
     private val eventQueueBuffer = ArrayDeque<DebugEventPayload>()
+
     @Volatile private var eventQueueOffset = 0
-    private val MAX_EVENT_BUFFER_SIZE = 1000
 
     private fun pushEvent(payload: DebugEventPayload) {
         synchronized(eventQueueLock) {
             eventQueueBuffer.add(payload)
-            while (eventQueueBuffer.size > MAX_EVENT_BUFFER_SIZE) {
+            if (eventQueueBuffer.size > MAX_EVENT_BUFFER_SIZE) {
                 eventQueueBuffer.removeFirst()
                 eventQueueOffset++
             }
@@ -201,7 +227,13 @@ class JdiSession(
         return id
     }
 
-    private fun bindWatchpointForRefType(id: String, refType: ReferenceType, fieldName: String, access: Boolean, modify: Boolean) {
+    private fun bindWatchpointForRefType(
+        id: String,
+        refType: ReferenceType,
+        fieldName: String,
+        access: Boolean,
+        modify: Boolean
+    ) {
         val erm = vm.eventRequestManager()
         val field = refType.fieldByName(fieldName) ?: return
         val requests = watchpointRequests.computeIfAbsent(id) { mutableListOf() }
@@ -221,7 +253,7 @@ class JdiSession(
     }
 
     /**
-     * Lazily creates and enables a single shared [com.sun.jdi.request.ClassPrepareRequest]
+     * Lazily creates and enables a single shared [ClassPrepareRequest]
      * used to resolve deferred breakpoints and watchpoints. Avoid creating one per deferred
      * item (which would leak requests and cause duplicate events).
      */
@@ -238,7 +270,7 @@ class JdiSession(
         deferredBreakpoints.remove(id)
         val requests = jdiBreakpointRequests.remove(id)
         requests?.forEach { req ->
-            try { vm.eventRequestManager().deleteEventRequest(req) } catch (e: Exception) {}
+            try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
         }
         maybeDisableClassPrepareRequest()
         return info != null
@@ -246,7 +278,7 @@ class JdiSession(
 
     fun removeExceptionBreakpoint(id: String): Boolean {
         val req = exceptionRequests.remove(id) ?: return false
-        try { vm.eventRequestManager().deleteEventRequest(req) } catch (e: Exception) {}
+        try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
         return true
     }
 
@@ -259,7 +291,7 @@ class JdiSession(
             return removed
         }
         requests.forEach { req ->
-            try { vm.eventRequestManager().deleteEventRequest(req) } catch (e: Exception) {}
+            try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
         }
         return true
     }
@@ -288,7 +320,7 @@ class JdiSession(
     private fun maybeDisableClassPrepareRequest() {
         if (deferredBreakpoints.isEmpty() && deferredWatchpoints.isEmpty()) {
             classPrepareRequest.getAndSet(null)?.let { req ->
-                try { vm.eventRequestManager().deleteEventRequest(req) } catch (e: Exception) {}
+                try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
             }
         }
     }
@@ -362,6 +394,7 @@ class JdiSession(
      * @param expr The expression to evaluate.
      * @return VariableInfo representing the evaluated result.
      */
+    @Suppress("ReturnCount")
     fun evaluateExpression(threadId: String, expr: String): VariableInfo {
         val thread = findThread(threadId)
         if (!thread.isSuspended) {
@@ -409,10 +442,9 @@ class JdiSession(
      * @return A map of variable names to their extracted values.
      */
     fun getCoroutineFrame(continuationObjectId: String): Map<String, VariableInfo> {
-        val objRef =
-            findObjectReference(
-                continuationObjectId.toLongOrNull() ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "Invalid continuation object ID")
-            )
+        val id = continuationObjectId.toLongOrNull()
+            ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "Invalid continuation object ID")
+        val objRef = findObjectReference(id)
         val refType = objRef.referenceType()
 
         val fields = refType.allFields().filter { !it.isStatic }
@@ -425,6 +457,7 @@ class JdiSession(
         return result
     }
 
+    @Suppress("ThrowsCount")
     fun setVariable(threadId: String, varName: String, newValueStr: String): VariableInfo {
         val thread = findThread(threadId)
         if (!thread.isSuspended) {
@@ -665,7 +698,7 @@ class JdiSession(
                             }
                         }
                     }
-                } catch (e: Exception) {}
+                } catch (_: Exception) {}
             }
         }
         throw DebugException(
@@ -738,6 +771,7 @@ class JdiSession(
         )
     }
 
+    @Suppress("NestedBlockDepth")
     private fun runEventListener() {
         val eventQueue = vm.eventQueue()
         while (isConnected.get()) {
@@ -800,7 +834,10 @@ class JdiSession(
                                             reqs.add(bpReq)
                                         }
                                         jdiBreakpointRequests[bpId] = reqs
-                                        activeBreakpoints[bpId]?.let { activeBreakpoints[bpId] = it.copy(verified = true) }
+                                        val existing = activeBreakpoints[bpId]
+                                        if (existing != null) {
+                                            activeBreakpoints[bpId] = existing.copy(verified = true)
+                                        }
                                         iter.remove()
                                     }
                                 } catch (e: Throwable) {
@@ -910,12 +947,16 @@ class JdiSession(
 
     fun detach() {
         isConnected.set(false)
-        try { vm.dispose() } catch (e: Exception) {}
+        try { vm.dispose() } catch (_: Exception) {}
         adbManager.removePortForward(localPort)
         // If this session was launched suspended via `am set-debug-app -w`, the wait-for-debugger
         // flag persists on the device. Clear it so the next normal launch doesn't hang (B4).
         if (clearDebugAppOnDetach) {
-            try { adbManager.clearDebugApp() } catch (e: Exception) {}
+            try { adbManager.clearDebugApp() } catch (_: Exception) {}
         }
+    }
+
+    companion object {
+        private const val MAX_EVENT_BUFFER_SIZE = 1000
     }
 }

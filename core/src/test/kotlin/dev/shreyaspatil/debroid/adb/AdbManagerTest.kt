@@ -1,9 +1,13 @@
 package dev.shreyaspatil.debroid.adb
 
 import dev.shreyaspatil.debroid.models.ErrorCode
-import io.mockk.*
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.unmockkAll
+import io.mockk.verify
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
@@ -25,7 +29,9 @@ class AdbManagerTest {
 
     @Test
     fun `isAppDebuggable returns true if run-as succeeds`() {
-        every { commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any()) } returns Result.success("")
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any())
+        } returns Result.success("")
 
         val result = adbManager.isAppDebuggable("com.test.app")
 
@@ -35,8 +41,12 @@ class AdbManagerTest {
 
     @Test
     fun `isAppDebuggable returns true if dumpsys output contains flags with DEBUGGABLE`() {
-        every { commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any()) } returns Result.success("run-as: package not debuggable")
-        every { commandRunner.runCommand(listOf("adb", "shell", "dumpsys", "package", "com.test.app"), any()) } returns Result.success("flags=[ DEBUGGABLE ]")
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any())
+        } returns Result.success("run-as: package not debuggable")
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "dumpsys", "package", "com.test.app"), any())
+        } returns Result.success("flags=[ DEBUGGABLE ]")
 
         val result = adbManager.isAppDebuggable("com.test.app")
 
@@ -46,7 +56,9 @@ class AdbManagerTest {
 
     @Test
     fun `isAppDebuggable returns error if app not installed`() {
-        every { commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any()) } returns Result.success("run-as: unknown package com.test.app")
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any())
+        } returns Result.success("run-as: unknown package com.test.app")
 
         val result = adbManager.isAppDebuggable("com.test.app")
 
@@ -86,7 +98,8 @@ class AdbManagerTest {
 
     @Test
     fun `forwardJdwpPort successfully executes`() {
-        every { commandRunner.runCommand(listOf("adb", "forward", "tcp:8080", "jdwp:12345"), any()) } returns Result.success("")
+        val cmd = listOf("adb", "forward", "tcp:8080", "jdwp:12345")
+        every { commandRunner.runCommand(cmd, any()) } returns Result.success("")
 
         val result = adbManager.forwardJdwpPort(8080, 12345)
 
@@ -95,7 +108,8 @@ class AdbManagerTest {
 
     @Test
     fun `removePortForward executes correctly`() {
-        every { commandRunner.runCommand(listOf("adb", "forward", "--remove", "tcp:8080"), any()) } returns Result.success("")
+        val removeCmd = listOf("adb", "forward", "--remove", "tcp:8080")
+        every { commandRunner.runCommand(removeCmd, any()) } returns Result.success("")
 
         adbManager.removePortForward(8080)
 
@@ -128,14 +142,17 @@ class AdbManagerTest {
             Category: "android.intent.category.LAUNCHER"
             com.test.app/com.test.app.MainActivity
         """.trimIndent()
-        every {
-            commandRunner.runCommand(listOf("adb", "shell", "cmd", "package", "resolve-activity", "--brief", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "com.test.app"), any())
-        } returns Result.success(resolveOutput)
+        val resolveCmd = listOf(
+            "adb", "shell", "cmd", "package", "resolve-activity",
+            "--brief", "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER", "com.test.app"
+        )
+        every { commandRunner.runCommand(resolveCmd, any()) } returns Result.success(resolveOutput)
 
         // mock am start
-        every {
-            commandRunner.runCommand(listOf("adb", "shell", "am", "start", "-D", "-n", "com.test.app/com.test.app.MainActivity"), any())
-        } returns Result.success("Starting: Intent { cmp=com.test.app/.MainActivity }")
+        val amStartCmd = listOf("adb", "shell", "am", "start", "-D", "-n", "com.test.app/com.test.app.MainActivity")
+        every { commandRunner.runCommand(amStartCmd, any()) } returns
+            Result.success("Starting: Intent { cmp=com.test.app/.MainActivity }")
 
         // mock findPid
         every {
@@ -156,17 +173,28 @@ class AdbManagerTest {
         } returns Result.success("")
 
         // mock getMainActivity (resolve-activity returns nothing, pm dump returns nothing)
-        every {
-            commandRunner.runCommand(listOf("adb", "shell", "cmd", "package", "resolve-activity", "--brief", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "com.test.app"), any())
-        } returns Result.success("")
+        val resolveCmd = listOf(
+            "adb", "shell", "cmd", "package", "resolve-activity",
+            "--brief", "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER", "com.test.app"
+        )
+        every { commandRunner.runCommand(resolveCmd, any()) } returns Result.success("")
         every {
             commandRunner.runCommand(listOf("adb", "shell", "pm", "dump", "com.test.app"), any())
         } returns Result.success("")
 
         // mock monkey
-        every {
-            commandRunner.runCommand(listOf("adb", "shell", "monkey", "-p", "com.test.app", "-c", "android.intent.category.LAUNCHER", "1"), any())
-        } returns Result.success("")
+        val monkeyCmd = listOf(
+            "adb",
+            "shell",
+            "monkey",
+            "-p",
+            "com.test.app",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1"
+        )
+        every { commandRunner.runCommand(monkeyCmd, any()) } returns Result.success("")
 
         // mock findPid
         every {

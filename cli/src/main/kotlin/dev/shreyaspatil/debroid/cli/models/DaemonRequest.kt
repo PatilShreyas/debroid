@@ -24,7 +24,11 @@ sealed class DaemonRequest {
         val notifyUncaught: Boolean = true
     ) : DaemonRequest()
 
-    @Serializable data class RemoveCatchException(val sessionId: String, val exceptionBreakpointId: String) : DaemonRequest()
+    @Serializable
+    data class RemoveCatchException(
+        val sessionId: String,
+        val exceptionBreakpointId: String
+    ) : DaemonRequest()
 
     @Serializable data class Watch(
         val sessionId: String,
@@ -53,13 +57,23 @@ sealed class DaemonRequest {
 
     @Serializable data class Resume(val sessionId: String, val threadId: String) : DaemonRequest()
 
-    @Serializable data class Poll(val sessionId: String, val cursor: String, val withStacktrace: Boolean = false) : DaemonRequest()
+    @Serializable
+    data class Poll(
+        val sessionId: String,
+        val cursor: String,
+        val withStacktrace: Boolean = false
+    ) : DaemonRequest()
 
     @Serializable data class Frames(val sessionId: String, val threadId: String) : DaemonRequest()
 
     @Serializable data class Coroutine(val sessionId: String, val continuationObjectId: String) : DaemonRequest()
 
-    @Serializable data class Inspect(val sessionId: String, val objectId: String, val maxDepth: Int = 1) : DaemonRequest()
+    @Serializable
+    data class Inspect(
+        val sessionId: String,
+        val objectId: String,
+        val maxDepth: Int = 1
+    ) : DaemonRequest()
 
     @Serializable data class Step(val sessionId: String, val threadId: String, val action: StepAction) : DaemonRequest()
 }

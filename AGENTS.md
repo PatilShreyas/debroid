@@ -27,9 +27,12 @@ This layer acts as the bridge between the AI Agent (the terminal) and the `core`
 
 ## 🛠️ How to Work on This Project
 
-### 1. Build and Test Before Committing
-Whenever you make a change, verify that the project compiles and the tests pass:
+### 1. Build, Test, and Lint Before Committing
+Whenever you make a change, verify that the project compiles, static analysis passes, and all tests pass:
 ```bash
+# Run static analysis (Detekt)
+./gradlew detekt
+
 # Run tests
 ./gradlew test
 

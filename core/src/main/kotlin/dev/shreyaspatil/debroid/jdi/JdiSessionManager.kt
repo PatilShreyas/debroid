@@ -63,11 +63,12 @@ open class JdiSessionManager(
         // Retry connection up to 10 times (JDWP port forward might take a split second)
         var vm: VirtualMachine? = null
         var lastException: Exception? = null
+        var attempts = 0
 
-        for (i in 1..10) {
+        while (vm == null && attempts < 10) {
+            attempts++
             try {
                 vm = jdiConnector.attach("localhost", port)
-                break
             } catch (e: Exception) {
                 lastException = e
                 Thread.sleep(300)
@@ -134,7 +135,10 @@ class DefaultJdiConnector : JdiConnector {
         val vmm = Bootstrap.virtualMachineManager()
         val socketConnector = vmm.attachingConnectors()
             .firstOrNull { it.name() == "com.sun.jdi.SocketAttach" }
-            ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "SocketAttach connector not found in JDI VirtualMachineManager")
+            ?: throw DebugException(
+                ErrorCode.INTERNAL_ERROR,
+                "SocketAttach connector not found in JDI VirtualMachineManager"
+            )
 
         val arguments = socketConnector.defaultArguments()
         arguments["hostname"]?.setValue(host)

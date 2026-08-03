@@ -80,7 +80,7 @@ class AdbManager(
                     )
                 } else {
                     val isDebuggable = (output.contains("flags=[") || output.contains("pkgFlags=[")) &&
-                            output.contains("DEBUGGABLE")
+                        output.contains("DEBUGGABLE")
                     Result.success(isDebuggable)
                 }
             },
@@ -140,11 +140,17 @@ class AdbManager(
      * @return Result containing the PID once the app has successfully started.
      */
     private fun getMainActivity(appId: String): String? {
-        val result =
-            runAdb("shell", "cmd", "package", "resolve-activity", "--brief", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", appId)
+        val result = runAdb(
+            "shell", "cmd", "package", "resolve-activity",
+            "--brief", "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER", appId
+        )
         val defaultActivity = result.getOrNull()?.lines()?.lastOrNull { it.contains("/") }?.trim()
 
-        if (defaultActivity != null && !defaultActivity.contains("leakcanary", ignoreCase = true) && defaultActivity.startsWith(appId)) {
+        val isMain = defaultActivity != null &&
+            !defaultActivity.contains("leakcanary", ignoreCase = true) &&
+            defaultActivity.startsWith(appId)
+        if (isMain) {
             return defaultActivity
         }
 
@@ -187,7 +193,9 @@ class AdbManager(
 
         val maxRetries = 10
         val sleepMillis = 500L
-        for (retry in 1..maxRetries) {
+        var attempt = 0
+        while (attempt < maxRetries) {
+            attempt++
             Thread.sleep(sleepMillis)
             val pidRes = findPid(appId)
             if (pidRes.isSuccess) return pidRes
