@@ -353,6 +353,51 @@ class JdiSessionTest {
         assertEquals(1, withTraceResult.events[0].stacktrace?.size)
     }
 
+    @Test
+    fun `pollEvents is thread safe and calculates cursors correctly during concurrent pushes and evictions`() {
+        val pushMethod = JdiSession::class.java.getDeclaredMethod("pushEvent", dev.shreyaspatil.debroid.models.DebugEventPayload::class.java)
+        pushMethod.isAccessible = true
+
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
+        val pushCount = 1500
+
+        val pushTask = Runnable {
+            for (i in 0 until pushCount) {
+                val payload = dev.shreyaspatil.debroid.models.DebugEventPayload(
+                    eventType = dev.shreyaspatil.debroid.models.EventType.BREAKPOINT_HIT,
+                    sessionId = "sess_1",
+                    threadId = "1",
+                    threadName = "main",
+                    location = "Main.kt:$i",
+                    className = "Main"
+                )
+                pushMethod.invoke(session, payload)
+            }
+        }
+
+        val pollResults = java.util.concurrent.ConcurrentLinkedQueue<dev.shreyaspatil.debroid.models.EventPollResult>()
+        val pollTask = Runnable {
+            for (i in 0 until 50) {
+                val res = session.pollEvents("0")
+                pollResults.add(res)
+                Thread.sleep(1)
+            }
+        }
+
+        val futures = listOf(
+            executor.submit(pushTask),
+            executor.submit(pollTask),
+            executor.submit(pollTask)
+        )
+
+        futures.forEach { it.get() }
+        executor.shutdown()
+
+        val finalPoll = session.pollEvents("0")
+        assertEquals(1000, finalPoll.events.size)
+        assertEquals("1500", finalPoll.nextCursor)
+    }
+
     // ---------------- B1: deferred breakpoints ----------------
 
     @Test
