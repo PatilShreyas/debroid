@@ -24,9 +24,19 @@ class AdbManagerTest {
     }
 
     @Test
-    fun `isAppDebuggable returns true if output contains DEBUGGABLE`() {
-        val output = "flags=[ DEBUGGABLE ]"
-        every { commandRunner.runCommand(any(), any()) } returns Result.success(output)
+    fun `isAppDebuggable returns true if run-as succeeds`() {
+        every { commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any()) } returns Result.success("")
+
+        val result = adbManager.isAppDebuggable("com.test.app")
+
+        assertTrue(result.isSuccess)
+        assertTrue(result.getOrNull()!!)
+    }
+
+    @Test
+    fun `isAppDebuggable returns true if dumpsys output contains flags with DEBUGGABLE`() {
+        every { commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any()) } returns Result.success("run-as: package not debuggable")
+        every { commandRunner.runCommand(listOf("adb", "shell", "dumpsys", "package", "com.test.app"), any()) } returns Result.success("flags=[ DEBUGGABLE ]")
 
         val result = adbManager.isAppDebuggable("com.test.app")
 
@@ -36,8 +46,7 @@ class AdbManagerTest {
 
     @Test
     fun `isAppDebuggable returns error if app not installed`() {
-        val output = "Unable to find package com.test.app"
-        every { commandRunner.runCommand(any(), any()) } returns Result.success(output)
+        every { commandRunner.runCommand(listOf("adb", "shell", "run-as", "com.test.app", "true"), any()) } returns Result.success("run-as: unknown package com.test.app")
 
         val result = adbManager.isAppDebuggable("com.test.app")
 

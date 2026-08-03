@@ -57,6 +57,21 @@ class AdbManager(
     }
 
     fun isAppDebuggable(appId: String): Result<Boolean> {
+        // 1. Primary check: `run-as <appId> true` (Android's native debuggability check)
+        val runAsRes = runAdb("shell", "run-as", appId, "true")
+        if (runAsRes.isSuccess) {
+            val output = runAsRes.getOrThrow().trim()
+            if (output.isEmpty() || output == "true") {
+                return Result.success(true)
+            }
+            if (output.contains("unknown package") || output.contains("Unable to find package")) {
+                return Result.failure(
+                    DebugException(ErrorCode.APP_NOT_DEBUGGABLE, "Package $appId is not installed on the device.")
+                )
+            }
+        }
+
+        // 2. Fallback check: `dumpsys package <appId>` checking package flags
         return runAdb("shell", "dumpsys", "package", appId).fold(
             onSuccess = { output ->
                 if (output.contains("Unable to find package") || output.isBlank()) {
@@ -64,7 +79,8 @@ class AdbManager(
                         DebugException(ErrorCode.APP_NOT_DEBUGGABLE, "Package $appId is not installed on the device.")
                     )
                 } else {
-                    val isDebuggable = output.contains("DEBUGGABLE") || output.contains("flags=[") && output.contains("DEBUGGABLE")
+                    val isDebuggable = (output.contains("flags=[") || output.contains("pkgFlags=[")) &&
+                            output.contains("DEBUGGABLE")
                     Result.success(isDebuggable)
                 }
             },

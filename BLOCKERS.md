@@ -33,14 +33,6 @@ The daemon listens on `127.0.0.1:9876` with no auth, no encryption, and exposes 
 ### H11. `break` command silently discards `condition`
 `DaemonRequest.Break` has no `condition` field; `DaemonServer` passes `condition = null`. The `BreakpointInfo.condition` field and the SKILL's mention of conditional breakpoints become dead. Either implement a basic JDI `Conditional` filter or remove the field from `BreakpointInfo` and stop advertising the feature.
 
-### H12. `isAppDebuggable` has dead logic and is fragile
-`AdbManager.kt:67`:
-```kotlin
-val isDebuggable = output.contains("DEBUGGABLE") || output.contains("flags=[") && output.contains("DEBUGGABLE")
-```
-Due to precedence this reduces to `contains("DEBUGGABLE"). Only the first clause matters. Also `dumpsys package` may print `DEBUGGABLE` only inside `grFlags=...` or `pkgFlags=...` lines — substring match is brittle and can give false positives.
-**Fix:** parse `flag=0x...` or the dedicated `debuggable=true` line. Better: use `adb shell run-as <pkg> true` (works iff debuggable).
-
 ### H13. `findPid` ps fallback is loose
 `AdbManager.kt:101`: `firstOrNull { it.contains(appId) }` will match an unrelated process whose name contains `appId` as a substring (`com.foo` will match `com.foo.bar` and `com.foo.sync`). Use exact match on the last whitespace-separated column, or even tighter match by user+name.
 
@@ -145,6 +137,7 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **H4.** `pollEvents` thread safety and JMM visibility fixed in `JdiSession.kt`: synchronized `pushEvent` and `pollEvents` buffer snapshot on `eventQueueLock` using `ArrayDeque` with `@Volatile eventQueueOffset`.
 - **H8.** Command names in `README.md` aligned with actual CLI subcommands (`break`, `stop`, `pause-state`, `step`, etc.).
 - **H9.** Step actions in `SKILL.md` and `README.md` verified and aligned with `StepAction` enum values (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`).
+- **H12.** `isAppDebuggable` rewritten in `AdbManager.kt`: uses Android's native `run-as <app_id> true` check as primary mechanism, with package flags check (`flags=[` / `pkgFlags=[`) as fallback.
 
 Additional hardening during integration testing:
 - JDI `InternalError` from ART's `SourceDebugExtension` parser no longer kills the event listener thread (catch `Throwable` in event loop + `safeSourceName()` helper).
