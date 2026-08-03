@@ -3,7 +3,12 @@ set -e
 
 VERSION=$(cat cli/version.txt | xargs)
 echo "🔨 Building Debroid CLI v$VERSION..."
-./gradlew :cli:jar
+if ./gradlew :cli:jar --quiet --console=plain; then
+    echo "✅ CLI build successful!"
+else
+    echo "❌ CLI build failed!"
+    exit 1
+fi
 
 JAR_FILE="cli/build/libs/debroid-$VERSION.jar"
 
