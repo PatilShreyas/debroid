@@ -14,10 +14,6 @@ Issues remaining after the B1–B6 blocker fixes. Grouped by severity.
 `cli` has zero tests. Polymorphic `DaemonRequest` serialization, `Cli*` conversions, `DemoCLI.parse` arg handling — all unverified. The test coverage in `core` is decent but the reflection-based test hack (`JdiSessionTest.kt:298`) accessing the private buffer has an unchecked-cast warning and is brittle.
 **Fix:** add cli tests: polymorphic round-trip of every `DaemonRequest` subtype, `CliModels` `toCli()` conversions, argparse of each subcommand, and replace the reflection hack with a test-visible `pushEvent`/`peekEvents` API.
 
-### H4. `pollEvents` offset is not thread-safe / visibility is wrong
-`eventQueueOffset` is a plain `Int` modified on the event-listener thread (`JdiSession.kt:41`) and read on the client thread (`JdiSession.kt:598`). There is no happens-before relationship — on ARM (Apple Silicon) the reader can see a stale offset and an inconsistent buffer/offset pair, causing skipped or duplicated events. Also `CopyOnWriteArrayList.removeAt(0)` is O(n).
-**Fix:** make `eventQueueOffset` an `AtomicInteger`, snapshot buffer+offset under `synchronized(this)`, and consider `ArrayDeque` with a single lock instead of COW.
-
 ### H5. Pretty-printed CLI responses waste AI-agent tokens
 `DaemonServer`'s `Json { prettyPrint = true }` is the opposite of what you want for AI consumers — every response carries indentation whitespace that costs tokens (and parsing time). The skill explicitly markets "machine-readable JSON"; make it compact by default.
 **Fix:** `prettyPrint = false` (or add `--pretty` for human use). Same for `printHelp` / version output.
@@ -154,6 +150,7 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **B5.** Deferred watchpoints use per-class list (`Map<String, List<DeferredWatchpoint>>`); multiple watchpoints per class no longer overwrite.
 - **B6.** `remove-break`, `remove-catch-exception`, `remove-watch` commands added; all JDI requests tracked and deletable; orphaned `ClassPrepareRequest` auto-disabled when deferral queue empties.
 - **H2.** `debroid stop` daemon shutdown command added (`DaemonRequest.Shutdown`); detaches all active debug sessions, cleans up ADB port forwards, and gracefully shuts down the background server process.
+- **H4.** `pollEvents` thread safety and JMM visibility fixed in `JdiSession.kt`: synchronized `pushEvent` and `pollEvents` buffer snapshot on `eventQueueLock` using `ArrayDeque` with `@Volatile eventQueueOffset`.
 
 Additional hardening during integration testing:
 - JDI `InternalError` from ART's `SourceDebugExtension` parser no longer kills the event listener thread (catch `Throwable` in event loop + `safeSourceName()` helper).

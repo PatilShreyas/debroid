@@ -49,15 +49,18 @@ class JdiSession(
     private val watchpointIdCounter = AtomicInteger(1)
 
     // Event buffer for polling
-    private val eventQueueBuffer = CopyOnWriteArrayList<DebugEventPayload>()
-    private var eventQueueOffset = 0
+    private val eventQueueLock = Any()
+    private val eventQueueBuffer = ArrayDeque<DebugEventPayload>()
+    @Volatile private var eventQueueOffset = 0
     private val MAX_EVENT_BUFFER_SIZE = 1000
 
     private fun pushEvent(payload: DebugEventPayload) {
-        eventQueueBuffer.add(payload)
-        while (eventQueueBuffer.size > MAX_EVENT_BUFFER_SIZE) {
-            eventQueueBuffer.removeAt(0)
-            eventQueueOffset++
+        synchronized(eventQueueLock) {
+            eventQueueBuffer.add(payload)
+            while (eventQueueBuffer.size > MAX_EVENT_BUFFER_SIZE) {
+                eventQueueBuffer.removeFirst()
+                eventQueueOffset++
+            }
         }
     }
 
@@ -757,24 +760,28 @@ class JdiSession(
 
     fun pollEvents(sinceCursor: String, withStacktrace: Boolean = false): EventPollResult {
         val cursorIndex = sinceCursor.toIntOrNull() ?: 0
-        val actualStartIndex = maxOf(0, cursorIndex - eventQueueOffset)
+        val eventsToReturn: List<DebugEventPayload>
+        val nextCursorStr: String
 
-        val subList = if (actualStartIndex < eventQueueBuffer.size) {
-            eventQueueBuffer.subList(actualStartIndex, eventQueueBuffer.size)
-        } else {
-            emptyList()
-        }
-        val nextCursor = (eventQueueOffset + eventQueueBuffer.size).toString()
-
-        val events = if (withStacktrace) {
-            subList.toList()
-        } else {
-            subList.map { it.copy(stacktrace = null) }
+        synchronized(eventQueueLock) {
+            val actualStartIndex = maxOf(0, cursorIndex - eventQueueOffset)
+            val rawList = eventQueueBuffer.toList()
+            val rawSubList = if (actualStartIndex < rawList.size) {
+                rawList.subList(actualStartIndex, rawList.size)
+            } else {
+                emptyList()
+            }
+            eventsToReturn = if (withStacktrace) {
+                rawSubList
+            } else {
+                rawSubList.map { it.copy(stacktrace = null) }
+            }
+            nextCursorStr = (eventQueueOffset + eventQueueBuffer.size).toString()
         }
 
         return EventPollResult(
-            events = events,
-            nextCursor = nextCursor,
+            events = eventsToReturn,
+            nextCursor = nextCursorStr,
             hasMore = false
         )
     }

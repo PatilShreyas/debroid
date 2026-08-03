@@ -338,7 +338,7 @@ class JdiSessionTest {
         bufferField.isAccessible = true
         val buffer = bufferField.get(
             session
-        ) as java.util.concurrent.CopyOnWriteArrayList<dev.shreyaspatil.debroid.models.DebugEventPayload>
+        ) as MutableCollection<dev.shreyaspatil.debroid.models.DebugEventPayload>
         buffer.add(payload)
 
         // without stacktrace
