@@ -34,7 +34,7 @@ open class JdiSessionManager(
         val pid = pidRes.getOrThrow()
 
         // 3. Attach JDI
-        return attachToPid(appId, pid)
+        return attachToPid(appId, pid, clearDebugAppOnDetach = true)
     }
 
     fun attachToRunningApp(appId: String): JdiSession {
@@ -51,10 +51,10 @@ open class JdiSessionManager(
         val pid = adbManager.findPid(appId).getOrThrow()
 
         // 3. Attach JDI
-        return attachToPid(appId, pid)
+        return attachToPid(appId, pid, clearDebugAppOnDetach = false)
     }
 
-    private fun attachToPid(appId: String, pid: Int): JdiSession {
+    private fun attachToPid(appId: String, pid: Int, clearDebugAppOnDetach: Boolean): JdiSession {
         val port = findAvailableLocalPort()
         adbManager.forwardJdwpPort(port, pid).getOrThrow()
 
@@ -67,7 +67,7 @@ open class JdiSessionManager(
         for (i in 1..10) {
             try {
                 vm = jdiConnector.attach("localhost", port)
-                if (vm != null) break
+                break
             } catch (e: Exception) {
                 lastException = e
                 Thread.sleep(300)
@@ -83,7 +83,14 @@ open class JdiSessionManager(
         }
 
         val session =
-            JdiSession(sessionId = sessionId, appId = appId, localPort = port, vm = vm, adbManager = adbManager)
+            JdiSession(
+                sessionId = sessionId,
+                appId = appId,
+                localPort = port,
+                vm = vm,
+                adbManager = adbManager,
+                clearDebugAppOnDetach = clearDebugAppOnDetach
+            )
         sessions[sessionId] = session
         return session
     }

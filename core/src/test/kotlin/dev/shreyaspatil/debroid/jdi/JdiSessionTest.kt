@@ -1,11 +1,12 @@
 package dev.shreyaspatil.debroid.jdi
 
 import com.sun.jdi.*
-import com.sun.jdi.request.BreakpointRequest
+import com.sun.jdi.request.*
 import com.sun.jdi.request.EventRequest
 import com.sun.jdi.request.EventRequestManager
 import com.sun.jdi.request.StepRequest
 import dev.shreyaspatil.debroid.adb.AdbManager
+import dev.shreyaspatil.debroid.models.*
 import io.mockk.*
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
@@ -294,10 +295,12 @@ class JdiSessionTest {
                 dev.shreyaspatil.debroid.models.StackFrameInfo(0, "run", "Main", "Main.kt", 10, null)
             )
         )
-        
+
         val bufferField = JdiSession::class.java.getDeclaredField("eventQueueBuffer")
         bufferField.isAccessible = true
-        val buffer = bufferField.get(session) as java.util.concurrent.CopyOnWriteArrayList<dev.shreyaspatil.debroid.models.DebugEventPayload>
+        val buffer = bufferField.get(
+            session
+        ) as java.util.concurrent.CopyOnWriteArrayList<dev.shreyaspatil.debroid.models.DebugEventPayload>
         buffer.add(payload)
 
         // without stacktrace
@@ -310,5 +313,172 @@ class JdiSessionTest {
         assertEquals(1, withTraceResult.events.size)
         assertNotNull(withTraceResult.events[0].stacktrace)
         assertEquals(1, withTraceResult.events[0].stacktrace?.size)
+    }
+
+    // ---------------- B1: deferred breakpoints ----------------
+
+    @Test
+    fun `setBreakpoint on not-yet-loaded class defers and arms a single shared ClassPrepareRequest`() {
+        every { vm.allClasses() } returns emptyList()
+        // The deferred path should ask the erm for ONE ClassPrepareRequest.
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42, condition = null)
+
+        assertFalse(info.verified)
+        verify(exactly = 1) { erm.createClassPrepareRequest() }
+        verify(exactly = 1) { classPrepReq.enable() }
+    }
+
+    @Test
+    fun `setBreakpoint defers only one ClassPrepareRequest for two deferred breakpoints on distinct classes`() {
+        every { vm.allClasses() } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        session.setBreakpoint(file = "MainActivity.kt", line = 10, condition = null)
+        session.setBreakpoint(file = "OtherActivity.kt", line = 20, condition = null)
+
+        verify(exactly = 1) { erm.createClassPrepareRequest() }
+    }
+
+    @Test
+    fun `removeBreakpoint on deferred-only id disarms ClassPrepareRequest when nothing else is deferred`() {
+        every { vm.allClasses() } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 10, condition = null)
+        val removed = session.removeBreakpoint(info.id)
+
+        assertTrue(removed)
+        verify(exactly = 1) { erm.deleteEventRequest(classPrepReq) }
+    }
+
+    // ---------------- B2: exception breakpoint semantics ----------------
+
+    @Test
+    fun `setExceptionBreakpoint with uncaughtOnly passes notifyCaught=false notifyUncaught=true`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        every { vm.classesByName("java.lang.NullPointerException") } returns listOf(refType)
+        val req = mockk<ExceptionRequest>(relaxed = true)
+        every { erm.createExceptionRequest(refType, false, true) } returns req
+
+        val id = session.setExceptionBreakpoint(
+            "java.lang.NullPointerException",
+            notifyCaught = false,
+            notifyUncaught = true
+        )
+
+        assertTrue(id.startsWith("ex_bp_"))
+        verify(exactly = 1) { erm.createExceptionRequest(refType, false, true) }
+        verify { req.enable() }
+    }
+
+    @Test
+    fun `setExceptionBreakpoint with caught passes notifyCaught=true`() {
+        every { vm.classesByName(any()) } returns emptyList()
+        val req = mockk<ExceptionRequest>(relaxed = true)
+        every { erm.createExceptionRequest(null, true, true) } returns req
+
+        session.setExceptionBreakpoint(null, notifyCaught = true, notifyUncaught = true)
+
+        verify(exactly = 1) { erm.createExceptionRequest(null, true, true) }
+    }
+
+    // ---------------- B6: removal of exception & watchpoint ----------------
+
+    @Test
+    fun `removeExceptionBreakpoint deletes the underlying JDI request`() {
+        every { vm.classesByName(any()) } returns emptyList()
+        val req = mockk<ExceptionRequest>(relaxed = true)
+        every { erm.createExceptionRequest(null, any(), any()) } returns req
+
+        val id = session.setExceptionBreakpoint(null, notifyCaught = false, notifyUncaught = true)
+        val removed = session.removeExceptionBreakpoint(id)
+
+        assertTrue(removed)
+        verify { erm.deleteEventRequest(req) }
+    }
+
+    @Test
+    fun `removeExceptionBreakpoint returns false for unknown id`() {
+        assertFalse(session.removeExceptionBreakpoint("ex_bp_999"))
+    }
+
+    @Test
+    fun `setWatchpoint on loaded class tracks requests and removeWatchpoint deletes them`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        every { refType.name() } returns "com.example.Foo"
+        every { vm.classesByName("com.example.Foo") } returns listOf(refType)
+        val field = mockk<Field>(relaxed = true)
+        every { refType.fieldByName("bar") } returns field
+
+        val accessReq = mockk<AccessWatchpointRequest>(relaxed = true)
+        val modifyReq = mockk<ModificationWatchpointRequest>(relaxed = true)
+        every { erm.createAccessWatchpointRequest(field) } returns accessReq
+        every { erm.createModificationWatchpointRequest(field) } returns modifyReq
+
+        val id = session.setWatchpoint("com.example.Foo", "bar", access = true, modify = true)
+        val removed = session.removeWatchpoint(id)
+
+        assertTrue(removed)
+        verify { erm.deleteEventRequest(accessReq) }
+        verify { erm.deleteEventRequest(modifyReq) }
+    }
+
+    // ---------------- B5: multiple deferred watchpoints per class ---------
+
+    @Test
+    fun `setWatchpoint on same not-yet-loaded class keeps both deferred entries and arms a single ClassPrepareRequest`() {
+        every { vm.classesByName("com.example.Foo") } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val id1 = session.setWatchpoint("com.example.Foo", "fieldA")
+        val id2 = session.setWatchpoint("com.example.Foo", "fieldB")
+
+        assertNotEquals(id1, id2)
+        verify(exactly = 1) { erm.createClassPrepareRequest() }
+
+        // Removing one should NOT disarm the shared ClassPrepareRequest (other deferred remains).
+        assertTrue(session.removeWatchpoint(id1))
+        verify(exactly = 0) { erm.deleteEventRequest(classPrepReq) }
+
+        // Removing the second should NOW disarm it.
+        assertTrue(session.removeWatchpoint(id2))
+        verify(exactly = 1) { erm.deleteEventRequest(classPrepReq) }
+    }
+
+    // ---------------- B4: clearDebugApp called on detach when launched -----
+
+    @Test
+    fun `detach clears am set-debug-app when session was launched suspended`() {
+        every { adbManager.clearDebugApp() } returns Result.success(Unit)
+        val launchedSession = JdiSession(
+            sessionId = "sess_launched",
+            appId = "com.test.app",
+            localPort = 8080,
+            vm = vm,
+            adbManager = adbManager,
+            clearDebugAppOnDetach = true
+        )
+        launchedSession.detach()
+        verify { adbManager.clearDebugApp() }
+    }
+
+    @Test
+    fun `detach does not clear am set-debug-app when session was attached to running app`() {
+        val attachedSession = JdiSession(
+            sessionId = "sess_attached",
+            appId = "com.test.app",
+            localPort = 8080,
+            vm = vm,
+            adbManager = adbManager,
+            clearDebugAppOnDetach = false
+        )
+        attachedSession.detach()
+        verify(exactly = 0) { adbManager.clearDebugApp() }
     }
 }

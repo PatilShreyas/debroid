@@ -6,6 +6,7 @@ import com.sun.jdi.request.BreakpointRequest
 import com.sun.jdi.request.EventRequest
 import com.sun.jdi.request.ExceptionRequest
 import com.sun.jdi.request.StepRequest
+import com.sun.jdi.request.WatchpointRequest
 import dev.shreyaspatil.debroid.adb.AdbManager
 import dev.shreyaspatil.debroid.adb.DebugException
 import dev.shreyaspatil.debroid.models.*
@@ -19,15 +20,33 @@ class JdiSession(
     val appId: String,
     val localPort: Int,
     private val vm: VirtualMachine,
-    private val adbManager: AdbManager
+    private val adbManager: AdbManager,
+    private val clearDebugAppOnDetach: Boolean = false
 ) {
     private val isConnected = AtomicBoolean(true)
     private val breakpointIdCounter = AtomicInteger(1)
 
     // Breakpoint & Watchpoint tracking
     private val activeBreakpoints = ConcurrentHashMap<String, BreakpointInfo>()
-    private val jdiBreakpointRequests = ConcurrentHashMap<String, BreakpointRequest>()
-    private val deferredWatchpoints = ConcurrentHashMap<String, Pair<String, Pair<Boolean, Boolean>>>()
+    private val jdiBreakpointRequests = ConcurrentHashMap<String, MutableList<BreakpointRequest>>()
+    private val deferredBreakpoints = ConcurrentHashMap<String, DeferredBreakpoint>()
+    private val deferredWatchpoints = ConcurrentHashMap<String, MutableList<DeferredWatchpoint>>()
+    private val exceptionRequests = ConcurrentHashMap<String, ExceptionRequest>()
+    private val watchpointRequests = ConcurrentHashMap<String, MutableList<WatchpointRequest>>()
+    private val classPrepareRequest = java.util.concurrent.atomic.AtomicReference<com.sun.jdi.request.ClassPrepareRequest?>(
+        null
+    )
+
+    private data class DeferredBreakpoint(val id: String, val file: String, val line: Int)
+    private data class DeferredWatchpoint(
+        val id: String,
+        val fieldName: String,
+        val access: Boolean,
+        val modify: Boolean
+    )
+
+    private val exceptionIdCounter = AtomicInteger(1)
+    private val watchpointIdCounter = AtomicInteger(1)
 
     // Event buffer for polling
     private val eventQueueBuffer = CopyOnWriteArrayList<DebugEventPayload>()
@@ -57,7 +76,9 @@ class JdiSession(
     } catch (e: com.sun.jdi.VMDisconnectedException) { false }
 
     fun getStatus(): SessionStatus {
-        val threads = try { vm.allThreads() } catch (e: com.sun.jdi.VMDisconnectedException) { emptyList<ThreadReference>() }
+        val threads = try { vm.allThreads() } catch (
+            e: com.sun.jdi.VMDisconnectedException
+        ) { emptyList<ThreadReference>() }
         val suspendedCount = threads.count { it.isSuspended }
         return SessionStatus(
             sessionId = sessionId,
@@ -86,9 +107,10 @@ class JdiSession(
         if (verified) {
             activeBreakpoints[id] = info.copy(verified = true)
         } else {
-            val req = vm.eventRequestManager().createClassPrepareRequest()
-            req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-            req.enable()
+            // Defer: arm a ClassPrepareRequest (once) and remember this breakpoint
+            // so that when the class is later loaded we can bind it (B1).
+            deferredBreakpoints[id] = DeferredBreakpoint(id, file, line)
+            ensureClassPrepareRequest()
         }
 
         return activeBreakpoints[id]!!
@@ -104,13 +126,24 @@ class JdiSession(
                 // Fallback to name heuristics if sourceName is absent
                 val name = ref.name()
                 val simpleName = name.substringAfterLast('.')
-                simpleName == classBasename || 
-                simpleName == classBasenameKt || 
-                simpleName.startsWith("$classBasename$") || 
-                simpleName.startsWith("$classBasenameKt$")
+                simpleName == classBasename ||
+                    simpleName == classBasenameKt ||
+                    simpleName.startsWith("$classBasename$") ||
+                    simpleName.startsWith("$classBasenameKt$")
+            } catch (e: Throwable) {
+                // Some ART-loaded classes throw non-AbsentInformationException from sourceName()
+                // (e.g. InternalError, ClassNotLoadedException). Treat as no-match rather than
+                // letting the exception escape and stall the calling socket handler (B-hardening).
+                val name = try { ref.name() } catch (_: Throwable) { return@filter false }
+                val simpleName = name.substringAfterLast('.')
+                simpleName == classBasename ||
+                    simpleName == classBasenameKt ||
+                    simpleName.startsWith("$classBasename$") ||
+                    simpleName.startsWith("$classBasenameKt$")
             }
         }
 
+        val requests = mutableListOf<BreakpointRequest>()
         var bound = false
         for (ref in matchingClasses) {
             try {
@@ -119,67 +152,143 @@ class JdiSession(
                     val bpReq = vm.eventRequestManager().createBreakpointRequest(loc)
                     bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
                     bpReq.enable()
-                    jdiBreakpointRequests[id] = bpReq
+                    requests.add(bpReq)
                     bound = true
                 }
-            } catch (e: com.sun.jdi.AbsentInformationException) {
-                // Class line info not available yet
+            } catch (e: Throwable) {
+                // Class line info not available yet, or locationsOfLine threw unexpectedly.
+                // Skip this class and continue; do NOT abort the whole bind.
             }
         }
+        if (requests.isNotEmpty()) jdiBreakpointRequests[id] = requests
         return bound
     }
 
-    fun setExceptionBreakpoint(className: String?, uncaughtOnly: Boolean): String {
+    fun setExceptionBreakpoint(className: String?, notifyCaught: Boolean, notifyUncaught: Boolean): String {
         val erm = vm.eventRequestManager()
         val refType = className?.let { name -> vm.classesByName(name).firstOrNull() }
-        val req: ExceptionRequest = erm.createExceptionRequest(refType, true, uncaughtOnly)
+        val req: ExceptionRequest = erm.createExceptionRequest(refType, notifyCaught, notifyUncaught)
         req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
         req.enable()
-        return "ex_bp_${System.currentTimeMillis()}"
+        val id = "ex_bp_${exceptionIdCounter.getAndIncrement()}"
+        exceptionRequests[id] = req
+        return id
     }
 
     fun setWatchpoint(className: String, fieldName: String, access: Boolean = true, modify: Boolean = true): String {
         val erm = vm.eventRequestManager()
         val refTypes = vm.classesByName(className)
-        val id = "wp_${System.currentTimeMillis()}"
+        val id = "wp_${watchpointIdCounter.getAndIncrement()}"
 
         if (refTypes.isEmpty()) {
-            val classPrepReq = erm.createClassPrepareRequest()
-            classPrepReq.addClassFilter(className)
-            classPrepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-            classPrepReq.enable()
-            deferredWatchpoints[className] = Pair(fieldName, Pair(access, modify))
+            // Defer until class is loaded. Multiple watchpoints per class are supported (B5).
+            deferredWatchpoints.computeIfAbsent(className) { mutableListOf() }.add(
+                DeferredWatchpoint(id, fieldName, access, modify)
+            )
+            ensureClassPrepareRequest()
             return id
         }
 
-        val refType = refTypes.first()
-        bindWatchpointForRefType(refType = refType, fieldName = fieldName, access = access, modify = modify)
+        bindWatchpointForRefType(
+            id = id,
+            refType = refTypes.first(),
+            fieldName = fieldName,
+            access = access,
+            modify = modify
+        )
         return id
     }
 
-    private fun bindWatchpointForRefType(refType: ReferenceType, fieldName: String, access: Boolean, modify: Boolean) {
+    private fun bindWatchpointForRefType(id: String, refType: ReferenceType, fieldName: String, access: Boolean, modify: Boolean) {
         val erm = vm.eventRequestManager()
         val field = refType.fieldByName(fieldName) ?: return
+        val requests = watchpointRequests.computeIfAbsent(id) { mutableListOf() }
 
         if (access) {
             val req = erm.createAccessWatchpointRequest(field)
             req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
             req.enable()
+            requests.add(req)
         }
         if (modify) {
             val req = erm.createModificationWatchpointRequest(field)
             req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
             req.enable()
+            requests.add(req)
         }
+    }
+
+    /**
+     * Lazily creates and enables a single shared [com.sun.jdi.request.ClassPrepareRequest]
+     * used to resolve deferred breakpoints and watchpoints. Avoid creating one per deferred
+     * item (which would leak requests and cause duplicate events).
+     */
+    private fun ensureClassPrepareRequest() {
+        if (classPrepareRequest.get() != null) return
+        val req = vm.eventRequestManager().createClassPrepareRequest()
+        req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+        req.enable()
+        classPrepareRequest.set(req)
     }
 
     fun removeBreakpoint(id: String): Boolean {
         val info = activeBreakpoints.remove(id)
-        val jdiReq = jdiBreakpointRequests.remove(id)
-        if (jdiReq != null) {
-            try { vm.eventRequestManager().deleteEventRequest(jdiReq) } catch (e: Exception) {}
+        deferredBreakpoints.remove(id)
+        val requests = jdiBreakpointRequests.remove(id)
+        requests?.forEach { req ->
+            try { vm.eventRequestManager().deleteEventRequest(req) } catch (e: Exception) {}
         }
+        maybeDisableClassPrepareRequest()
         return info != null
+    }
+
+    fun removeExceptionBreakpoint(id: String): Boolean {
+        val req = exceptionRequests.remove(id) ?: return false
+        try { vm.eventRequestManager().deleteEventRequest(req) } catch (e: Exception) {}
+        return true
+    }
+
+    fun removeWatchpoint(id: String): Boolean {
+        val requests = watchpointRequests.remove(id)
+        if (requests.isNullOrEmpty()) {
+            // Might still be deferred
+            val removed = removeFromDeferredWatchpoints(id)
+            maybeDisableClassPrepareRequest()
+            return removed
+        }
+        requests.forEach { req ->
+            try { vm.eventRequestManager().deleteEventRequest(req) } catch (e: Exception) {}
+        }
+        return true
+    }
+
+    private fun removeFromDeferredWatchpoints(id: String): Boolean {
+        var removed = false
+        for ((_, list) in deferredWatchpoints) {
+            val it = list.iterator()
+            while (it.hasNext()) {
+                if (it.next().id == id) {
+                    it.remove()
+                    removed = true
+                }
+            }
+        }
+        // Drop classes whose deferred list is now empty
+        deferredWatchpoints.entries.removeIf { it.value.isEmpty() }
+        return removed
+    }
+
+    /**
+     * Disables and deletes the shared ClassPrepareRequest if there are no remaining
+     * deferred breakpoints or watchpoints. Callers must invoke this after any removal
+     * that could leave the deferral queue empty (B6).
+     */
+    private fun maybeDisableClassPrepareRequest() {
+        if (deferredBreakpoints.isEmpty() && deferredWatchpoints.isEmpty()) {
+            classPrepareRequest.getAndSet(null)?.let { req ->
+                try { vm.eventRequestManager().deleteEventRequest(req) } catch (e: Exception) {}
+            }
+        }
     }
 
     fun listBreakpoints(): List<BreakpointInfo> = activeBreakpoints.values.toList()
@@ -263,7 +372,9 @@ class JdiSession(
         if (expr.contains("+") || expr.contains("\"")) {
             val tokens = expr.split("+").map { it.trim() }
             val sb = StringBuilder()
-            val visVars = try { frame.visibleVariables() } catch (e: com.sun.jdi.AbsentInformationException) { emptyList() }
+            val visVars = try { frame.visibleVariables() } catch (
+                e: com.sun.jdi.AbsentInformationException
+            ) { emptyList() }
             val fields = thisObj?.referenceType()?.fields() ?: emptyList()
             val fieldValues = if (thisObj != null) thisObj.getValues(fields) else emptyMap()
 
@@ -310,7 +421,9 @@ class JdiSession(
         }
 
         // 3. Visible local variable or instance field lookup
-        val visVar = try { frame.visibleVariables() } catch (e: com.sun.jdi.AbsentInformationException) { emptyList() }.find { it.name() == expr }
+        val visVar = try {
+            frame.visibleVariables()
+        } catch (e: com.sun.jdi.AbsentInformationException) { emptyList() }.find { it.name() == expr }
         if (visVar != null) {
             val value = frame.getValue(visVar)
             return formatValue(visVar.name(), value)
@@ -414,7 +527,7 @@ class JdiSession(
                 frameIndex = index,
                 methodName = location.method().name(),
                 declaringClass = location.declaringType().name(),
-                sourceFile = try { location.sourceName() } catch (e: com.sun.jdi.AbsentInformationException) { null },
+                sourceFile = try { location.sourceName() } catch (e: Throwable) { null },
                 lineNumber = location.lineNumber(),
                 coroutineContinuationObjectId = continuationObjId
             )
@@ -432,7 +545,9 @@ class JdiSession(
 
         when (scope) {
             VariableScope.LOCAL, VariableScope.ARGS -> {
-                val visVars = try { frame.visibleVariables() } catch (e: com.sun.jdi.AbsentInformationException) { emptyList() }
+                val visVars = try { frame.visibleVariables() } catch (
+                    e: com.sun.jdi.AbsentInformationException
+                ) { emptyList() }
                 for (v in visVars) {
                     if (scope == VariableScope.ARGS && !v.isArgument) continue
                     if (scope == VariableScope.LOCAL && v.isArgument) continue
@@ -487,23 +602,47 @@ class JdiSession(
             findObjectReference(
                 objectId.toLongOrNull() ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "Invalid object ID format")
             )
-        val refType = objRef.referenceType()
+        val visited = HashSet<String>()
+        visited.add(objectId)
+        return inspectRecursive(objRef, fieldsFilter, maxDepth, visited)
+    }
 
+    private fun inspectRecursive(
+        objRef: ObjectReference,
+        fieldsFilter: List<String>?,
+        maxDepth: Int,
+        visited: MutableSet<String>
+    ): ObjectInspectionResult {
+        val refType = objRef.referenceType()
         val fields = refType.allFields()
             .filter { f -> fieldsFilter == null || fieldsFilter.contains(f.name()) }
             .take(50)
 
         val fieldValues = objRef.getValues(fields)
         val resultFields = mutableMapOf<String, VariableInfo>()
+        val nested = mutableMapOf<String, ObjectInspectionResult>()
 
         for ((f, valRef) in fieldValues) {
             resultFields[f.name()] = formatValue(f.name(), valRef)
+            if (maxDepth <= 1) continue
+            if (valRef !is ObjectReference) continue
+            val oid = valRef.uniqueID().toString()
+            if (oid in visited) continue // cycle guard
+            visited.add(oid)
+            try {
+                nested[f.name()] = inspectRecursive(valRef, null, maxDepth - 1, visited)
+            } catch (e: Exception) {
+                // Best-effort: nested resolvers (e.g. findObjectReference) can recurse over
+                // suspended frames and may throw on transient state; silently skip such
+                // children so the top-level inspection still succeeds.
+            }
         }
 
         return ObjectInspectionResult(
-            objectId = objectId,
+            objectId = objRef.uniqueID().toString(),
             type = refType.name(),
-            fields = resultFields
+            fields = resultFields,
+            nested = if (nested.isEmpty()) null else nested
         )
     }
 
@@ -593,6 +732,14 @@ class JdiSession(
         }
     }
 
+    private fun safeSourceName(loc: Location): String {
+        return try {
+            loc.sourceName()
+        } catch (e: Throwable) {
+            loc.declaringType().name()
+        }
+    }
+
     fun pollEvents(sinceCursor: String, withStacktrace: Boolean = false): EventPollResult {
         val cursorIndex = sinceCursor.toIntOrNull() ?: 0
         val actualStartIndex = maxOf(0, cursorIndex - eventQueueOffset)
@@ -603,7 +750,7 @@ class JdiSession(
             emptyList()
         }
         val nextCursor = (eventQueueOffset + eventQueueBuffer.size).toString()
-        
+
         val events = if (withStacktrace) {
             subList.toList()
         } else {
@@ -626,11 +773,68 @@ class JdiSession(
                     when (event) {
                         is ClassPrepareEvent -> {
                             val preparedClass = event.referenceType()
-                            val deferred = deferredWatchpoints.remove(preparedClass.name())
-                            if (deferred != null) {
-                                val (fieldName, flags) = deferred
-                                bindWatchpointForRefType(preparedClass, fieldName, flags.first, flags.second)
+                            // Resolve deferred watchpoints (B5: list-based, multiple per class).
+                            val deferredWps = deferredWatchpoints.remove(preparedClass.name())
+                            deferredWps?.forEach { dw ->
+                                bindWatchpointForRefType(
+                                    id = dw.id,
+                                    refType = preparedClass,
+                                    fieldName = dw.fieldName,
+                                    access = dw.access,
+                                    modify = dw.modify
+                                )
                             }
+
+                            // Resolve deferred line breakpoints. A single Kotlin file can contain
+                            // multiple top-level classes (e.g. OrderProcessor + DefaultDataRepository in
+                            // DataRepository.kt), so we match via sourceName AND the simple-name heuristic,
+                            // then fall back to trying locationsOfLine directly (B1).
+                            val preparedSimpleName = preparedClass.name().substringAfterLast('.')
+                            val iter = deferredBreakpoints.entries.iterator()
+                            while (iter.hasNext()) {
+                                val (bpId, deferred) = iter.next()
+                                val basename = deferred.file.substringAfterLast(
+                                    '/'
+                                ).substringAfterLast('\\').substringBeforeLast('.')
+                                val basenameKt = "${basename}Kt"
+                                val nameMatches = run {
+                                    // Try sourceName first (most accurate for Kotlin multi-class files).
+                                    val srcMatches = try {
+                                        preparedClass.sourceName() == deferred.file
+                                    } catch (e: Throwable) {
+                                        // AbsentInformationException: no source info.
+                                        // InternalError: bad SourceDebugExtension on some ART classes;
+                                        // either way fall back to the simple-name heuristic below.
+                                        false
+                                    }
+                                    if (srcMatches) return@run true
+                                    // Fall back to simple-name heuristic.
+                                    preparedSimpleName == basename ||
+                                        preparedSimpleName == basenameKt ||
+                                        preparedSimpleName.startsWith("$basename$") ||
+                                        preparedSimpleName.startsWith("$basenameKt$")
+                                }
+                                if (!nameMatches) continue
+                                try {
+                                    val locations = preparedClass.locationsOfLine(deferred.line)
+                                    if (locations.isNotEmpty()) {
+                                        val reqs = mutableListOf<BreakpointRequest>()
+                                        for (loc in locations) {
+                                            val bpReq = vm.eventRequestManager().createBreakpointRequest(loc)
+                                            bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+                                            bpReq.enable()
+                                            reqs.add(bpReq)
+                                        }
+                                        jdiBreakpointRequests[bpId] = reqs
+                                        activeBreakpoints[bpId]?.let { activeBreakpoints[bpId] = it.copy(verified = true) }
+                                        iter.remove()
+                                    }
+                                } catch (e: Throwable) {
+                                    // Class loaded without line info, or locationsOfLine threw;
+                                    // keep deferred and try on next class load.
+                                }
+                            }
+                            maybeDisableClassPrepareRequest()
                             eventSet.resume()
                         }
                         is BreakpointEvent -> {
@@ -641,7 +845,7 @@ class JdiSession(
                                     sessionId = sessionId,
                                     threadId = event.thread().uniqueID().toString(),
                                     threadName = event.thread().name(),
-                                    location = "${loc.sourceName()}:${loc.lineNumber()}",
+                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                                     className = loc.declaringType().name(),
                                     stacktrace = getFramesSafely(event.thread())
                                 )
@@ -655,7 +859,7 @@ class JdiSession(
                                     sessionId = sessionId,
                                     threadId = event.thread().uniqueID().toString(),
                                     threadName = event.thread().name(),
-                                    location = "${loc.sourceName()}:${loc.lineNumber()}",
+                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                                     className = loc.declaringType().name(),
                                     stacktrace = getFramesSafely(event.thread())
                                 )
@@ -669,7 +873,7 @@ class JdiSession(
                                     sessionId = sessionId,
                                     threadId = event.thread().uniqueID().toString(),
                                     threadName = event.thread().name(),
-                                    location = "${loc.sourceName()}:${loc.lineNumber()}",
+                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                                     className = loc.declaringType().name(),
                                     exceptionMessage = event.exception().referenceType().name(),
                                     stacktrace = getFramesSafely(event.thread())
@@ -684,7 +888,7 @@ class JdiSession(
                                     sessionId = sessionId,
                                     threadId = event.thread().uniqueID().toString(),
                                     threadName = event.thread().name(),
-                                    location = "${loc.sourceName()}:${loc.lineNumber()}",
+                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                                     className = loc.declaringType().name(),
                                     exceptionMessage = "Field ${event.field().name()} accessed"
                                 )
@@ -698,7 +902,7 @@ class JdiSession(
                                     sessionId = sessionId,
                                     threadId = event.thread().uniqueID().toString(),
                                     threadName = event.thread().name(),
-                                    location = "${loc.sourceName()}:${loc.lineNumber()}",
+                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                                     className = loc.declaringType().name(),
                                     exceptionMessage = "Field ${event.field().name()} modified to ${event.valueToBe()}"
                                 )
@@ -720,8 +924,12 @@ class JdiSession(
                         }
                     }
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // Catch Throwable (not just Exception) because JDI can throw InternalError /
+                // VMOutOfMemoryError from ART's SourceDebugExtension parsing. Killing this
+                // thread would leave the app suspended forever; log and keep looping.
                 if (!isConnected.get()) break
+                System.err.println("[JdiSession:$sessionId] event listener caught: ${e::class.java.name}: ${e.message}")
             }
         }
     }
@@ -730,5 +938,10 @@ class JdiSession(
         isConnected.set(false)
         try { vm.dispose() } catch (e: Exception) {}
         adbManager.removePortForward(localPort)
+        // If this session was launched suspended via `am set-debug-app -w`, the wait-for-debugger
+        // flag persists on the device. Clear it so the next normal launch doesn't hang (B4).
+        if (clearDebugAppOnDetach) {
+            try { adbManager.clearDebugApp() } catch (e: Exception) {}
+        }
     }
 }

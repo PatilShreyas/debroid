@@ -100,14 +100,19 @@ fun VariableInfo.toCli() = CliVariableInfo(
 data class CliObjectInspectionResult(
     val objectId: String,
     val type: String,
-    val fields: Map<String, CliVariableInfo>
+    val fields: Map<String, CliVariableInfo>,
+    val nested: Map<String, CliObjectInspectionResult>? = null
 )
 
-fun ObjectInspectionResult.toCli() = CliObjectInspectionResult(
-    objectId,
-    type,
-    fields.mapValues { it.value.toCli() }
-)
+fun ObjectInspectionResult.toCli(): CliObjectInspectionResult {
+    val cliNested: Map<String, CliObjectInspectionResult>? = nested?.mapValues { it.value.toCli() }
+    return CliObjectInspectionResult(
+        objectId = objectId,
+        type = type,
+        fields = fields.mapValues { it.value.toCli() },
+        nested = cliNested
+    )
+}
 
 @Serializable
 data class CliPauseStateResult(

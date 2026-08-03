@@ -94,6 +94,18 @@ class AdbManagerTest {
     }
 
     @Test
+    fun `clearDebugApp executes am clear-debug-app`() {
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "am", "clear-debug-app"), any())
+        } returns Result.success("")
+
+        val result = adbManager.clearDebugApp()
+
+        assertTrue(result.isSuccess)
+        verify { commandRunner.runCommand(listOf("adb", "shell", "am", "clear-debug-app"), any()) }
+    }
+
+    @Test
     fun `launchAppSuspended finds main activity and launches`() {
         // mock set-debug-app
         every {

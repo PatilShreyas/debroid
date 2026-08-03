@@ -80,7 +80,8 @@ data class VariableInfo(
 data class ObjectInspectionResult(
     val objectId: String,
     val type: String,
-    val fields: Map<String, VariableInfo>
+    val fields: Map<String, VariableInfo>,
+    val nested: Map<String, ObjectInspectionResult>? = null
 )
 
 data class PauseStateResult(

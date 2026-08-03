@@ -105,4 +105,32 @@ class JdiSessionManagerTest {
     fun `detachSession returns false if session not found`() {
         assertFalse(sessionManager.detachSession("nonexistent"))
     }
+
+    @Test
+    fun `launchAndAttach creates session that clears set-debug-app on detach`() {
+        val vm = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.launchAppSuspended(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        val session = sessionManager.launchAndAttach("com.test.app")
+        // The launch session should request clearDebugApp on detach (B4).
+        every { adbManager.clearDebugApp() } returns Result.success(Unit)
+        session.detach()
+        verify { adbManager.clearDebugApp() }
+    }
+
+    @Test
+    fun `attachToRunningApp creates session that does NOT clear set-debug-app on detach`() {
+        val vm = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.findPid(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        val session = sessionManager.attachToRunningApp("com.test.app")
+        session.detach()
+        verify(exactly = 0) { adbManager.clearDebugApp() }
+    }
 }

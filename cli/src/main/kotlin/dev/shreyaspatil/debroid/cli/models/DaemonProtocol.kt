@@ -13,13 +13,26 @@ sealed class DaemonRequest {
 
     @Serializable data class Break(val sessionId: String, val file: String, val line: Int) : DaemonRequest()
 
-    @Serializable data class CatchException(val sessionId: String, val className: String?) : DaemonRequest()
+    @Serializable data class RemoveBreak(val sessionId: String, val breakpointId: String) : DaemonRequest()
+
+    @Serializable data class CatchException(
+        val sessionId: String,
+        val className: String?,
+        val notifyCaught: Boolean = false,
+        val notifyUncaught: Boolean = true
+    ) : DaemonRequest()
+
+    @Serializable data class RemoveCatchException(val sessionId: String, val exceptionBreakpointId: String) : DaemonRequest()
 
     @Serializable data class Watch(
         val sessionId: String,
         val className: String,
-        val fieldName: String
+        val fieldName: String,
+        val access: Boolean = true,
+        val modify: Boolean = true
     ) : DaemonRequest()
+
+    @Serializable data class RemoveWatch(val sessionId: String, val watchpointId: String) : DaemonRequest()
 
     @Serializable data class Threads(val sessionId: String) : DaemonRequest()
 

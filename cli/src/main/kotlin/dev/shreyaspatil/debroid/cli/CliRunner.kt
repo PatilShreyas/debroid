@@ -140,28 +140,78 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Break(sessionId = sessionId, file = file, line = line))
     }
 
+    class RemoveBreakCommand : CliktCommand(
+        name = "remove-break",
+        help = "Removes a previously set line breakpoint."
+    ) {
+        private val sessionId by argument("session_id", help = "The active debug session ID.")
+        private val breakpointId by argument("breakpoint_id", help = "The breakpoint ID returned by break.")
+        override fun run() = ensureDaemonAndSend(DaemonRequest.RemoveBreak(sessionId, breakpointId))
+    }
+
     class CatchExceptionCommand : CliktCommand(
         name = "catch-exception",
-        help = "Sets a breakpoint that triggers when an uncaught exception is thrown."
+        help = "Sets a breakpoint that triggers when an exception is thrown.",
+        epilog = "By default only UNCAUGHT exceptions are trapped. Use --caught to also trap caught exceptions, and (optionally) restrict to a specific exception class."
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val className by argument(
             "class_name",
-            help = "Optional fully qualified exception class name (e.g., java.lang.NullPointerException). If omitted, catches all uncaught exceptions."
+            help = "Optional fully qualified exception class name (e.g., java.lang.NullPointerException). If omitted, traps all matching exceptions."
         ).optional()
-        override fun run() = ensureDaemonAndSend(DaemonRequest.CatchException(sessionId, className))
+        private val caught by option("--caught").flag("--no-caught", default = false)
+        private val uncaught by option("--uncaught").flag("--no-uncaught", default = true)
+        override fun run() = ensureDaemonAndSend(
+            DaemonRequest.CatchException(sessionId, className, notifyCaught = caught, notifyUncaught = uncaught)
+        )
+    }
+
+    class RemoveCatchExceptionCommand : CliktCommand(
+        name = "remove-catch-exception",
+        help = "Removes a previously set exception breakpoint."
+    ) {
+        private val sessionId by argument("session_id", help = "The active debug session ID.")
+        private val bpId by argument(
+            "exception_breakpoint_id",
+            help = "The exception breakpoint ID returned by catch-exception."
+        )
+        override fun run() = ensureDaemonAndSend(DaemonRequest.RemoveCatchException(sessionId, bpId))
     }
 
     class WatchCommand : CliktCommand(
         name = "watch",
-        help = "Sets a watchpoint on a specific field to monitor access or modifications."
+        help = "Sets a watchpoint on a specific field to monitor access and/or modifications.",
+        epilog = "Defaults to BOTH access and modify. Pass --no-access or --no-modify to disable either."
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val className by argument("class_name", help = "The fully qualified class name containing the field.")
         private val fieldName by argument("field_name", help = "The exact name of the field to watch.")
+        private val access by option(
+            "--access",
+            help = "Trap field reads (default: on)."
+        ).flag("--no-access", default = true)
+        private val modify by option(
+            "--modify",
+            help = "Trap field writes (default: on)."
+        ).flag("--no-modify", default = true)
         override fun run() = ensureDaemonAndSend(
-            DaemonRequest.Watch(sessionId = sessionId, className = className, fieldName = fieldName)
+            DaemonRequest.Watch(
+                sessionId = sessionId,
+                className = className,
+                fieldName = fieldName,
+                access = access,
+                modify = modify
+            )
         )
+    }
+
+    class RemoveWatchCommand : CliktCommand(
+        name = "remove-watch",
+        help = "Removes a previously set watchpoint."
+    ) {
+        private val sessionId by argument("session_id", help = "The active debug session ID.")
+        private val watchpointId by argument("watchpoint_id", help = "The watchpoint ID returned by watch.")
+        override fun run() = ensureDaemonAndSend(DaemonRequest.RemoveWatch(sessionId, watchpointId))
     }
 
     class ThreadsCommand : CliktCommand(
@@ -293,8 +343,11 @@ object CliRunner {
                 AttachCommand(),
                 DetachCommand(),
                 BreakCommand(),
+                RemoveBreakCommand(),
                 CatchExceptionCommand(),
+                RemoveCatchExceptionCommand(),
                 WatchCommand(),
+                RemoveWatchCommand(),
                 ThreadsCommand(),
                 LocalsCommand(),
                 PauseStateCommand(),

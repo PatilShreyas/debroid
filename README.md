@@ -18,6 +18,17 @@ To build the CLI and install it as a standalone executable in your `/usr/local/b
 ```
 *Note: This script will prompt for your `sudo` password to move the binary to your local bin.*
 
+On Linux or if you prefer not to use `sudo`, you can install to a user-writable directory:
+```bash
+./gradlew :cli:jar
+VERSION=$(cat cli/version.txt | tr -d '[:space:]')
+# Create a self-extracting bash+jar executable
+printf '#!/usr/bin/env bash\nexec java --enable-native-access=ALL-UNNAMED -jar "$0" "$@"\n' > ~/.local/bin/debroid
+cat cli/build/libs/debroid-$VERSION.jar >> ~/.local/bin/debroid
+chmod +x ~/.local/bin/debroid
+```
+Ensure `~/.local/bin` is on your `PATH`.
+
 Once installed, you can use the CLI from anywhere:
 ```bash
 debroid --help
@@ -34,9 +45,41 @@ Simply copy the contents of `skills/debroid-cli/SKILL.md` into your agent's cont
 
 ## 🔌 How it Works
 
-Debroid runs a lightweight daemon in the background that connects to the Android app via JDWP. The CLI communicates with this daemon to send commands and poll for events. 
+Debroid runs a lightweight daemon in the background that connects to the Android app via JDWP. The CLI communicates with this daemon to send commands and poll for events.
 
-Agents can use the CLI to orchestrate the debug session (e.g., `debroid launch`, `debroid attach`, `debroid breakpoint`, `debroid locals`, `debroid poll`).
+Agents can use the CLI to orchestrate the debug session. The daemon is auto-started on the first command if it isn't already running, so agents can also just start sending commands directly.
+
+### Daemon Lifecycle
+- **Auto-start**: The daemon starts automatically on the first CLI command if it isn't running.
+- **Manual start**: `debroid daemon` (run in background or as a background task).
+- **Stop**: Kill the process or close the terminal. There is no dedicated stop command yet.
+
+### Full Command List
+| Command | Signature | Description |
+| :--- | :--- | :--- |
+| `daemon` | `debroid daemon` | Starts the persistent background daemon |
+| `launch` | `debroid launch <app_id>` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
+| `attach` | `debroid attach <app_id>` | Attaches to a running app |
+| `detach` | `debroid detach <session_id>` | Safely detaches debugger; for `launch` sessions also clears `am set-debug-app` |
+| `break` | `debroid break <session_id> <file> <line>` | Sets a line breakpoint (auto-defers if class isn't loaded yet) |
+| `remove-break` | `debroid remove-break <session_id> <breakpoint_id>` | Removes a line breakpoint |
+| `catch-exception` | `debroid catch-exception <session_id> [class_name] [--caught] [--uncaught]` | Sets an exception breakpoint (default: `--uncaught` only) |
+| `remove-catch-exception` | `debroid remove-catch-exception <session_id> <exception_breakpoint_id>` | Removes an exception breakpoint |
+| `watch` | `debroid watch <session_id> <class_name> <field_name> [--access] [--modify]` | Sets a field watchpoint (default: access+modify) |
+| `remove-watch` | `debroid remove-watch <session_id> <watchpoint_id>` | Removes a watchpoint |
+| `threads` | `debroid threads <session_id>` | Lists active threads |
+| `locals` | `debroid locals <session_id> <thread_id>` | Gets shallow local variables |
+| `pause-state` | `debroid pause-state <session_id> <thread_id>` | Gets frames, locals, and instance state |
+| `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value>` | Mutates local variable |
+| `eval` | `debroid eval <session_id> <thread_id> <expression...>` | Evaluates string expression |
+| `resume` | `debroid resume <session_id> [thread_id]` | Resumes all threads |
+| `poll` | `debroid poll <session_id> [cursor=0] [--with-stacktrace]` | Polls for asynchronous debugger events |
+| `frames` | `debroid frames <session_id> <thread_id>` | Retrieves thread stack frames |
+| `coroutine` | `debroid coroutine <session_id> <continuation_id>` | Retrieves locals from a Continuation object |
+| `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`) |
+| `step` | `debroid step <session_id> <thread_id> <action>` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
+
+All command outputs are strict JSON for machine-readability.
 
 ## 📄 License
 This project is licensed under the [Apache 2.0 License](LICENSE).

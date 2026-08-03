@@ -86,15 +86,39 @@ object DaemonServer {
                     val bp = session.setBreakpoint(file = request.file, line = request.line, condition = null)
                     json.encodeToString(bp.toCli())
                 }
+                is DaemonRequest.RemoveBreak -> {
+                    val session = sessionManager.getSession(request.sessionId)
+                    val ok = session.removeBreakpoint(request.breakpointId)
+                    json.encodeToString(CliStatusResult(if (ok) "removed" else "not_found"))
+                }
                 is DaemonRequest.CatchException -> {
                     val session = sessionManager.getSession(request.sessionId)
-                    val bpId = session.setExceptionBreakpoint(className = request.className, uncaughtOnly = true)
+                    val bpId = session.setExceptionBreakpoint(
+                        className = request.className,
+                        notifyCaught = request.notifyCaught,
+                        notifyUncaught = request.notifyUncaught
+                    )
                     json.encodeToString(CliExceptionBreakpointResult(bpId))
+                }
+                is DaemonRequest.RemoveCatchException -> {
+                    val session = sessionManager.getSession(request.sessionId)
+                    val ok = session.removeExceptionBreakpoint(request.exceptionBreakpointId)
+                    json.encodeToString(CliStatusResult(if (ok) "removed" else "not_found"))
                 }
                 is DaemonRequest.Watch -> {
                     val session = sessionManager.getSession(request.sessionId)
-                    val wpId = session.setWatchpoint(request.className, request.fieldName)
+                    val wpId = session.setWatchpoint(
+                        request.className,
+                        request.fieldName,
+                        access = request.access,
+                        modify = request.modify
+                    )
                     json.encodeToString(CliWatchpointResult(wpId))
+                }
+                is DaemonRequest.RemoveWatch -> {
+                    val session = sessionManager.getSession(request.sessionId)
+                    val ok = session.removeWatchpoint(request.watchpointId)
+                    json.encodeToString(CliStatusResult(if (ok) "removed" else "not_found"))
                 }
                 is DaemonRequest.Threads -> {
                     val session = sessionManager.getSession(request.sessionId)

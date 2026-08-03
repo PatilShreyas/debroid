@@ -199,6 +199,18 @@ class AdbManager(
     fun removePortForward(localPort: Int) {
         runAdb("forward", "--remove", "tcp:$localPort")
     }
+
+    /**
+     * Clears the persistent "wait for debugger" flag set by `am set-debug-app -w`.
+     *
+     * Reasoning: `am set-debug-app -w` persists across launches. If we don't clear it,
+     * the next normal (non-debug) launch of the same app will hang silently waiting
+     * for a debugger connection that never comes. This must be invoked when a session
+     * that launched the app in suspended mode is detached.
+     */
+    fun clearDebugApp(): Result<Unit> {
+        return runAdb("shell", "am", "clear-debug-app").mapCatching { }
+    }
 }
 
 class DebugException(val code: ErrorCode, override val message: String) : Exception(message) {
