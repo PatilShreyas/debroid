@@ -163,7 +163,22 @@ object CliRunner {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val file by argument("file", help = "The source file name (e.g., MainActivity.kt).")
         private val line by argument("line", help = "The 1-indexed line number in the source file.").int()
-        override fun run() = ensureDaemonAndSend(DaemonRequest.Break(sessionId = sessionId, file = file, line = line))
+        private val packageName by option(
+            "-p",
+            "--package",
+            help = "Fully qualified package name of the source file (e.g. com.example.app.search), if known. " +
+                "Lets the daemon resolve the class with a single targeted lookup instead of scanning every loaded " +
+                "class, which is much faster for large apps."
+        )
+
+        override fun run() = ensureDaemonAndSend(
+            DaemonRequest.Break(
+                sessionId = sessionId,
+                file = file,
+                line = line,
+                packageName = packageName
+            )
+        )
     }
 
     class RemoveBreakCommand : CliktCommand(

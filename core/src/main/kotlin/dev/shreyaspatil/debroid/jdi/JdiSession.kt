@@ -120,7 +120,7 @@ class JdiSession(
 
     // --- Breakpoints & Watchpoints ---
 
-    fun setBreakpoint(file: String, line: Int, condition: String?): BreakpointInfo {
+    fun setBreakpoint(file: String, line: Int, condition: String?, packageName: String? = null): BreakpointInfo {
         val id = "bp_${breakpointIdCounter.getAndIncrement()}"
         val info = BreakpointInfo(
             id = id,
@@ -132,7 +132,7 @@ class JdiSession(
         )
         activeBreakpoints[id] = info
 
-        val verified = bindBreakpointLocation(id = id, file = file, line = line)
+        val verified = bindBreakpointLocation(id = id, file = file, line = line, packageName = packageName)
         if (verified) {
             activeBreakpoints[id] = info.copy(verified = true)
         } else {
@@ -145,35 +145,56 @@ class JdiSession(
         return activeBreakpoints[id]!!
     }
 
-    private fun bindBreakpointLocation(id: String, file: String, line: Int): Boolean {
+    private fun bindBreakpointLocation(id: String, file: String, line: Int, packageName: String? = null): Boolean {
         val classBasename = file.substringAfterLast('/').substringAfterLast('\\').substringBeforeLast('.')
         val classBasenameKt = "${classBasename}Kt"
-        val matchingClasses = vm.allClasses().filter { ref ->
-            val name = try { ref.name() } catch (_: Throwable) { return@filter false }
-            val simpleName = name.substringAfterLast('.')
-            val nameMatchesHeuristic = simpleName == classBasename ||
-                simpleName == classBasenameKt ||
-                simpleName.startsWith("$classBasename$") ||
-                simpleName.startsWith("$classBasenameKt$")
 
-            if (nameMatchesHeuristic) {
-                return@filter true
-            }
-
-            if (isFrameworkClass(name)) {
-                return@filter false
-            }
-
+        val fastPathClasses = packageName?.let {
             try {
-                ref.sourceName() == file
+                vm.classesByName("$packageName.$classBasename") + vm.classesByName("$packageName.$classBasenameKt")
             } catch (_: Throwable) {
-                false
+                emptyList()
             }
+        }.orEmpty()
+
+        var requests = bindLocationsForClasses(fastPathClasses, line)
+
+        if (requests.isEmpty()) {
+            val matchingClasses = vm.allClasses().filter { ref ->
+                val name = try { ref.name() } catch (_: Throwable) { return@filter false }
+                val simpleName = name.substringAfterLast('.')
+                val nameMatchesHeuristic = simpleName == classBasename ||
+                    simpleName == classBasenameKt ||
+                    simpleName.startsWith("$classBasename$") ||
+                    simpleName.startsWith("$classBasenameKt$")
+
+                if (nameMatchesHeuristic) {
+                    return@filter true
+                }
+
+                if (isFrameworkClass(name)) {
+                    return@filter false
+                }
+
+                try {
+                    ref.sourceName() == file
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            requests = bindLocationsForClasses(matchingClasses, line)
         }
 
+        if (requests.isNotEmpty()) {
+            jdiBreakpointRequests[id] = requests
+            return true
+        }
+        return false
+    }
+
+    private fun bindLocationsForClasses(classes: List<ReferenceType>, line: Int): MutableList<BreakpointRequest> {
         val requests = mutableListOf<BreakpointRequest>()
-        var bound = false
-        for (ref in matchingClasses) {
+        for (ref in classes) {
             try {
                 val locations = ref.locationsOfLine(line)
                 for (loc in locations) {
@@ -181,15 +202,12 @@ class JdiSession(
                     bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
                     bpReq.enable()
                     requests.add(bpReq)
-                    bound = true
                 }
-            } catch (e: Throwable) {
+            } catch (_: Throwable) {
                 // Class line info not available yet, or locationsOfLine threw unexpectedly.
-                // Skip this class and continue; do NOT abort the whole bind.
             }
         }
-        if (requests.isNotEmpty()) jdiBreakpointRequests[id] = requests
-        return bound
+        return requests
     }
 
     fun setExceptionBreakpoint(className: String?, notifyCaught: Boolean, notifyUncaught: Boolean): String {

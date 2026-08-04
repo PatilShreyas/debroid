@@ -104,7 +104,12 @@ object DaemonServer {
                 }
                 is DaemonRequest.Break -> {
                     val session = sessionManager.getSession(request.sessionId)
-                    val bp = session.setBreakpoint(file = request.file, line = request.line, condition = null)
+                    val bp = session.setBreakpoint(
+                        file = request.file,
+                        line = request.line,
+                        condition = null,
+                        packageName = request.packageName
+                    )
                     json.encodeToString(bp.toCli())
                 }
                 is DaemonRequest.RemoveBreak -> {

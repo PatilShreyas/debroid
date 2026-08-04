@@ -172,6 +172,109 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `setBreakpoint with packageName uses classesByName and skips allClasses`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { vm.classesByName("com.test.MainActivity") } returns listOf(refType)
+        every { vm.classesByName("com.test.MainActivityKt") } returns emptyList()
+        every { refType.locationsOfLine(42) } returns listOf(location)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(
+            file = "MainActivity.kt",
+            line = 42,
+            condition = null,
+            packageName = "com.test"
+        )
+
+        assertTrue(info.verified)
+        verify(exactly = 0) { vm.allClasses() }
+        verify { bpReq.enable() }
+    }
+
+    @Test
+    fun `setBreakpoint with packageName falls back to allClasses if classesByName returns empty or throws`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { vm.classesByName("com.test.MainActivity") } throws RuntimeException("JDI error")
+        every { vm.classesByName("com.test.MainActivityKt") } returns emptyList()
+
+        every { refType.name() } returns "com.test.MainActivity"
+        every { refType.locationsOfLine(42) } returns listOf(location)
+        every { vm.allClasses() } returns listOf(refType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(
+            file = "MainActivity.kt",
+            line = 42,
+            condition = null,
+            packageName = "com.test"
+        )
+
+        assertTrue(info.verified)
+        verify(exactly = 1) { vm.allClasses() }
+        verify { bpReq.enable() }
+    }
+
+    @Test
+    fun `setBreakpoint with packageName falls back to allClasses if classesByName returns empty`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { vm.classesByName("com.test.MainActivity") } returns emptyList()
+        every { vm.classesByName("com.test.MainActivityKt") } returns emptyList()
+
+        every { refType.name() } returns "com.test.MainActivity"
+        every { refType.locationsOfLine(42) } returns listOf(location)
+        every { vm.allClasses() } returns listOf(refType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(
+            file = "MainActivity.kt",
+            line = 42,
+            condition = null,
+            packageName = "com.test"
+        )
+
+        assertTrue(info.verified)
+        verify(exactly = 1) { vm.allClasses() }
+        verify { bpReq.enable() }
+    }
+
+    @Test
+    fun `setBreakpoint with packageName falls back to allClasses if targeted classes have no locations for line`() {
+        val targetedType = mockk<ReferenceType>(relaxed = true)
+        val fallbackType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { vm.classesByName("com.test.MainActivity") } returns listOf(targetedType)
+        every { vm.classesByName("com.test.MainActivityKt") } returns emptyList()
+        every { targetedType.locationsOfLine(42) } returns emptyList()
+
+        every { fallbackType.name() } returns "com.test.MainActivity\$Inner"
+        every { fallbackType.locationsOfLine(42) } returns listOf(location)
+        every { vm.allClasses() } returns listOf(targetedType, fallbackType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(
+            file = "MainActivity.kt",
+            line = 42,
+            condition = null,
+            packageName = "com.test"
+        )
+
+        assertTrue(info.verified)
+        verify(exactly = 1) { vm.allClasses() }
+        verify { bpReq.enable() }
+    }
+
+    @Test
     fun `stepExecution clears old requests and creates new step request`() {
         val thread = mockk<ThreadReference>(relaxed = true)
         every { thread.uniqueID() } returns 1L
