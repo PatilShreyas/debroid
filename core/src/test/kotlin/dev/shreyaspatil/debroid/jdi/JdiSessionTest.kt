@@ -275,6 +275,28 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `setBreakpoint with packageName deduplicates classesByName results`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { vm.classesByName("com.test.MainActivity") } returns listOf(refType)
+        every { vm.classesByName("com.test.MainActivityKt") } returns listOf(refType)
+        every { refType.locationsOfLine(42) } returns listOf(location)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(
+            file = "MainActivity.kt",
+            line = 42,
+            condition = null,
+            packageName = "com.test"
+        )
+
+        assertTrue(info.verified)
+        verify(exactly = 1) { refType.locationsOfLine(42) }
+    }
+
+    @Test
     fun `stepExecution clears old requests and creates new step request`() {
         val thread = mockk<ThreadReference>(relaxed = true)
         every { thread.uniqueID() } returns 1L

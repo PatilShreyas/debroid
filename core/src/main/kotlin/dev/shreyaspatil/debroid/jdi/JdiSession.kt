@@ -151,7 +151,9 @@ class JdiSession(
 
         val fastPathClasses = packageName?.let {
             try {
-                vm.classesByName("$packageName.$classBasename") + vm.classesByName("$packageName.$classBasenameKt")
+                val classMatches = vm.classesByName("$packageName.$classBasename")
+                val kotlinFacadeMatches = vm.classesByName("$packageName.$classBasenameKt")
+                (classMatches + kotlinFacadeMatches).distinct()
             } catch (_: Throwable) {
                 emptyList()
             }
