@@ -11,18 +11,36 @@ import com.github.ajalt.clikt.parameters.arguments.default
 import com.github.ajalt.clikt.parameters.arguments.multiple
 import com.github.ajalt.clikt.parameters.arguments.optional
 import com.github.ajalt.clikt.parameters.options.default
+import com.github.ajalt.clikt.parameters.options.eagerOption
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.options.versionOption
 import com.github.ajalt.clikt.parameters.types.enum
 import com.github.ajalt.clikt.parameters.types.int
+import dev.shreyaspatil.debroid.cli.models.CliBreakpointInfo
 import dev.shreyaspatil.debroid.cli.models.CliDebugError
+import dev.shreyaspatil.debroid.cli.models.CliDetachedResult
+import dev.shreyaspatil.debroid.cli.models.CliEventPollResult
+import dev.shreyaspatil.debroid.cli.models.CliExceptionBreakpointResult
+import dev.shreyaspatil.debroid.cli.models.CliObjectInspectionResult
+import dev.shreyaspatil.debroid.cli.models.CliPauseStateResult
+import dev.shreyaspatil.debroid.cli.models.CliSessionStatus
 import dev.shreyaspatil.debroid.cli.models.CliShutdownResult
+import dev.shreyaspatil.debroid.cli.models.CliStackFrameInfo
+import dev.shreyaspatil.debroid.cli.models.CliStatusResult
+import dev.shreyaspatil.debroid.cli.models.CliVariableInfo
+import dev.shreyaspatil.debroid.cli.models.CliWatchpointResult
 import dev.shreyaspatil.debroid.cli.models.DaemonIpcRequest
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
+import dev.shreyaspatil.debroid.cli.models.JsonSchemaGenerator
 import dev.shreyaspatil.debroid.models.StepAction
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -36,12 +54,24 @@ object CliRunner {
     abstract class BaseJsonCommand(
         name: String? = null,
         help: String = "",
-        epilog: String = ""
+        epilog: String = "",
+        serializer: KSerializer<*>? = null
     ) : CliktCommand(name = name, help = help, epilog = epilog) {
         val pretty by option(
             "--pretty",
             help = "Format JSON output with line breaks and indentation"
         ).flag(default = false)
+
+        init {
+            if (serializer != null) {
+                eagerOption("--schema", help = "Print the JSON response schema for this command") {
+                    val schemaElement = JsonSchemaGenerator.generate(serializer.descriptor)
+                    val json = Json { encodeDefaults = true }
+                    println(json.encodeToString(JsonElement.serializer(), schemaElement))
+                    throw PrintMessage("")
+                }
+            }
+        }
 
         protected fun ensureDaemonAndSend(request: DaemonRequest) {
             CliRunner.ensureDaemonAndSend(request, pretty)
@@ -131,7 +161,8 @@ object CliRunner {
     class ShutdownCommand : BaseJsonCommand(
         name = "stop",
         help = "Shuts down the Debroid persistent background daemon and detaches all active sessions.",
-        epilog = "Safely disposes all active debug sessions and closes ADB port forwards."
+        epilog = "Safely disposes all active debug sessions and closes ADB port forwards.",
+        serializer = CliShutdownResult.serializer()
     ) {
         override fun run() {
             if (!DaemonServer.isDaemonRunning()) {
@@ -147,7 +178,8 @@ object CliRunner {
         name = "launch",
         help = "Launches an application in suspended mode and attaches the debugger.",
         epilog = "This is the safest way to debug initialization code. " +
-            "It forces the app to wait for the debugger before executing."
+            "It forces the app to wait for the debugger before executing.",
+        serializer = CliSessionStatus.serializer()
     ) {
         private val appId by argument("app_id", help = "The Android Application ID (e.g., com.example.app) to launch.")
         override fun run() = ensureDaemonAndSend(DaemonRequest.Launch(appId))
@@ -155,7 +187,8 @@ object CliRunner {
 
     class AttachCommand : BaseJsonCommand(
         name = "attach",
-        help = "Attaches the debugger to an already running application process."
+        help = "Attaches the debugger to an already running application process.",
+        serializer = CliSessionStatus.serializer()
     ) {
         private val appId by argument("app_id", help = "The Android Application ID of the running app.")
         override fun run() = ensureDaemonAndSend(DaemonRequest.Attach(appId))
@@ -164,7 +197,8 @@ object CliRunner {
     class DetachCommand : BaseJsonCommand(
         name = "detach",
         help = "Detaches the debugger and safely terminates the debug session.",
-        epilog = "The application will continue to run normally after detachment."
+        epilog = "The application will continue to run normally after detachment.",
+        serializer = CliDetachedResult.serializer()
     ) {
         private val sessionId by argument(
             "session_id",
@@ -175,7 +209,8 @@ object CliRunner {
 
     class BreakCommand : BaseJsonCommand(
         name = "break",
-        help = "Sets a line breakpoint in a specific source file."
+        help = "Sets a line breakpoint in a specific source file.",
+        serializer = CliBreakpointInfo.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val file by argument("file", help = "The source file name (e.g., MainActivity.kt).")
@@ -200,7 +235,8 @@ object CliRunner {
 
     class RemoveBreakCommand : BaseJsonCommand(
         name = "remove-break",
-        help = "Removes a previously set line breakpoint."
+        help = "Removes a previously set line breakpoint.",
+        serializer = CliStatusResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val breakpointId by argument("breakpoint_id", help = "The breakpoint ID returned by break.")
@@ -211,7 +247,8 @@ object CliRunner {
         name = "catch-exception",
         help = "Sets a breakpoint that triggers when an exception is thrown.",
         epilog = "By default only UNCAUGHT exceptions are trapped. Use --caught to also trap caught exceptions, " +
-            "and (optionally) restrict to a specific exception class."
+            "and (optionally) restrict to a specific exception class.",
+        serializer = CliExceptionBreakpointResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val className by argument(
@@ -228,7 +265,8 @@ object CliRunner {
 
     class RemoveCatchExceptionCommand : BaseJsonCommand(
         name = "remove-catch-exception",
-        help = "Removes a previously set exception breakpoint."
+        help = "Removes a previously set exception breakpoint.",
+        serializer = CliStatusResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val bpId by argument(
@@ -241,7 +279,8 @@ object CliRunner {
     class WatchCommand : BaseJsonCommand(
         name = "watch",
         help = "Sets a watchpoint on a specific field to monitor access and/or modifications.",
-        epilog = "Defaults to BOTH access and modify. Pass --no-access or --no-modify to disable either."
+        epilog = "Defaults to BOTH access and modify. Pass --no-access or --no-modify to disable either.",
+        serializer = CliWatchpointResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val className by argument("class_name", help = "The fully qualified class name containing the field.")
@@ -267,7 +306,8 @@ object CliRunner {
 
     class RemoveWatchCommand : BaseJsonCommand(
         name = "remove-watch",
-        help = "Removes a previously set watchpoint."
+        help = "Removes a previously set watchpoint.",
+        serializer = CliStatusResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val watchpointId by argument("watchpoint_id", help = "The watchpoint ID returned by watch.")
@@ -277,7 +317,8 @@ object CliRunner {
     class ThreadsCommand : BaseJsonCommand(
         name = "threads",
         help = "Lists all active threads in the target application.",
-        epilog = "Useful for finding the thread ID (e.g., '1' for main thread) to inspect locals or pause state."
+        epilog = "Useful for finding the thread ID (e.g., '1' for main thread) to inspect locals or pause state.",
+        serializer = ListSerializer(CliStatusResult.serializer())
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         override fun run() = ensureDaemonAndSend(DaemonRequest.Threads(sessionId))
@@ -285,7 +326,8 @@ object CliRunner {
 
     class LocalsCommand : BaseJsonCommand(
         name = "locals",
-        help = "Retrieves shallow local variables for the top stack frame of a suspended thread."
+        help = "Retrieves shallow local variables for the top stack frame of a suspended thread.",
+        serializer = ListSerializer(CliVariableInfo.serializer())
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val threadId by argument("thread_id", help = "The ID of the suspended thread to inspect.")
@@ -294,7 +336,8 @@ object CliRunner {
 
     class PauseStateCommand : BaseJsonCommand(
         name = "pause-state",
-        help = "Retrieves the current execution state (stack trace, current file, line) of a suspended thread."
+        help = "Retrieves the current execution state (stack trace, current file, line) of a suspended thread.",
+        serializer = CliPauseStateResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val threadId by argument("thread_id", help = "The ID of the suspended thread.")
@@ -303,7 +346,8 @@ object CliRunner {
 
     class SetVarCommand : BaseJsonCommand(
         name = "set-var",
-        help = "Mutates the value of a local variable in the currently suspended frame memory."
+        help = "Mutates the value of a local variable in the currently suspended frame memory.",
+        serializer = CliVariableInfo.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val threadId by argument("thread_id", help = "The ID of the suspended thread.")
@@ -316,7 +360,8 @@ object CliRunner {
 
     class EvalCommand : BaseJsonCommand(
         name = "eval",
-        help = "Evaluates a raw string expression or performs string concatenation within the debugged process."
+        help = "Evaluates a raw string expression or performs string concatenation within the debugged process.",
+        serializer = CliVariableInfo.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val threadId by argument("thread_id", help = "The ID of the suspended thread.")
@@ -328,7 +373,8 @@ object CliRunner {
 
     class ResumeCommand : BaseJsonCommand(
         name = "resume",
-        help = "Resumes execution of all threads."
+        help = "Resumes execution of all threads.",
+        serializer = CliStatusResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         override fun run() = ensureDaemonAndSend(DaemonRequest.Resume(sessionId))
@@ -337,7 +383,8 @@ object CliRunner {
     class PollCommand : BaseJsonCommand(
         name = "poll",
         help = "Polls the JDWP event queue for new debugger events (like breakpoints hit).",
-        epilog = "Returns events sequentially. Provide the cursor returned by the last poll to get newer events."
+        epilog = "Returns events sequentially. Provide the cursor returned by the last poll to get newer events.",
+        serializer = CliEventPollResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val cursor by argument(
@@ -353,7 +400,8 @@ object CliRunner {
 
     class FramesCommand : BaseJsonCommand(
         name = "frames",
-        help = "Retrieves the stack frames for a suspended thread."
+        help = "Retrieves the stack frames for a suspended thread.",
+        serializer = ListSerializer(CliStackFrameInfo.serializer())
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val threadId by argument("thread_id", help = "The ID of the suspended thread.")
@@ -362,7 +410,8 @@ object CliRunner {
 
     class CoroutineCommand : BaseJsonCommand(
         name = "coroutine",
-        help = "Retrieves local variables from a suspended coroutine continuation object."
+        help = "Retrieves local variables from a suspended coroutine continuation object.",
+        serializer = MapSerializer(String.serializer(), CliVariableInfo.serializer())
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val continuationId by argument("continuation_id", help = "The object ID of the Coroutine Continuation.")
@@ -371,7 +420,8 @@ object CliRunner {
 
     class InspectCommand : BaseJsonCommand(
         name = "inspect",
-        help = "Inspects an object's fields up to a specified depth."
+        help = "Inspects an object's fields up to a specified depth.",
+        serializer = CliObjectInspectionResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val objectId by argument("object_id", help = "The ID of the object to inspect.")
@@ -383,7 +433,8 @@ object CliRunner {
 
     class StepCommand : BaseJsonCommand(
         name = "step",
-        help = "Performs a stepping action (over, into, out, resume, resume-all) on a suspended thread."
+        help = "Performs a stepping action (over, into, out, resume, resume-all) on a suspended thread.",
+        serializer = CliStatusResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val threadId by argument("thread_id", help = "The ID of the suspended thread.")

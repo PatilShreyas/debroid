@@ -1,0 +1,26 @@
+{
+    "description": "Information about a line breakpoint",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "string",
+            "description": "Unique breakpoint ID"
+        },
+        "sessionId": {
+            "type": "string",
+            "description": "Session ID owning this breakpoint"
+        },
+        "file": {
+            "type": "string",
+            "description": "Source file name"
+        },
+        "line": {
+            "type": "integer",
+            "description": "1-indexed line number"
+        },
+        "verified": {
+            "type": "boolean",
+            "description": "Whether the breakpoint is bound to a loaded VM class"
+        }
+    }
+}

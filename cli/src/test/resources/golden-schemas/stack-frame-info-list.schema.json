@@ -1,0 +1,35 @@
+{
+    "type": "array",
+    "items": {
+        "description": "Information about a single stack frame",
+        "type": "object",
+        "properties": {
+            "frameIndex": {
+                "type": "integer",
+                "description": "0-indexed frame depth index"
+            },
+            "methodName": {
+                "type": "string",
+                "description": "Name of the method executing in this frame"
+            },
+            "declaringClass": {
+                "type": "string",
+                "description": "Fully qualified class name declaring the method"
+            },
+            "sourceFile": {
+                "type": "string",
+                "nullable": true,
+                "description": "Source file name if available"
+            },
+            "lineNumber": {
+                "type": "integer",
+                "description": "1-indexed line number in source file"
+            },
+            "coroutineContinuationObjectId": {
+                "type": "string",
+                "nullable": true,
+                "description": "Object ID of Kotlin Continuation if this frame is a coroutine"
+            }
+        }
+    }
+}

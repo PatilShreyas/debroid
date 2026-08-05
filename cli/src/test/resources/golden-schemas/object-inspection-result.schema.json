@@ -1,0 +1,54 @@
+{
+    "description": "Result of inspecting object fields in heap memory",
+    "type": "object",
+    "properties": {
+        "objectId": {
+            "type": "string",
+            "description": "Heap object ID of the inspected instance"
+        },
+        "type": {
+            "type": "string",
+            "description": "Fully qualified class type of the object"
+        },
+        "fields": {
+            "type": "object",
+            "additionalProperties": {
+                "description": "Representation of a local variable or instance field",
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Variable or field name"
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Fully qualified data type name"
+                    },
+                    "valuePreview": {
+                        "type": "string",
+                        "description": "Preview string of the variable value"
+                    },
+                    "isPrimitive": {
+                        "type": "boolean",
+                        "description": "Whether the variable is a primitive or String"
+                    },
+                    "objectId": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Heap object ID for non-primitive reference objects"
+                    }
+                }
+            },
+            "description": "Map of field names to their variable info"
+        },
+        "nested": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "$ref": "#/definitions/CliObjectInspectionResult"
+            },
+            "nullable": true,
+            "description": "Map of field names to nested object inspection results when max-depth > 1"
+        }
+    }
+}

@@ -1,0 +1,10 @@
+{
+    "description": "Result when setting an exception breakpoint",
+    "type": "object",
+    "properties": {
+        "exceptionBreakpointId": {
+            "type": "string",
+            "description": "Unique ID of the created exception breakpoint"
+        }
+    }
+}

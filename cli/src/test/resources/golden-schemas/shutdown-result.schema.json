@@ -1,0 +1,14 @@
+{
+    "description": "Result when the background daemon is shut down",
+    "type": "object",
+    "properties": {
+        "shutdown": {
+            "type": "boolean",
+            "description": "Whether daemon shutdown succeeded"
+        },
+        "message": {
+            "type": "string",
+            "description": "Shutdown status message"
+        }
+    }
+}

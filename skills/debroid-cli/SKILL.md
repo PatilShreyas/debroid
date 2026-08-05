@@ -24,7 +24,7 @@ Activate this skill whenever the user or task involves:
 4. **Track trap IDs and remove them when done**. Every `break`, `catch-exception`, and `watch` returns an ID. Use `remove-break`, `remove-catch-exception`, `remove-watch` to clear traps you no longer need so they don't fire unexpectedly and waste poll cycles.
 5. **Keep IDs in working memory, not in long scratch buffers.** A typical session uses 1–3 trap IDs plus 1 thread ID — keep them inline.
 6. **Use Background Tasks**: If you are using an agentic system that supports background tasks, run `debroid daemon` as a background task.
-7. **Token efficiency**: All JSON responses are compact single-line by default to conserve agent context tokens. If formatted multi-line JSON is required, append the `--pretty` flag to any JSON command. Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
+7. **Token efficiency & Schema Inspection**: All JSON responses are compact single-line by default to conserve agent context tokens. If formatted multi-line JSON is required, append the `--pretty` flag to any JSON command. To inspect the expected output JSON structure for any command without running a session, pass the `--schema` flag (e.g., `debroid pause-state --schema`). Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
 8. **Self-Recovery**: If a session becomes unresponsive or gets out of sync, run `debroid stop` to cleanly terminate the daemon and release ADB ports. The next `debroid` command will auto-restart a fresh daemon.
 
 ## 🔄 Standard Debugging Workflow
@@ -121,8 +121,30 @@ debroid detach <session_id>
 - **`detached` of `launch`'d session and app won't start normally**: Should not happen — `detach` clears `am set-debug-app`. If it does (e.g. daemon was forcibly killed), run `adb shell am clear-debug-app` once.
 - **Daemon or Session Unresponsive**: Run `debroid stop` to terminate the background server and clear ADB port forwards. The next `debroid` command will automatically spawn a fresh, clean daemon.
 
+## 📊 Token-Efficient JSON Extraction & Querying Guidelines
+
+To keep context windows clean and minimize token consumption during debugging sessions:
+
+1. **Direct Output Reading (Default for Small/Medium Commands)**:
+   - For `attach`, `launch`, `break`, `locals`, `pause-state`, `set-var`, `eval`: Read `stdout` directly into context memory. Single-line compact responses take only ~50-80 tokens.
+2. **Filtering Large Payloads via `jq` / Python (When Payload is Large)**:
+   - For deep `inspect` queries (`-d 2+`) or long event `poll` responses with stacktraces, pass `--schema` upfront to know key names, then pipe output through `jq` in the shell to extract target fields before reading into context:
+     ```bash
+     # Filter specific local variable from pause-state:
+     debroid pause-state <session_id> <thread_id> | jq '.locals[] | select(.name=="targetVar")'
+
+     # Extract specific field during deep object inspection:
+     debroid inspect <session_id> <object_id> -d 2 | jq '.fields.order'
+
+     # Extract event types and exception messages from poll:
+     debroid poll <session_id> <cursor> --with-stacktrace | jq '.events[] | {eventType, className, exceptionMessage}'
+     ```
+3. **Direct VM Expression Querying (`eval`)**:
+   - To query a single calculated primitive value or method result (e.g. `order.getAmount()` or `list.size()`), call `debroid eval <session_id> <thread_id> "<expr>"`. This evaluates the expression directly in the Dalvik/ART VM and returns a tiny single-value payload (< 20 tokens).
+
 ## 📖 Complete CLI Command Reference
-Here is the full list of commands and their signatures (note: all JSON commands accept an optional `--pretty` flag to format response JSON):
+Here is the full list of commands and their signatures (note: all JSON commands accept an optional `--pretty` flag to format response JSON, and an eager `--schema` flag to inspect output types):
+
 | Command | Signature | Description |
 | :--- | :--- | :--- |
 | `daemon` | `debroid daemon` | Starts the persistent background daemon |

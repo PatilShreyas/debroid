@@ -1,0 +1,10 @@
+{
+    "description": "Result when setting a field watchpoint",
+    "type": "object",
+    "properties": {
+        "watchpointId": {
+            "type": "string",
+            "description": "Unique ID of the created watchpoint"
+        }
+    }
+}

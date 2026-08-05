@@ -1,0 +1,10 @@
+{
+    "description": "Result when a debug session is detached",
+    "type": "object",
+    "properties": {
+        "detached": {
+            "type": "boolean",
+            "description": "Whether the session was successfully detached"
+        }
+    }
+}
