@@ -39,7 +39,7 @@ Traditional Android development environments are highly visual. While AI coding 
 **Option 1: Quick Install (Pre-built Release Binary)**
 Run the one-liner script to download the latest release binary and install it:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/install.sh | bash -s -- --remote
+curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/install.sh | bash
 ```
 
 **Option 2: Local Build Install (Build from Source)**
