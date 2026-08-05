@@ -27,7 +27,7 @@ set -e
 REPO_OWNER="PatilShreyas"
 REPO_NAME="debroid"
 BINARY_NAME="debroid"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${HOME}/.local/bin"
 RELEASE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${BINARY_NAME}"
 
 # Parse explicit command-line flags
@@ -124,21 +124,38 @@ EOF
 fi
 
 # ==============================================================================
-# Execution Step 2: Install Binary into System PATH
+# Execution Step 2: Install Binary into User Local Directory
 # ==============================================================================
 
+mkdir -p "$INSTALL_DIR"
 echo "🚀 Installing '${BINARY_NAME}' into ${INSTALL_DIR}..."
+mv "$BINARY_NAME" "${INSTALL_DIR}/${BINARY_NAME}"
 
-# Check if target installation directory is writable without root privileges
-if [ -w "$INSTALL_DIR" ]; then
-    mv "$BINARY_NAME" "${INSTALL_DIR}/${BINARY_NAME}"
+# ==============================================================================
+# Execution Step 3: Verify PATH and Java Runtime Environment
+# ==============================================================================
+
+echo ""
+echo "🔍 Checking Java runtime..."
+if command -v java >/dev/null 2>&1 && java -version >/dev/null 2>&1; then
+    JAVA_VERSION_STR=$(java -version 2>&1 | head -n 1)
+    echo "✅ Java runtime detected: $JAVA_VERSION_STR"
 else
-    echo "🔑 Requesting sudo privileges to move binary into ${INSTALL_DIR}..."
-    sudo mv "$BINARY_NAME" "${INSTALL_DIR}/${BINARY_NAME}"
+    echo "⚠️  Warning: Java runtime not found or unconfigured in PATH!"
+    echo "   Debroid requires Java 11 or higher (JDK 11 / 17 / 21) to debug Android apps."
+    echo "   Please install OpenJDK or set JAVA_HOME in your shell profile (e.g., ~/.zshrc)."
+fi
+
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    echo ""
+    echo "⚠️  Notice: '${INSTALL_DIR}' is not in your current system PATH."
+    echo "   To run 'debroid' directly from anywhere, add it to your shell configuration:"
+    echo "   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
+    echo "   source ~/.zshrc"
 fi
 
 echo "=============================================================================="
 echo "🎉 Debroid installed successfully!"
 echo "   Location: ${INSTALL_DIR}/${BINARY_NAME}"
-echo "   Test it:  debroid --help"
+echo "   Test it:  debroid --help (or ${INSTALL_DIR}/${BINARY_NAME} --help)"
 echo "=============================================================================="
