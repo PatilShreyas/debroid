@@ -31,9 +31,7 @@ Traditional Android development environments are highly visual. While AI coding 
 ## 🚀 Installation
 
 > [!TIP]
-> **Let your AI Agent do it for you!**
-> 
-> Copy & paste this prompt directly to your AI coding assistant (Claude Code, Cursor, Antigravity, OpenCode, Codex):
+> **Let your AI Agent do it for you!** Copy & paste this prompt directly to your AI agent:
 > ```text
 > Read https://raw.githubusercontent.com/PatilShreyas/debroid/main/README.md and install the Debroid CLI and its skill globally for me.
 > ```
