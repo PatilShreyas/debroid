@@ -8,8 +8,8 @@ import com.sun.jdi.PrimitiveValue
 import com.sun.jdi.ReferenceType
 import com.sun.jdi.StringReference
 import com.sun.jdi.ThreadReference
-import com.sun.jdi.Value
 import com.sun.jdi.VMDisconnectedException
+import com.sun.jdi.Value
 import com.sun.jdi.VirtualMachine
 import com.sun.jdi.event.AccessWatchpointEvent
 import com.sun.jdi.event.BreakpointEvent
@@ -44,6 +44,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
+@Suppress("TooManyFunctions")
 class JdiSession(
     val sessionId: String,
     val appId: String,
@@ -804,183 +805,206 @@ class JdiSession(
         )
     }
 
-    @Suppress("NestedBlockDepth")
     private fun runEventListener() {
         val eventQueue = vm.eventQueue()
         while (isConnected.get()) {
             try {
                 val eventSet = eventQueue.remove(1000) ?: continue
                 for (event in eventSet) {
-                    when (event) {
-                        is ClassPrepareEvent -> {
-                            val preparedClass = event.referenceType()
-                            // Resolve deferred watchpoints (B5: list-based, multiple per class).
-                            val deferredWps = deferredWatchpoints.remove(preparedClass.name())
-                            deferredWps?.forEach { dw ->
-                                bindWatchpointForRefType(
-                                    id = dw.id,
-                                    refType = preparedClass,
-                                    fieldName = dw.fieldName,
-                                    access = dw.access,
-                                    modify = dw.modify
-                                )
-                            }
-
-                            // Resolve deferred line breakpoints. A single Kotlin file can contain
-                            // multiple top-level classes (e.g. OrderProcessor + DefaultDataRepository in
-                            // DataRepository.kt), so we match via sourceName AND the simple-name heuristic,
-                            // then fall back to trying locationsOfLine directly (B1).
-                            val preparedSimpleName = preparedClass.name().substringAfterLast('.')
-                            val iter = deferredBreakpoints.entries.iterator()
-                            while (iter.hasNext()) {
-                                val (bpId, deferred) = iter.next()
-                                val basename = deferred.file.substringAfterLast(
-                                    '/'
-                                ).substringAfterLast('\\').substringBeforeLast('.')
-                                val basenameKt = "${basename}Kt"
-                                val nameMatches = run {
-                                    // Try sourceName first (most accurate for Kotlin multi-class files).
-                                    val srcMatches = try {
-                                        preparedClass.sourceName() == deferred.file
-                                    } catch (e: Throwable) {
-                                        // AbsentInformationException: no source info.
-                                        // InternalError: bad SourceDebugExtension on some ART classes;
-                                        // either way fall back to the simple-name heuristic below.
-                                        false
-                                    }
-                                    if (srcMatches) return@run true
-                                    // Fall back to simple-name heuristic.
-                                    preparedSimpleName == basename ||
-                                        preparedSimpleName == basenameKt ||
-                                        preparedSimpleName.startsWith("$basename$") ||
-                                        preparedSimpleName.startsWith("$basenameKt$")
-                                }
-                                if (!nameMatches) continue
-                                try {
-                                    val locations = preparedClass.locationsOfLine(deferred.line)
-                                    if (locations.isNotEmpty()) {
-                                        val reqs = mutableListOf<BreakpointRequest>()
-                                        for (loc in locations) {
-                                            val bpReq = vm.eventRequestManager().createBreakpointRequest(loc)
-                                            bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-                                            bpReq.enable()
-                                            reqs.add(bpReq)
-                                        }
-                                        jdiBreakpointRequests[bpId] = reqs
-                                        val existing = activeBreakpoints[bpId]
-                                        if (existing != null) {
-                                            activeBreakpoints[bpId] = existing.copy(verified = true)
-                                        }
-                                        iter.remove()
-                                    }
-                                } catch (e: Throwable) {
-                                    // Class loaded without line info, or locationsOfLine threw;
-                                    // keep deferred and try on next class load.
-                                }
-                            }
-                            maybeDisableClassPrepareRequest()
-                            eventSet.resume()
-                        }
-                        is BreakpointEvent -> {
-                            val loc = event.location()
-                            pushEvent(
-                                DebugEventPayload(
-                                    eventType = EventType.BREAKPOINT_HIT,
-                                    sessionId = sessionId,
-                                    threadId = event.thread().uniqueID().toString(),
-                                    threadName = event.thread().name(),
-                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
-                                    className = loc.declaringType().name(),
-                                    stacktrace = getFramesSafely(event.thread())
-                                )
-                            )
-                        }
-                        is StepEvent -> {
-                            val loc = event.location()
-                            pushEvent(
-                                DebugEventPayload(
-                                    eventType = EventType.STEP_HIT,
-                                    sessionId = sessionId,
-                                    threadId = event.thread().uniqueID().toString(),
-                                    threadName = event.thread().name(),
-                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
-                                    className = loc.declaringType().name(),
-                                    stacktrace = getFramesSafely(event.thread())
-                                )
-                            )
-                        }
-                        is ExceptionEvent -> {
-                            val loc = event.location()
-                            pushEvent(
-                                DebugEventPayload(
-                                    eventType = EventType.EXCEPTION_HIT,
-                                    sessionId = sessionId,
-                                    threadId = event.thread().uniqueID().toString(),
-                                    threadName = event.thread().name(),
-                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
-                                    className = loc.declaringType().name(),
-                                    exceptionMessage = event.exception().referenceType().name(),
-                                    stacktrace = getFramesSafely(event.thread())
-                                )
-                            )
-                        }
-                        is AccessWatchpointEvent -> {
-                            val loc = event.location()
-                            pushEvent(
-                                DebugEventPayload(
-                                    eventType = EventType.WATCHPOINT_ACCESS_HIT,
-                                    sessionId = sessionId,
-                                    threadId = event.thread().uniqueID().toString(),
-                                    threadName = event.thread().name(),
-                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
-                                    className = loc.declaringType().name(),
-                                    exceptionMessage = "Field ${event.field().name()} accessed"
-                                )
-                            )
-                        }
-                        is ModificationWatchpointEvent -> {
-                            val loc = event.location()
-                            pushEvent(
-                                DebugEventPayload(
-                                    eventType = EventType.WATCHPOINT_MODIFY_HIT,
-                                    sessionId = sessionId,
-                                    threadId = event.thread().uniqueID().toString(),
-                                    threadName = event.thread().name(),
-                                    location = "${safeSourceName(loc)}:${loc.lineNumber()}",
-                                    className = loc.declaringType().name(),
-                                    exceptionMessage = "Field ${event.field().name()} modified to ${event.valueToBe()}"
-                                )
-                            )
-                        }
-                        is VMDeathEvent, is VMDisconnectEvent -> {
-                            isConnected.set(false)
-                            adbManager.removePortForward(localPort)
-                            pushEvent(
-                                DebugEventPayload(
-                                    eventType = EventType.DISCONNECT,
-                                    sessionId = sessionId,
-                                    threadId = null,
-                                    threadName = null,
-                                    location = null,
-                                    className = null
-                                )
-                            )
-                        }
-                    }
+                    processJdiEvent(event, eventSet)
                 }
-            } catch (e: InterruptedException) {
+            } catch (_: InterruptedException) {
                 break
-            } catch (e: VMDisconnectedException) {
+            } catch (_: VMDisconnectedException) {
                 isConnected.set(false)
                 break
             } catch (e: Throwable) {
-                // Catch Throwable (not just Exception) because JDI can throw InternalError /
-                // VMOutOfMemoryError from ART's SourceDebugExtension parsing. Killing this
-                // thread would leave the app suspended forever; log and keep looping.
                 if (!isConnected.get()) break
                 System.err.println("[JdiSession:$sessionId] event listener caught: ${e::class.java.name}: ${e.message}")
             }
         }
+    }
+
+    private fun processJdiEvent(event: com.sun.jdi.event.Event, eventSet: com.sun.jdi.event.EventSet) {
+        when (event) {
+            is ClassPrepareEvent -> handleClassPrepareEvent(event, eventSet)
+            is BreakpointEvent -> handleBreakpointEvent(event)
+            is StepEvent -> handleStepEvent(event)
+            is ExceptionEvent -> handleExceptionEvent(event)
+            is AccessWatchpointEvent -> handleAccessWatchpointEvent(event)
+            is ModificationWatchpointEvent -> handleModificationWatchpointEvent(event)
+            is VMDeathEvent, is VMDisconnectEvent -> handleDisconnectEvent()
+        }
+    }
+
+    private fun handleClassPrepareEvent(event: ClassPrepareEvent, eventSet: com.sun.jdi.event.EventSet) {
+        val preparedClass = event.referenceType()
+        resolveDeferredWatchpointsForClass(preparedClass)
+        resolveDeferredBreakpointsForClass(preparedClass)
+        maybeDisableClassPrepareRequest()
+        eventSet.resume()
+    }
+
+    private fun resolveDeferredWatchpointsForClass(preparedClass: ReferenceType) {
+        val deferredWps = deferredWatchpoints.remove(preparedClass.name())
+        deferredWps?.forEach { dw ->
+            bindWatchpointForRefType(
+                id = dw.id,
+                refType = preparedClass,
+                fieldName = dw.fieldName,
+                access = dw.access,
+                modify = dw.modify
+            )
+        }
+    }
+
+    private fun resolveDeferredBreakpointsForClass(preparedClass: ReferenceType) {
+        val preparedSimpleName = preparedClass.name().substringAfterLast('.')
+        val iter = deferredBreakpoints.entries.iterator()
+        while (iter.hasNext()) {
+            val (bpId, deferred) = iter.next()
+            if (isClassMatchForDeferredBreakpoint(preparedClass, preparedSimpleName, deferred.file)) {
+                tryBindDeferredBreakpoint(bpId, deferred.line, preparedClass, iter)
+            }
+        }
+    }
+
+    private fun isClassMatchForDeferredBreakpoint(
+        preparedClass: ReferenceType,
+        preparedSimpleName: String,
+        deferredFile: String
+    ): Boolean {
+        val basename = deferredFile.substringAfterLast('/').substringAfterLast('\\').substringBeforeLast('.')
+        val basenameKt = "${basename}Kt"
+        val srcMatches = try {
+            preparedClass.sourceName() == deferredFile
+        } catch (_: Throwable) {
+            false
+        }
+        if (srcMatches) return true
+        return preparedSimpleName == basename ||
+            preparedSimpleName == basenameKt ||
+            preparedSimpleName.startsWith("$basename$") ||
+            preparedSimpleName.startsWith("$basenameKt$")
+    }
+
+    private fun tryBindDeferredBreakpoint(
+        bpId: String,
+        line: Int,
+        preparedClass: ReferenceType,
+        iter: MutableIterator<MutableMap.MutableEntry<String, DeferredBreakpoint>>
+    ) {
+        try {
+            val locations = preparedClass.locationsOfLine(line)
+            if (locations.isNotEmpty()) {
+                val reqs = mutableListOf<BreakpointRequest>()
+                for (loc in locations) {
+                    val bpReq = vm.eventRequestManager().createBreakpointRequest(loc)
+                    bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+                    bpReq.enable()
+                    reqs.add(bpReq)
+                }
+                jdiBreakpointRequests[bpId] = reqs
+                val existing = activeBreakpoints[bpId]
+                if (existing != null) {
+                    activeBreakpoints[bpId] = existing.copy(verified = true)
+                }
+                iter.remove()
+            }
+        } catch (_: Throwable) {
+            // Keep deferred and try on next class load
+        }
+    }
+
+    private fun handleBreakpointEvent(event: BreakpointEvent) {
+        val loc = event.location()
+        pushEvent(
+            DebugEventPayload(
+                eventType = EventType.BREAKPOINT_HIT,
+                sessionId = sessionId,
+                threadId = event.thread().uniqueID().toString(),
+                threadName = event.thread().name(),
+                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
+                className = loc.declaringType().name(),
+                stacktrace = getFramesSafely(event.thread())
+            )
+        )
+    }
+
+    private fun handleStepEvent(event: StepEvent) {
+        val loc = event.location()
+        pushEvent(
+            DebugEventPayload(
+                eventType = EventType.STEP_HIT,
+                sessionId = sessionId,
+                threadId = event.thread().uniqueID().toString(),
+                threadName = event.thread().name(),
+                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
+                className = loc.declaringType().name(),
+                stacktrace = getFramesSafely(event.thread())
+            )
+        )
+    }
+
+    private fun handleExceptionEvent(event: ExceptionEvent) {
+        val loc = event.location()
+        pushEvent(
+            DebugEventPayload(
+                eventType = EventType.EXCEPTION_HIT,
+                sessionId = sessionId,
+                threadId = event.thread().uniqueID().toString(),
+                threadName = event.thread().name(),
+                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
+                className = loc.declaringType().name(),
+                exceptionMessage = event.exception().referenceType().name(),
+                stacktrace = getFramesSafely(event.thread())
+            )
+        )
+    }
+
+    private fun handleAccessWatchpointEvent(event: AccessWatchpointEvent) {
+        val loc = event.location()
+        pushEvent(
+            DebugEventPayload(
+                eventType = EventType.WATCHPOINT_ACCESS_HIT,
+                sessionId = sessionId,
+                threadId = event.thread().uniqueID().toString(),
+                threadName = event.thread().name(),
+                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
+                className = loc.declaringType().name(),
+                exceptionMessage = "Field ${event.field().name()} accessed"
+            )
+        )
+    }
+
+    private fun handleModificationWatchpointEvent(event: ModificationWatchpointEvent) {
+        val loc = event.location()
+        pushEvent(
+            DebugEventPayload(
+                eventType = EventType.WATCHPOINT_MODIFY_HIT,
+                sessionId = sessionId,
+                threadId = event.thread().uniqueID().toString(),
+                threadName = event.thread().name(),
+                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
+                className = loc.declaringType().name(),
+                exceptionMessage = "Field ${event.field().name()} modified to ${event.valueToBe()}"
+            )
+        )
+    }
+
+    private fun handleDisconnectEvent() {
+        isConnected.set(false)
+        adbManager.removePortForward(localPort)
+        pushEvent(
+            DebugEventPayload(
+                eventType = EventType.DISCONNECT,
+                sessionId = sessionId,
+                threadId = null,
+                threadName = null,
+                location = null,
+                className = null
+            )
+        )
     }
 
     fun detach() {
