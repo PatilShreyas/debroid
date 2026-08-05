@@ -73,19 +73,19 @@ The skill file is embedded directly inside the `debroid` CLI binary and is also 
 
 Run one of the following commands to install the skill for your preferred AI agent:
 
-* **Antigravity & Antigravity CLI** (Global):
+* **Antigravity & Antigravity CLI**:
   ```bash
   mkdir -p ~/.gemini/skills/debroid && debroid skill > ~/.gemini/skills/debroid/SKILL.md
   ```
-* **Claude Code** (Global Commands):
+* **Claude Code**:
   ```bash
   mkdir -p ~/.claude/commands && debroid skill > ~/.claude/commands/debroid.md
   ```
-* **Cursor** (Global Rules):
+* **Cursor**:
   ```bash
   mkdir -p ~/.cursor/rules && debroid skill > ~/.cursor/rules/debroid.mdc
   ```
-* **Codex / OpenCode** (Global Instructions):
+* **Codex / OpenCode**:
   ```bash
   mkdir -p ~/.codex/rules && debroid skill > ~/.codex/rules/debroid.md
   ```
