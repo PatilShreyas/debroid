@@ -49,6 +49,20 @@ Clone the repository and build locally:
 ```
 *Note: The script installs the `debroid` binary to `/usr/local/bin` (may request `sudo` if `/usr/local/bin` is not user-writable).*
 
+<details>
+<summary><b>🗑️ How to uninstall</b></summary>
+
+To completely remove Debroid from your system:
+1. Stop any active background daemon sessions:
+   ```bash
+   debroid stop
+   ```
+2. Remove the binary executable:
+   ```bash
+   sudo rm /usr/local/bin/debroid
+   ```
+</details>
+
 ## 🧠 AI Agent Skill Setup
 
 Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, you must provide it with the skill instructions.
