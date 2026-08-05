@@ -394,11 +394,14 @@ class JdiSession(
                 }
             }
             StepAction.RESUME_ALL -> {
-                val maxSuspendCount = vm.allThreads().maxOfOrNull { it.suspendCount() } ?: 1
-                for (i in 0 until maxSuspendCount) {
-                    vm.resume()
-                }
+                resumeAll()
             }
+        }
+    }
+
+    fun resumeAll() {
+        repeat(vm.allThreads().maxOfOrNull { it.suspendCount() } ?: 1) {
+            vm.resume()
         }
     }
 

@@ -311,14 +311,10 @@ object CliRunner {
 
     class ResumeCommand : CliktCommand(
         name = "resume",
-        help = "Resumes execution of a target thread or all threads."
+        help = "Resumes execution of all threads."
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
-        private val threadId by argument(
-            "thread_id",
-            help = "The ID of the thread to resume (defaults to 1)."
-        ).default("1")
-        override fun run() = ensureDaemonAndSend(DaemonRequest.Resume(sessionId, threadId))
+        override fun run() = ensureDaemonAndSend(DaemonRequest.Resume(sessionId))
     }
 
     class PollCommand : CliktCommand(

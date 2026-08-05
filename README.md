@@ -73,7 +73,7 @@ Agents can use the CLI to orchestrate the debug session. The daemon is auto-star
 | `pause-state` | `debroid pause-state <session_id> <thread_id>` | Gets frames, locals, and instance state |
 | `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value>` | Mutates local variable |
 | `eval` | `debroid eval <session_id> <thread_id> <expression...>` | Evaluates string expression |
-| `resume` | `debroid resume <session_id> [thread_id]` | Resumes all threads |
+| `resume` | `debroid resume <session_id>` | Resumes all threads |
 | `poll` | `debroid poll <session_id> [cursor=0] [--with-stacktrace]` | Polls for asynchronous debugger events |
 | `frames` | `debroid frames <session_id> <thread_id>` | Retrieves thread stack frames |
 | `coroutine` | `debroid coroutine <session_id> <continuation_id>` | Retrieves locals from a Continuation object |
