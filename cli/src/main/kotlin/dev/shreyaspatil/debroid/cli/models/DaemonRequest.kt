@@ -60,7 +60,7 @@ sealed class DaemonRequest {
 
     @Serializable data class Eval(val sessionId: String, val threadId: String, val expression: String) : DaemonRequest()
 
-    @Serializable data class Resume(val sessionId: String, val threadId: String) : DaemonRequest()
+    @Serializable data class Resume(val sessionId: String) : DaemonRequest()
 
     @Serializable
     data class Poll(

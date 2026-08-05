@@ -10,7 +10,6 @@ import dev.shreyaspatil.debroid.cli.models.CliWatchpointResult
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
 import dev.shreyaspatil.debroid.cli.models.toCli
 import dev.shreyaspatil.debroid.jdi.JdiSessionManager
-import dev.shreyaspatil.debroid.models.StepAction
 import dev.shreyaspatil.debroid.models.VariableScope
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -182,8 +181,8 @@ object DaemonServer {
                 }
                 is DaemonRequest.Resume -> {
                     val session = sessionManager.getSession(request.sessionId)
-                    session.stepExecution(request.threadId, StepAction.RESUME_ALL)
-                    json.encodeToString(CliStatusResult("resumed"))
+                    session.resumeAll()
+                    json.encodeToString(CliStatusResult("resumed all threads"))
                 }
                 is DaemonRequest.Poll -> {
                     val session = sessionManager.getSession(request.sessionId)

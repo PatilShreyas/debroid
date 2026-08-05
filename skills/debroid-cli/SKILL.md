@@ -97,8 +97,8 @@ debroid pause-state <session_id> <thread_id>
     - **String Operations & Logic**: Supports boolean logic and string method invocations (e.g., `order.getCustomerType().equals("GOLD")`).
     - **Field Inspection**: To view an object's instance fields without getter methods, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
 - Step execution: `debroid step <session_id> <thread_id> <ACTION>` (Actions: `STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`)
-- Resume all threads: `debroid resume <session_id> [thread_id]`
-  > Note: `resume` currently resumes **all** threads in the VM regardless of the (optional) `thread_id` argument. For per-thread resume, use `step <session_id> <thread_id> RESUME_THREAD`.
+- Resume all threads: `debroid resume <session_id>`
+  > Note: `resume` resumes **all** threads in the VM. For per-thread resume, use `step <session_id> <thread_id> RESUME_THREAD`.
 
 ### Step 7: Clean Up
 When debugging is complete, cleanly detach:
@@ -139,7 +139,7 @@ Here is the full list of commands and their signatures:
 | `pause-state` | `debroid pause-state <session_id> <thread_id>` | Gets frames, locals, and instance state |
 | `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value>` | Mutates local variable |
 | `eval` | `debroid eval <session_id> <thread_id> <expression...>` | Evaluates string expression |
-| `resume` | `debroid resume <session_id> [thread_id]` | Resumes **all** threads (thread_id currently ignored — use `step ... RESUME_THREAD` for per-thread resume) |
+| `resume` | `debroid resume <session_id>` | Resumes **all** threads (use `step ... RESUME_THREAD` for per-thread resume) |
 | `poll` | `debroid poll <session_id> [cursor=0] [--with-stacktrace]` | Polls for asynchronous debugger events |
 | `frames` | `debroid frames <session_id> <thread_id>` | Retrieves thread stack frames |
 | `coroutine` | `debroid coroutine <session_id> <continuation_id>` | Retrieves locals from a Continuation object |

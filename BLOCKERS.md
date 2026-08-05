@@ -26,9 +26,6 @@ Issues remaining after the B1–B6 blocker fixes. Grouped by severity.
 The daemon listens on `127.0.0.1:9876` with no auth, no encryption, and exposes `eval` (which uses `ObjectReference.invokeMethod` to call arbitrary zero-arg methods) — i.e., effectively arbitrary method invocation inside the debugged app and access to thread memory. On a shared dev box any local process can connect. For a public-released tool that's worth flagging.
 **Fix:** at minimum document the trust model in README ("only run on a machine where every local user is fully trusted"). Better: a Unix-domain socket at `$XDG_RUNTIME_DIR/debroid.sock` with `0600` perms, plus a token written to a file readable only by the invoking user.
 
-### H10. `resume` command ignores the `threadId` argument
-`CliRunner.ResumeCommand` (`CliRunner.kt:224`) takes `threadId` arg (default "1") but `DaemonServer.processCommand` for `DaemonRequest.Resume` calls `session.stepExecution(request.threadId, StepAction.RESUME_ALL)` — it ignores the per-thread id and resumes all threads regardless. The SKILL tells agents to use `resume <session> [thread_id=1]` expecting per-thread semantics.
-**Fix:** differentiate `RESUME_THREAD` vs `RESUME_ALL`. Either: have `resume` use `RESUME_THREAD`, or change resume to `RESUME_ALL` and drop the thread_id arg (cleaner), or accept `--all`.
 
 ### H11. `break` command silently discards `condition`
 `DaemonRequest.Break` has no `condition` field; `DaemonServer` passes `condition = null`. The `BreakpointInfo.condition` field and the SKILL's mention of conditional breakpoints become dead. Either implement a basic JDI `Conditional` filter or remove the field from `BreakpointInfo` and stop advertising the feature.
@@ -47,9 +44,6 @@ When `cursor < eventQueueOffset` (the cursor points to an event that aged out of
 - Build the combined `debroid` executable in release.yml and attach it as `debroid-linux`, `debroid-macos`, `debroid` (it's actually platform-agnostic bash+jar — just attach one).
 - Or publish a Brew formula / `sdkman` channel / `cargo-bundle`.
 
-### H19. Cumulative suspend count not cleared on resume
-`SUSPEND_ALL` policy increments the VM's suspend count per event. A single `vm.resume()` only decrements by 1. After a breakpoint hit + multiple step events, calling `resume` once leaves threads (e.g. RenderThread) still suspended — the UI freezes. The agent must call `resume` multiple times to match the suspend count.
-**Fix:** Call `vm.resume()` in a loop until `resumeCount == 0`, or track the suspend depth and issue matching resumes. Alternatively, switch step events to `SUSPEND_EVENT_THREAD` instead of `SUSPEND_ALL` so only the debugged thread suspends.
 
 ---
 
@@ -126,9 +120,11 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **H4.** `pollEvents` thread safety and JMM visibility fixed in `JdiSession.kt`: synchronized `pushEvent` and `pollEvents` buffer snapshot on `eventQueueLock` using `ArrayDeque` with `@Volatile eventQueueOffset`.
 - **H8.** Command names in `README.md` aligned with actual CLI subcommands (`break`, `stop`, `pause-state`, `step`, etc.).
 - **H9.** Step actions in `SKILL.md` and `README.md` verified and aligned with `StepAction` enum values (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`).
+- **H10.** Dropped `threadId` argument from `resume` command; it now explicitly resumes all threads via `RESUME_ALL`, while per-thread resume is correctly relegated to `step <session> <tid> RESUME_THREAD`.
 - **H12.** `isAppDebuggable` rewritten in `AdbManager.kt`: uses Android's native `run-as <app_id> true` check as primary mechanism, with package flags check (`flags=[` / `pkgFlags=[`) as fallback.
 - **H14.** Expression evaluation upgraded to JDK internal JDI `ExpressionParser` via `JdiExpressionEvaluator.java` Java bridge; supports full method calls, arithmetic, logic, parameter passing, and string operations using Java syntax.
 - **H17.** Detekt `ignoreFailures` set to `false` in `build.gradle.kts` so detekt violations fail the build as expected.
+- **H19.** Fixed cumulative suspend count freeze by changing `StepRequest` to `SUSPEND_EVENT_THREAD` and ensuring `RESUME_ALL` bounds all suspend counts to 0.
 
 Additional hardening during integration testing:
 - JDI `InternalError` from ART's `SourceDebugExtension` parser no longer kills the event listener thread (catch `Throwable` in event loop + `safeSourceName()` helper).
@@ -141,7 +137,6 @@ Additional hardening during integration testing:
 
 1. **H1 (daemon log) + H2 (daemon-stop)**: turns 60% of agent error situations from "give up" into "self-recover".
 2. **H5 + H6**: token/compliance issues that materially affect agent efficiency.
-3. **H10 (resume ignores thread) + H9/H11 (SKILL vs enum mismatch)**: contract bugs in the SKILL will break agents *who trust the SKILL the most*.
+3. **H9/H11 (SKILL vs enum mismatch)**: contract bugs in the SKILL will break agents *who trust the SKILL the most*.
 4. **H3**: ship CLI tests so external contributors don't break the JSON contract by accident.
 5. **H17 / M14 / M15**: tighten CI (detekt teeth, sample-app build, SKILL-sync enforcement).
-6. **H19**: cumulative suspend count freeze — agents will hit this on every multi-step session.
