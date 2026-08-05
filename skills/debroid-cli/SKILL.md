@@ -25,6 +25,7 @@ Activate this skill whenever the user or task involves:
 5. **Keep IDs in working memory, not in long scratch buffers.** A typical session uses 1–3 trap IDs plus 1 thread ID — keep them inline.
 6. **Use Background Tasks**: If you are using an agentic system that supports background tasks, run `debroid daemon` as a background task.
 7. **Token efficiency**: All JSON responses are compact by design. Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
+8. **Self-Recovery**: If a session becomes unresponsive or gets out of sync, run `debroid stop` to cleanly terminate the daemon and release ADB ports. The next `debroid` command will auto-restart a fresh daemon.
 
 ## 🔄 Standard Debugging Workflow
 
@@ -118,6 +119,7 @@ debroid detach <session_id>
 - **Jetpack Compose State Delegates**: Compose `remember { mutableStateOf(...) }` or `collectAsState()` variables appear as `<varName>$delegate` in `pause-state` or `locals`. To inspect Compose state values, retrieve the `objectId` of the `$delegate` object and use `debroid inspect <session_id> <object_id>`.
 - **Autonomous UI Interaction**: Instead of asking the user to click buttons on the device, inspect the UI bounds using `android layout --pretty` (prefer `android-cli` if installed) or `adb shell uiautomator dump /sdcard/window_dump.xml && adb shell cat /sdcard/window_dump.xml`, locate the target element's `bounds="[minX,minY][maxX,maxY]"`, calculate the center coordinates `(minX + maxX)/2`, and simulate a tap with `adb shell input tap X Y`.
 - **`detached` of `launch`'d session and app won't start normally**: Should not happen — `detach` clears `am set-debug-app`. If it does (e.g. daemon was forcibly killed), run `adb shell am clear-debug-app` once.
+- **Daemon or Session Unresponsive**: Run `debroid stop` to terminate the background server and clear ADB port forwards. The next `debroid` command will automatically spawn a fresh, clean daemon.
 
 ## 📖 Complete CLI Command Reference
 Here is the full list of commands and their signatures:
@@ -145,3 +147,4 @@ Here is the full list of commands and their signatures:
 | `coroutine` | `debroid coroutine <session_id> <continuation_id>` | Retrieves locals from a Continuation object |
 | `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`) |
 | `step` | `debroid step <session_id> <thread_id> <action>` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
+| `skill` | `debroid skill` | Prints embedded skill instructions to stdout (e.g. `debroid skill > ~/.claude/skills/debroid/SKILL.md`) |

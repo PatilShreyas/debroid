@@ -376,7 +376,7 @@ object CliRunner {
 
     class SkillCommand : CliktCommand(
         name = "skill",
-        help = "Prints the embedded AI Agent skill instructions (SKILL.md) to stdout."
+        help = "Prints embedded AI Agent skill instructions (SKILL.md) to stdout (e.g. debroid skill > .cursor/rules/debroid.md)."
     ) {
         override fun run() {
             val skillContent = object {}.javaClass.getResourceAsStream("/SKILL.md")
