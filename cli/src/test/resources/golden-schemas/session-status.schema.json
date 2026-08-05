@@ -1,20 +1,26 @@
 {
+    "description": "Current status of an active debug session",
     "type": "object",
     "properties": {
         "sessionId": {
-            "type": "string"
+            "type": "string",
+            "description": "Unique debug session ID"
         },
         "appId": {
-            "type": "string"
+            "type": "string",
+            "description": "Android application ID"
         },
         "connected": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether the debugger is actively attached"
         },
         "activeBreakpointsCount": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Count of active breakpoints"
         },
         "suspendedThreadsCount": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Count of suspended threads"
         }
     }
 }

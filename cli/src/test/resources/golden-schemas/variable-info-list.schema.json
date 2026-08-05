@@ -1,23 +1,29 @@
 {
     "type": "array",
     "items": {
+        "description": "Representation of a local variable or instance field",
         "type": "object",
         "properties": {
             "name": {
-                "type": "string"
+                "type": "string",
+                "description": "Variable or field name"
             },
             "type": {
-                "type": "string"
+                "type": "string",
+                "description": "Fully qualified data type name"
             },
             "valuePreview": {
-                "type": "string"
+                "type": "string",
+                "description": "Preview string of the variable value"
             },
             "isPrimitive": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Whether the variable is a primitive or String"
             },
             "objectId": {
                 "type": "string",
-                "nullable": true
+                "nullable": true,
+                "description": "Heap object ID for non-primitive reference objects"
             }
         }
     }

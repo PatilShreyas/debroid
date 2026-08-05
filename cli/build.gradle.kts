@@ -48,6 +48,9 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    System.getProperty("updateGoldenSchemas")?.let {
+        systemProperty("updateGoldenSchemas", it)
+    }
 }
 
 tasks.jar {

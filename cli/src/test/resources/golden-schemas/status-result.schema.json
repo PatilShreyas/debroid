@@ -1,8 +1,10 @@
 {
+    "description": "Generic operation status result",
     "type": "object",
     "properties": {
         "status": {
-            "type": "string"
+            "type": "string",
+            "description": "Status message of the operation"
         }
     }
 }

@@ -12,35 +12,67 @@ import dev.shreyaspatil.debroid.models.VariableInfo
 import kotlinx.serialization.Serializable
 
 @Serializable
+@SerialDescription("Error details when a CLI command or debug operation fails")
 data class CliDebugError(
+    @SerialDescription("Machine-readable error code")
     val errorCode: String,
+    @SerialDescription("Human-readable error explanation")
     val message: String,
+    @SerialDescription("Whether retrying the command with the same parameters may succeed")
     val retryable: Boolean
 )
 
 fun DebugError.toCli() = CliDebugError(errorCode = errorCode, message = message, retryable = retryable)
 
 @Serializable
-data class CliStatusResult(val status: String)
+@SerialDescription("Generic operation status result")
+data class CliStatusResult(
+    @SerialDescription("Status message of the operation")
+    val status: String
+)
 
 @Serializable
-data class CliDetachedResult(val detached: Boolean)
+@SerialDescription("Result when a debug session is detached")
+data class CliDetachedResult(
+    @SerialDescription("Whether the session was successfully detached")
+    val detached: Boolean
+)
 
 @Serializable
-data class CliShutdownResult(val shutdown: Boolean, val message: String = "Daemon shut down successfully")
+@SerialDescription("Result when the background daemon is shut down")
+data class CliShutdownResult(
+    @SerialDescription("Whether daemon shutdown succeeded")
+    val shutdown: Boolean,
+    @SerialDescription("Shutdown status message")
+    val message: String = "Daemon shut down successfully"
+)
 
 @Serializable
-data class CliExceptionBreakpointResult(val exceptionBreakpointId: String)
+@SerialDescription("Result when setting an exception breakpoint")
+data class CliExceptionBreakpointResult(
+    @SerialDescription("Unique ID of the created exception breakpoint")
+    val exceptionBreakpointId: String
+)
 
 @Serializable
-data class CliWatchpointResult(val watchpointId: String)
+@SerialDescription("Result when setting a field watchpoint")
+data class CliWatchpointResult(
+    @SerialDescription("Unique ID of the created watchpoint")
+    val watchpointId: String
+)
 
 @Serializable
+@SerialDescription("Current status of an active debug session")
 data class CliSessionStatus(
+    @SerialDescription("Unique debug session ID")
     val sessionId: String,
+    @SerialDescription("Android application ID")
     val appId: String,
+    @SerialDescription("Whether the debugger is actively attached")
     val connected: Boolean,
+    @SerialDescription("Count of active breakpoints")
     val activeBreakpointsCount: Int,
+    @SerialDescription("Count of suspended threads")
     val suspendedThreadsCount: Int
 )
 
@@ -53,11 +85,17 @@ fun SessionStatus.toCli() = CliSessionStatus(
 )
 
 @Serializable
+@SerialDescription("Information about a line breakpoint")
 data class CliBreakpointInfo(
+    @SerialDescription("Unique breakpoint ID")
     val id: String,
+    @SerialDescription("Session ID owning this breakpoint")
     val sessionId: String,
+    @SerialDescription("Source file name")
     val file: String,
+    @SerialDescription("1-indexed line number")
     val line: Int,
+    @SerialDescription("Whether the breakpoint is bound to a loaded VM class")
     val verified: Boolean
 )
 
@@ -70,12 +108,19 @@ fun BreakpointInfo.toCli() = CliBreakpointInfo(
 )
 
 @Serializable
+@SerialDescription("Information about a single stack frame")
 data class CliStackFrameInfo(
+    @SerialDescription("0-indexed frame depth index")
     val frameIndex: Int,
+    @SerialDescription("Name of the method executing in this frame")
     val methodName: String,
+    @SerialDescription("Fully qualified class name declaring the method")
     val declaringClass: String,
+    @SerialDescription("Source file name if available")
     val sourceFile: String?,
+    @SerialDescription("1-indexed line number in source file")
     val lineNumber: Int,
+    @SerialDescription("Object ID of Kotlin Continuation if this frame is a coroutine")
     val coroutineContinuationObjectId: String? = null
 )
 
@@ -89,11 +134,17 @@ fun StackFrameInfo.toCli() = CliStackFrameInfo(
 )
 
 @Serializable
+@SerialDescription("Representation of a local variable or instance field")
 data class CliVariableInfo(
+    @SerialDescription("Variable or field name")
     val name: String,
+    @SerialDescription("Fully qualified data type name")
     val type: String,
+    @SerialDescription("Preview string of the variable value")
     val valuePreview: String,
+    @SerialDescription("Whether the variable is a primitive or String")
     val isPrimitive: Boolean,
+    @SerialDescription("Heap object ID for non-primitive reference objects")
     val objectId: String? = null
 )
 
@@ -106,10 +157,15 @@ fun VariableInfo.toCli() = CliVariableInfo(
 )
 
 @Serializable
+@SerialDescription("Result of inspecting object fields in heap memory")
 data class CliObjectInspectionResult(
+    @SerialDescription("Heap object ID of the inspected instance")
     val objectId: String,
+    @SerialDescription("Fully qualified class type of the object")
     val type: String,
+    @SerialDescription("Map of field names to their variable info")
     val fields: Map<String, CliVariableInfo>,
+    @SerialDescription("Map of field names to nested object inspection results when max-depth > 1")
     val nested: Map<String, CliObjectInspectionResult>? = null
 )
 
@@ -124,11 +180,17 @@ fun ObjectInspectionResult.toCli(): CliObjectInspectionResult {
 }
 
 @Serializable
+@SerialDescription("Current execution pause state for a suspended thread")
 data class CliPauseStateResult(
+    @SerialDescription("ID of the suspended thread")
     val threadId: String,
+    @SerialDescription("Name of the suspended thread")
     val threadName: String,
+    @SerialDescription("Call stack frames of the thread")
     val frames: List<CliStackFrameInfo>,
+    @SerialDescription("Shallow local variables in top stack frame")
     val locals: List<CliVariableInfo>,
+    @SerialDescription("Instance variables of 'this' object in top stack frame")
     val instanceVariables: List<CliVariableInfo>
 )
 
@@ -141,15 +203,25 @@ fun PauseStateResult.toCli() = CliPauseStateResult(
 )
 
 @Serializable
+@SerialDescription("Payload describing an asynchronous debugger event")
 data class CliDebugEventPayload(
+    @SerialDescription("Type of event (BREAKPOINT_HIT, EXCEPTION_HIT, WATCHPOINT_HIT, DISCONNECT)")
     val eventType: String,
+    @SerialDescription("Session ID where the event occurred")
     val sessionId: String,
+    @SerialDescription("ID of thread that triggered the event")
     val threadId: String?,
+    @SerialDescription("Name of thread that triggered the event")
     val threadName: String?,
+    @SerialDescription("Source location where event occurred (File.kt:line)")
     val location: String?,
+    @SerialDescription("Fully qualified class name where event occurred")
     val className: String?,
+    @SerialDescription("Message string if event is EXCEPTION_HIT")
     val exceptionMessage: String? = null,
+    @SerialDescription("Stack trace frames if requested during poll")
     val stacktrace: List<CliStackFrameInfo>? = null,
+    @SerialDescription("Epoch timestamp in milliseconds when event occurred")
     val timestamp: Long
 )
 
@@ -166,9 +238,13 @@ fun DebugEventPayload.toCli() = CliDebugEventPayload(
 )
 
 @Serializable
+@SerialDescription("Result of polling the asynchronous debugger event queue")
 data class CliEventPollResult(
+    @SerialDescription("List of debugger events received since last poll")
     val events: List<CliDebugEventPayload>,
+    @SerialDescription("Opaque cursor token to pass to next poll call")
     val nextCursor: String,
+    @SerialDescription("Whether more events remain in queue")
     val hasMore: Boolean
 )
 
