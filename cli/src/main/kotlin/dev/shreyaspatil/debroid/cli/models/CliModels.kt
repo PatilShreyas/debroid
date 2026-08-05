@@ -58,7 +58,6 @@ data class CliBreakpointInfo(
     val sessionId: String,
     val file: String,
     val line: Int,
-    val condition: String? = null,
     val verified: Boolean
 )
 
@@ -67,7 +66,6 @@ fun BreakpointInfo.toCli() = CliBreakpointInfo(
     sessionId = sessionId,
     file = file,
     line = line,
-    condition = condition,
     verified = verified
 )
 

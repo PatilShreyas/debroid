@@ -115,7 +115,7 @@ class JdiSessionTest {
         every { vm.allClasses() } returns listOf(refType)
         every { erm.createBreakpointRequest(location) } returns bpReq
 
-        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42, condition = null)
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42)
 
         assertTrue(info.verified)
         assertEquals(42, info.line)
@@ -137,7 +137,7 @@ class JdiSessionTest {
         every { vm.allClasses() } returns listOf(frameworkType, appType)
         every { erm.createBreakpointRequest(location) } returns bpReq
 
-        val info = session.setBreakpoint(file = "DataRepository.kt", line = 42, condition = null)
+        val info = session.setBreakpoint(file = "DataRepository.kt", line = 42)
 
         assertTrue(info.verified)
         verify(exactly = 0) { frameworkType.sourceName() }
@@ -155,7 +155,7 @@ class JdiSessionTest {
         every { vm.allClasses() } returns listOf(refType)
         every { erm.createBreakpointRequest(location) } returns bpReq
 
-        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42, condition = null)
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42)
 
         assertTrue(info.verified)
         verify(exactly = 0) { refType.sourceName() }
@@ -165,7 +165,7 @@ class JdiSessionTest {
     fun `setBreakpoint defers if class not found`() {
         every { vm.allClasses() } returns emptyList()
 
-        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42, condition = null)
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42)
 
         assertFalse(info.verified)
         verify { erm.createClassPrepareRequest() }
@@ -185,7 +185,6 @@ class JdiSessionTest {
         val info = session.setBreakpoint(
             file = "MainActivity.kt",
             line = 42,
-            condition = null,
             packageName = "com.test"
         )
 
@@ -211,7 +210,6 @@ class JdiSessionTest {
         val info = session.setBreakpoint(
             file = "MainActivity.kt",
             line = 42,
-            condition = null,
             packageName = "com.test"
         )
 
@@ -237,7 +235,6 @@ class JdiSessionTest {
         val info = session.setBreakpoint(
             file = "MainActivity.kt",
             line = 42,
-            condition = null,
             packageName = "com.test"
         )
 
@@ -265,7 +262,6 @@ class JdiSessionTest {
         val info = session.setBreakpoint(
             file = "MainActivity.kt",
             line = 42,
-            condition = null,
             packageName = "com.test"
         )
 
@@ -288,7 +284,6 @@ class JdiSessionTest {
         val info = session.setBreakpoint(
             file = "MainActivity.kt",
             line = 42,
-            condition = null,
             packageName = "com.test"
         )
 
@@ -690,7 +685,7 @@ class JdiSessionTest {
         val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
         every { erm.createClassPrepareRequest() } returns classPrepReq
 
-        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42, condition = null)
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42)
 
         assertFalse(info.verified)
         verify(exactly = 1) { erm.createClassPrepareRequest() }
@@ -703,8 +698,8 @@ class JdiSessionTest {
         val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
         every { erm.createClassPrepareRequest() } returns classPrepReq
 
-        session.setBreakpoint(file = "MainActivity.kt", line = 10, condition = null)
-        session.setBreakpoint(file = "OtherActivity.kt", line = 20, condition = null)
+        session.setBreakpoint(file = "MainActivity.kt", line = 10)
+        session.setBreakpoint(file = "OtherActivity.kt", line = 20)
 
         verify(exactly = 1) { erm.createClassPrepareRequest() }
     }
@@ -715,7 +710,7 @@ class JdiSessionTest {
         val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
         every { erm.createClassPrepareRequest() } returns classPrepReq
 
-        val info = session.setBreakpoint(file = "MainActivity.kt", line = 10, condition = null)
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 10)
         val removed = session.removeBreakpoint(info.id)
 
         assertTrue(removed)

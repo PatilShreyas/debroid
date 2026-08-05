@@ -27,9 +27,6 @@ The daemon listens on `127.0.0.1:9876` with no auth, no encryption, and exposes 
 **Fix:** at minimum document the trust model in README ("only run on a machine where every local user is fully trusted"). Better: a Unix-domain socket at `$XDG_RUNTIME_DIR/debroid.sock` with `0600` perms, plus a token written to a file readable only by the invoking user.
 
 
-### H11. `break` command silently discards `condition`
-`DaemonRequest.Break` has no `condition` field; `DaemonServer` passes `condition = null`. The `BreakpointInfo.condition` field and the SKILL's mention of conditional breakpoints become dead. Either implement a basic JDI `Conditional` filter or remove the field from `BreakpointInfo` and stop advertising the feature.
-
 ### H13. `findPid` ps fallback is loose
 `AdbManager.kt:101`: `firstOrNull { it.contains(appId) }` will match an unrelated process whose name contains `appId` as a substring (`com.foo` will match `com.foo.bar` and `com.foo.sync`). Use exact match on the last whitespace-separated column, or even tighter match by user+name.
 
@@ -121,6 +118,7 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **H8.** Command names in `README.md` aligned with actual CLI subcommands (`break`, `stop`, `pause-state`, `step`, etc.).
 - **H9.** Step actions in `SKILL.md` and `README.md` verified and aligned with `StepAction` enum values (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`).
 - **H10.** Dropped `threadId` argument from `resume` command; it now explicitly resumes all threads via `RESUME_ALL`, while per-thread resume is correctly relegated to `step <session> <tid> RESUME_THREAD`.
+- **H11.** Removed the unused `condition` field entirely from `BreakpointInfo`, `CliBreakpointInfo`, and all `setBreakpoint` method signatures since the CLI never accepted conditions and the SKILL did not document it.
 - **H12.** `isAppDebuggable` rewritten in `AdbManager.kt`: uses Android's native `run-as <app_id> true` check as primary mechanism, with package flags check (`flags=[` / `pkgFlags=[`) as fallback.
 - **H14.** Expression evaluation upgraded to JDK internal JDI `ExpressionParser` via `JdiExpressionEvaluator.java` Java bridge; supports full method calls, arithmetic, logic, parameter passing, and string operations using Java syntax.
 - **H17.** Detekt `ignoreFailures` set to `false` in `build.gradle.kts` so detekt violations fail the build as expected.
@@ -137,6 +135,6 @@ Additional hardening during integration testing:
 
 1. **H1 (daemon log) + H2 (daemon-stop)**: turns 60% of agent error situations from "give up" into "self-recover".
 2. **H5 + H6**: token/compliance issues that materially affect agent efficiency.
-3. **H9/H11 (SKILL vs enum mismatch)**: contract bugs in the SKILL will break agents *who trust the SKILL the most*.
+3. **H9 (SKILL vs enum mismatch)**: contract bugs in the SKILL will break agents *who trust the SKILL the most*.
 4. **H3**: ship CLI tests so external contributors don't break the JSON contract by accident.
 5. **H17 / M14 / M15**: tighten CI (detekt teeth, sample-app build, SKILL-sync enforcement).

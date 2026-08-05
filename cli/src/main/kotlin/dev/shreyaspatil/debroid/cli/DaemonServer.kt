@@ -113,7 +113,6 @@ object DaemonServer {
                     val bp = session.setBreakpoint(
                         file = request.file,
                         line = request.line,
-                        condition = null,
                         packageName = request.packageName
                     )
                     json.encodeToString(bp.toCli())
