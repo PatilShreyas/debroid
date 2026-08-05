@@ -1,0 +1,26 @@
+{
+    "description": "Result of checking or performing CLI auto-update",
+    "type": "object",
+    "properties": {
+        "currentVersion": {
+            "type": "string",
+            "description": "Current installed CLI version"
+        },
+        "latestVersion": {
+            "type": "string",
+            "description": "Latest available CLI version on GitHub"
+        },
+        "updateAvailable": {
+            "type": "boolean",
+            "description": "Whether a newer version is available"
+        },
+        "updated": {
+            "type": "boolean",
+            "description": "Whether the update was downloaded and applied"
+        },
+        "message": {
+            "type": "string",
+            "description": "Status message"
+        }
+    }
+}
