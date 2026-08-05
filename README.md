@@ -65,14 +65,22 @@ To completely remove Debroid from your system:
 
 ## 🧠 AI Agent Skill Setup
 
-Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, you must provide it with the skill instructions.
+Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, you provide it with skill instructions.
 
-We have included a highly-optimized skill file inside the repository.
+The skill instructions are embedded directly inside the `debroid` CLI binary!
 
-**Skill Location:** `skills/debroid-cli/SKILL.md`
+**Option 1: Export from installed CLI (Recommended)**
+```bash
+# Print skill to stdout or redirect straight into your rules/skills folder:
+debroid skill > .cursor/rules/debroid.md
+# OR for Antigravity / Gemini agents:
+mkdir -p .gemini/skills/debroid && debroid skill > .gemini/skills/debroid/SKILL.md
+```
 
-**How to install the skill:**
-Copy the contents of the `SKILL.md` file into your agent's context, prompt, or custom instructions/rules configuration. This gives the LLM explicit instructions on how to orchestrate the background daemon, set breakpoints, evaluate expressions, and poll the event queue without hallucinating CLI flags or getting stuck in infinite loops.
+**Option 2: Fetch via Raw URL (No installation required)**
+```bash
+curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/SKILL.md -o .cursor/rules/debroid.md
+```
 
 ## 🔌 How it Works
 
@@ -115,6 +123,7 @@ flowchart LR
 | `coroutine` | `debroid coroutine <session_id> <continuation_id>` | Retrieves locals from a Continuation object |
 | `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`) |
 | `step` | `debroid step <session_id> <thread_id> <action>` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
+| `skill` | `debroid skill` | Prints the embedded AI Agent skill instructions (`SKILL.md`) to stdout |
 
 > **Security Note:** The Debroid daemon listens on `localhost` (127.0.0.1) without authentication to enable fast communication with the CLI. It exposes live JVM manipulation. Only run Debroid on a machine where every local user is fully trusted.
 

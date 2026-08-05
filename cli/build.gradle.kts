@@ -32,6 +32,7 @@ val generateVersionInfo by tasks.registering {
 sourceSets {
     main {
         kotlin.srcDir(generateVersionInfo)
+        resources.srcDir(rootProject.file("skills/debroid-cli"))
     }
 }
 
