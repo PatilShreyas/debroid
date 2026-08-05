@@ -35,11 +35,19 @@ Traditional Android development environments are highly visual. While AI coding 
 * Android SDK & `adb` configured in your `PATH`
 
 ### Install the CLI
-To build the CLI and install it as a standalone executable in your `/usr/local/bin`, simply run:
+
+**Option 1: Quick Install (Pre-built Release Binary)**
+Run the one-liner script to download the latest release binary and install it:
+```bash
+curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/install.sh | bash -s -- --remote
+```
+
+**Option 2: Local Build Install (Build from Source)**
+Clone the repository and build locally:
 ```bash
 ./install.sh
 ```
-*Note: This script will prompt for `sudo` to move the binary to your local bin.*
+*Note: The script installs the `debroid` binary to `/usr/local/bin` (may request `sudo` if `/usr/local/bin` is not user-writable).*
 
 ## 🧠 AI Agent Skill Setup
 

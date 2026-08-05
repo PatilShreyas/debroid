@@ -50,14 +50,21 @@ jobs:
       - name: Build CLI
         run: ./gradlew :cli:jar
 
-      - name: Rename JAR for release
-        run: mv cli/build/libs/debroid-${{ env.VERSION }}.jar debroid.jar
+      - name: Create standalone executable
+        run: |
+          mv cli/build/libs/debroid-${{ env.VERSION }}.jar debroid.jar
+          printf '#!/usr/bin/env bash\nexec java --enable-native-access=ALL-UNNAMED --add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED -jar "$0" "$@"\n' > stub.sh
+          cat stub.sh debroid.jar > debroid
+          chmod +x debroid
+          rm stub.sh
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
           name: v${{ env.VERSION }}
-          files: debroid.jar
+          files: |
+            debroid.jar
+            debroid
           generate_release_notes: true
 
