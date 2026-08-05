@@ -4,6 +4,12 @@ import dev.shreyaspatil.debroid.models.StepAction
 import kotlinx.serialization.Serializable
 
 @Serializable
+data class DaemonIpcRequest(
+    val pretty: Boolean = false,
+    val request: DaemonRequest
+)
+
+@Serializable
 sealed class DaemonRequest {
     @Serializable data class Launch(val appId: String) : DaemonRequest()
 
