@@ -85,11 +85,11 @@ Select your AI agent below for setup instructions and exact skill paths:
 <details>
 <summary><b>🟧 Claude Code</b></summary>
 
-* **Global Path:** `~/.claude/CLAUDE.md` (or `~/.claude/commands/debroid.md`)
-* **Project Path:** `CLAUDE.md`
+* **Global Path:** `~/.claude/skills/debroid/SKILL.md`
+* **Project Path:** `.claude/skills/debroid/SKILL.md`
 * **Installation Command:**
   ```bash
-  mkdir -p ~/.claude && debroid skill >> ~/.claude/CLAUDE.md
+  mkdir -p ~/.claude/skills/debroid && debroid skill > ~/.claude/skills/debroid/SKILL.md
   ```
 </details>
 
