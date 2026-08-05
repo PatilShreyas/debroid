@@ -34,6 +34,14 @@ Traditional Android development environments are highly visual. While AI coding 
 * Java JDK 11+ (`JAVA_HOME`)
 * Android SDK & `adb` configured in your `PATH`
 
+> [!TIP]
+> **Or let your AI Agent do it for you!**
+> 
+> Copy & paste this prompt directly to your AI coding assistant (Claude Code, Cursor, Antigravity, OpenCode, Codex):
+> ```text
+> Read https://raw.githubusercontent.com/PatilShreyas/debroid/main/README.md and install the Debroid CLI and its skill for me.
+> ```
+
 ### Install the CLI
 
 **Option 1: Quick Install (Pre-built Release Binary)**
