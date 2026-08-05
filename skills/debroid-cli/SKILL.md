@@ -24,7 +24,7 @@ Activate this skill whenever the user or task involves:
 4. **Track trap IDs and remove them when done**. Every `break`, `catch-exception`, and `watch` returns an ID. Use `remove-break`, `remove-catch-exception`, `remove-watch` to clear traps you no longer need so they don't fire unexpectedly and waste poll cycles.
 5. **Keep IDs in working memory, not in long scratch buffers.** A typical session uses 1–3 trap IDs plus 1 thread ID — keep them inline.
 6. **Use Background Tasks**: If you are using an agentic system that supports background tasks, run `debroid daemon` as a background task.
-7. **Token efficiency**: All JSON responses are compact single-line by default to conserve agent context tokens. If formatted multi-line JSON is required, append the `--pretty` flag to any JSON command. Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
+7. **Token efficiency & Schema Inspection**: All JSON responses are compact single-line by default to conserve agent context tokens. If formatted multi-line JSON is required, append the `--pretty` flag to any JSON command. To inspect the expected output JSON structure for any command without running a session, pass the `--schema` flag (e.g., `debroid pause-state --schema`). Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
 8. **Self-Recovery**: If a session becomes unresponsive or gets out of sync, run `debroid stop` to cleanly terminate the daemon and release ADB ports. The next `debroid` command will auto-restart a fresh daemon.
 
 ## 🔄 Standard Debugging Workflow
