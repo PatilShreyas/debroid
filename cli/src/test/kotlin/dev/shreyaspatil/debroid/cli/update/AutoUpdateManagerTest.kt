@@ -23,12 +23,21 @@ class AutoUpdateManagerTest {
     }
 
     @Test
-    fun `checkAndPerformSilentAutoUpdateAsync executes without throwing`() {
+    fun `checkAndPerformSilentAutoUpdateAsync creates 24h cache file without throwing`() {
         val manager = AutoUpdateManager.DEFAULT
         manager.checkAndPerformSilentAutoUpdateAsync()
 
         val debroidDir = File(System.getProperty("user.home"), ".debroid")
         val cacheFile = File(debroidDir, "update-cache.json")
         assertTrue(cacheFile.exists())
+    }
+
+    @Test
+    fun `checkAndPerformSilentAutoUpdateAsync handles invalid cache path gracefully`() {
+        val invalidCache = UpdateCache(File("/non_existent_path_permissions_denied/cache.json"))
+        val manager = AutoUpdateManager(updateCache = invalidCache)
+
+        // Must execute cleanly without throwing any exception
+        manager.checkAndPerformSilentAutoUpdateAsync()
     }
 }
