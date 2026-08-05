@@ -65,22 +65,41 @@ To completely remove Debroid from your system:
 
 ## 🧠 AI Agent Skill Setup
 
-Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, you provide it with skill instructions.
+Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, you provide it with skill instructions (`SKILL.md`).
 
-The skill instructions are embedded directly inside the `debroid` CLI binary!
+The skill file is embedded directly inside the `debroid` CLI binary and is also hosted on GitHub.
 
-**Option 1: Export from installed CLI (Recommended)**
-```bash
-# Print skill to stdout or redirect straight into your rules/skills folder:
-debroid skill > .cursor/rules/debroid.md
-# OR for Antigravity / Gemini agents:
-mkdir -p .gemini/skills/debroid && debroid skill > .gemini/skills/debroid/SKILL.md
-```
+### Quick Export One-Liners
 
-**Option 2: Fetch via Raw URL (No installation required)**
-```bash
-curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/SKILL.md -o .cursor/rules/debroid.md
-```
+Run one of the following commands to install the skill for your preferred AI agent:
+
+* **Antigravity & Antigravity CLI** (Global):
+  ```bash
+  mkdir -p ~/.gemini/skills/debroid && debroid skill > ~/.gemini/skills/debroid/SKILL.md
+  ```
+* **Claude Code** (Global Commands):
+  ```bash
+  mkdir -p ~/.claude/commands && debroid skill > ~/.claude/commands/debroid.md
+  ```
+* **Cursor** (Global Rules):
+  ```bash
+  mkdir -p ~/.cursor/rules && debroid skill > ~/.cursor/rules/debroid.mdc
+  ```
+* **Codex / OpenCode** (Global Instructions):
+  ```bash
+  mkdir -p ~/.codex/rules && debroid skill > ~/.codex/rules/debroid.md
+  ```
+
+*(Note: If you haven't installed the CLI binary yet, replace `debroid skill` with `curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/SKILL.md` in any command).*
+
+### Target Skill Paths Summary
+
+| Agent | Global Skill Path | Project Skill Path |
+| :--- | :--- | :--- |
+| **Antigravity & Antigravity CLI** | `~/.gemini/skills/debroid/SKILL.md` | `.gemini/skills/debroid/SKILL.md` |
+| **Claude Code** | `~/.claude/commands/debroid.md` | `.claude/rules/debroid.md` |
+| **Cursor** | `~/.cursor/rules/debroid.mdc` | `.cursor/rules/debroid.mdc` |
+| **Codex / OpenCode** | `~/.codex/rules/debroid.md` | `AGENTS.md` / `CODEX.md` |
 
 ## 🔌 How it Works
 
