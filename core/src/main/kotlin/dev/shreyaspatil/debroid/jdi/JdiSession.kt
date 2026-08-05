@@ -9,6 +9,7 @@ import com.sun.jdi.ReferenceType
 import com.sun.jdi.StringReference
 import com.sun.jdi.ThreadReference
 import com.sun.jdi.Value
+import com.sun.jdi.VMDisconnectedException
 import com.sun.jdi.VirtualMachine
 import com.sun.jdi.event.AccessWatchpointEvent
 import com.sun.jdi.event.BreakpointEvent
@@ -967,6 +968,11 @@ class JdiSession(
                         }
                     }
                 }
+            } catch (e: InterruptedException) {
+                break
+            } catch (e: VMDisconnectedException) {
+                isConnected.set(false)
+                break
             } catch (e: Throwable) {
                 // Catch Throwable (not just Exception) because JDI can throw InternalError /
                 // VMOutOfMemoryError from ART's SourceDebugExtension parsing. Killing this
@@ -979,6 +985,7 @@ class JdiSession(
 
     fun detach() {
         isConnected.set(false)
+        try { eventThread.interrupt() } catch (_: Throwable) {}
         try { vm.dispose() } catch (_: Exception) {}
         adbManager.removePortForward(localPort)
         // If this session was launched suspended via `am set-debug-app -w`, the wait-for-debugger
