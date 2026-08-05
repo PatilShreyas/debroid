@@ -65,46 +65,68 @@ To completely remove Debroid from your system:
 
 ## 🧠 AI Agent Skill Setup
 
-Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, you provide it with skill instructions (`SKILL.md`).
+Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, provide it with the skill instructions (`SKILL.md`).
 
-The skill file is embedded directly inside the `debroid` CLI binary and is also hosted on GitHub.
+The skill file is embedded directly inside the `debroid` CLI binary (`debroid skill`) and hosted on GitHub.
 
-### Quick Export One-Liners
+Select your AI agent below for setup instructions and exact skill paths:
 
-Run one of the following commands to install the skill for your preferred AI agent:
+<details>
+<summary><b>🤖 Antigravity & Antigravity CLI</b></summary>
 
-* **Antigravity & Antigravity CLI**:
+* **Global Path:** `~/.gemini/skills/debroid/SKILL.md`
+* **Project Path:** `.gemini/skills/debroid/SKILL.md`
+* **Installation Command:**
   ```bash
   mkdir -p ~/.gemini/skills/debroid && debroid skill > ~/.gemini/skills/debroid/SKILL.md
   ```
-* **Claude Code**:
+</details>
+
+<details>
+<summary><b>🟧 Claude Code</b></summary>
+
+* **Global Path:** `~/.claude/CLAUDE.md` (or `~/.claude/commands/debroid.md`)
+* **Project Path:** `CLAUDE.md`
+* **Installation Command:**
   ```bash
-  mkdir -p ~/.claude/commands && debroid skill > ~/.claude/commands/debroid.md
+  mkdir -p ~/.claude && debroid skill >> ~/.claude/CLAUDE.md
   ```
-* **Cursor**:
+</details>
+
+<details>
+<summary><b>🖱️ Cursor</b></summary>
+
+* **Global Path:** Cursor Settings > Rules for AI
+* **Project Path:** `.cursor/rules/debroid.mdc`
+* **Installation Command:**
   ```bash
-  mkdir -p ~/.cursor/rules && debroid skill > ~/.cursor/rules/debroid.mdc
+  mkdir -p .cursor/rules && debroid skill > .cursor/rules/debroid.mdc
   ```
-* **Codex**:
+</details>
+
+<details>
+<summary><b>⚡ OpenAI Codex</b></summary>
+
+* **Global Path:** `~/.codex/AGENTS.md`
+* **Project Path:** `AGENTS.md`
+* **Installation Command:**
   ```bash
-  mkdir -p ~/.codex/rules && debroid skill > ~/.codex/rules/debroid.md
+  mkdir -p ~/.codex && debroid skill >> ~/.codex/AGENTS.md
   ```
-* **OpenCode**:
+</details>
+
+<details>
+<summary><b>🔓 OpenCode</b></summary>
+
+* **Global Path:** `~/.config/opencode/skills/debroid/SKILL.md` (or `~/.config/opencode/AGENTS.md`)
+* **Project Path:** `.opencode/skills/debroid/SKILL.md`
+* **Installation Command:**
   ```bash
-  mkdir -p ~/.opencode/rules && debroid skill > ~/.opencode/rules/debroid.md
+  mkdir -p ~/.config/opencode/skills/debroid && debroid skill > ~/.config/opencode/skills/debroid/SKILL.md
   ```
+</details>
 
 *(Note: If you haven't installed the CLI binary yet, replace `debroid skill` with `curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/SKILL.md` in any command).*
-
-### Target Skill Paths Summary
-
-| Agent | Global Skill Path | Project Skill Path |
-| :--- | :--- | :--- |
-| **Antigravity & Antigravity CLI** | `~/.gemini/skills/debroid/SKILL.md` | `.gemini/skills/debroid/SKILL.md` |
-| **Claude Code** | `~/.claude/commands/debroid.md` | `.claude/rules/debroid.md` |
-| **Cursor** | `~/.cursor/rules/debroid.mdc` | `.cursor/rules/debroid.mdc` |
-| **Codex** | `~/.codex/rules/debroid.md` | `AGENTS.md` / `CODEX.md` |
-| **OpenCode** | `~/.opencode/rules/debroid.md` | `.opencode/rules/debroid.md` |
 
 ## 🔌 How it Works
 
