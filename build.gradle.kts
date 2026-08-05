@@ -28,6 +28,10 @@ subprojects {
         targetCompatibility = "11"
     }
 
+    tasks.withType<Test> {
+        maxHeapSize = "2g"
+    }
+
     dependencies {
         // Shared test dependencies could go here or in individual modules
         "detektPlugins"(detektFormatting)

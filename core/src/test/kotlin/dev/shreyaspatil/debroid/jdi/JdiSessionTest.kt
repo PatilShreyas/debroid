@@ -69,6 +69,13 @@ class JdiSessionTest {
 
     @AfterEach
     fun teardown() {
+        if (::session.isInitialized) {
+            try {
+                session.detach()
+            } catch (_: Throwable) {
+                // Ignore cleanup errors during teardown
+            }
+        }
         unmockkAll()
     }
 
