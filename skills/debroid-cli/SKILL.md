@@ -52,7 +52,8 @@ You must attach the debugger to obtain a `sessionId`.
 
 ### Step 3: Set Traps
 Set your breakpoints or watchpoints *before* polling. **Save the returned IDs.**
-- **Line Breakpoint**: `debroid break <session_id> <FileName.kt> <line_number>` → returns `{ "id": "bp_1", "verified": true|false, ... }`
+- **Line Breakpoint**: `debroid break <session_id> <FileName.kt> <line_number> [--package <pkg>]` → returns `{ "id": "bp_1", "verified": true|false, ... }`
+  - **Always pass `--package`** when you know it (e.g. `--package com.example.app.search`). Providing the package name lets the daemon resolve the class with a single targeted lookup instead of scanning every loaded class across the entire VM, which takes seconds or minutes on large applications and drastically improves responsiveness.
   - If `verified=false`, the class isn't loaded yet. Debroid will **automatically** bind it the moment the class is prepared — you do **not** need to do anything; just poll. (No more deferred-breakpoint dead-ends.)
   - Use `remove-break <session_id> <breakpoint_id>` to clear it.
 - **Exception Trap**: `debroid catch-exception <session_id> [ExceptionClass] [--caught] [--uncaught]`
@@ -127,7 +128,7 @@ Here is the full list of commands and their signatures:
 | `launch` | `debroid launch <app_id>` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
 | `attach` | `debroid attach <app_id>` | Attaches to a running app |
 | `detach` | `debroid detach <session_id>` | Safely detaches debugger; for `launch` sessions also clears `am set-debug-app` |
-| `break` | `debroid break <session_id> <file> <line>` | Sets a line breakpoint (auto-defers if class isn't loaded yet) |
+| `break` | `debroid break <session_id> <file> <line> [-p/--package=<pkg>]` | Sets a line breakpoint (always pass `--package` for fast targeted lookup; auto-defers if class isn't loaded yet) |
 | `remove-break` | `debroid remove-break <session_id> <breakpoint_id>` | Removes a previously set line breakpoint |
 | `catch-exception` | `debroid catch-exception <session_id> [class_name] [--caught] [--uncaught]` | Sets an exception breakpoint (default: `--uncaught` only) |
 | `remove-catch-exception` | `debroid remove-catch-exception <session_id> <exception_breakpoint_id>` | Removes an exception breakpoint |
