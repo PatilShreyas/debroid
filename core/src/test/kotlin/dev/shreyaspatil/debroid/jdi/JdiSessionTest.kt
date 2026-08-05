@@ -312,7 +312,7 @@ class JdiSessionTest {
         session.stepExecution("1", dev.shreyaspatil.debroid.models.StepAction.STEP_OVER)
 
         verify { erm.deleteEventRequest(stepReqOld) }
-        verify { stepReqNew.setSuspendPolicy(EventRequest.SUSPEND_ALL) }
+        verify { stepReqNew.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD) }
         verify { stepReqNew.enable() }
         verify { thread.resume() }
     }

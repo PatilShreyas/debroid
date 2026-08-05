@@ -369,30 +369,35 @@ class JdiSession(
         when (action) {
             StepAction.STEP_OVER -> {
                 val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+                stepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
                 stepReq.addCountFilter(1)
                 stepReq.enable()
                 thread.resume()
             }
             StepAction.STEP_INTO -> {
                 val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_INTO)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+                stepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
                 stepReq.addCountFilter(1)
                 stepReq.enable()
                 thread.resume()
             }
             StepAction.STEP_OUT -> {
                 val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+                stepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
                 stepReq.addCountFilter(1)
                 stepReq.enable()
                 thread.resume()
             }
             StepAction.RESUME_THREAD -> {
-                thread.resume()
+                while (thread.suspendCount() > 0) {
+                    thread.resume()
+                }
             }
             StepAction.RESUME_ALL -> {
-                vm.resume()
+                val maxSuspendCount = vm.allThreads().maxOfOrNull { it.suspendCount() } ?: 1
+                for (i in 0 until maxSuspendCount) {
+                    vm.resume()
+                }
             }
         }
     }

@@ -47,9 +47,6 @@ When `cursor < eventQueueOffset` (the cursor points to an event that aged out of
 - Build the combined `debroid` executable in release.yml and attach it as `debroid-linux`, `debroid-macos`, `debroid` (it's actually platform-agnostic bash+jar — just attach one).
 - Or publish a Brew formula / `sdkman` channel / `cargo-bundle`.
 
-### H19. Cumulative suspend count not cleared on resume
-`SUSPEND_ALL` policy increments the VM's suspend count per event. A single `vm.resume()` only decrements by 1. After a breakpoint hit + multiple step events, calling `resume` once leaves threads (e.g. RenderThread) still suspended — the UI freezes. The agent must call `resume` multiple times to match the suspend count.
-**Fix:** Call `vm.resume()` in a loop until `resumeCount == 0`, or track the suspend depth and issue matching resumes. Alternatively, switch step events to `SUSPEND_EVENT_THREAD` instead of `SUSPEND_ALL` so only the debugged thread suspends.
 
 ---
 
@@ -129,6 +126,7 @@ These were fixed and verified end-to-end against the live sample app on emulator
 - **H12.** `isAppDebuggable` rewritten in `AdbManager.kt`: uses Android's native `run-as <app_id> true` check as primary mechanism, with package flags check (`flags=[` / `pkgFlags=[`) as fallback.
 - **H14.** Expression evaluation upgraded to JDK internal JDI `ExpressionParser` via `JdiExpressionEvaluator.java` Java bridge; supports full method calls, arithmetic, logic, parameter passing, and string operations using Java syntax.
 - **H17.** Detekt `ignoreFailures` set to `false` in `build.gradle.kts` so detekt violations fail the build as expected.
+- **H19.** Fixed cumulative suspend count freeze by changing `StepRequest` to `SUSPEND_EVENT_THREAD` and ensuring `RESUME_ALL` bounds all suspend counts to 0.
 
 Additional hardening during integration testing:
 - JDI `InternalError` from ART's `SourceDebugExtension` parser no longer kills the event listener thread (catch `Throwable` in event loop + `safeSourceName()` helper).
@@ -144,4 +142,3 @@ Additional hardening during integration testing:
 3. **H10 (resume ignores thread) + H9/H11 (SKILL vs enum mismatch)**: contract bugs in the SKILL will break agents *who trust the SKILL the most*.
 4. **H3**: ship CLI tests so external contributors don't break the JSON contract by accident.
 5. **H17 / M14 / M15**: tighten CI (detekt teeth, sample-app build, SKILL-sync enforcement).
-6. **H19**: cumulative suspend count freeze — agents will hit this on every multi-step session.
