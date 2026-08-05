@@ -18,14 +18,14 @@ subprojects {
 
     tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
         kotlinOptions {
-            jvmTarget = "21"
+            jvmTarget = "11"
             freeCompilerArgs = listOf("-Xjvm-default=all")
         }
     }
     
     tasks.withType<JavaCompile> {
-        sourceCompatibility = "21"
-        targetCompatibility = "21"
+        sourceCompatibility = "11"
+        targetCompatibility = "11"
     }
 
     dependencies {

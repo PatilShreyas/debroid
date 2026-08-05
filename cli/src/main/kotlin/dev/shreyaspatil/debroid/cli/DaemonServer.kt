@@ -45,7 +45,11 @@ object DaemonServer {
             return
         }
 
-        val serverSocket = ServerSocket(DaemonConfig.PORT, DaemonConfig.BACKLOG, InetAddress.getByName(DaemonConfig.HOST))
+        val serverSocket = ServerSocket(
+            DaemonConfig.PORT,
+            DaemonConfig.BACKLOG,
+            InetAddress.getByName(DaemonConfig.HOST)
+        )
         val startResult = CliStatusResult("🤖 Debroid Daemon started on ${DaemonConfig.HOST}:${DaemonConfig.PORT}...")
         println(Json.encodeToString(startResult))
 

@@ -8,7 +8,7 @@ It uses a background Daemon and a lightweight CLI to allow AI coding assistants 
 ## 🛠️ Installation & Build
 
 ### Prerequisites
-* Java JDK 21+ (`JAVA_HOME`)
+* Java JDK 11+ (`JAVA_HOME`)
 * Android SDK & `adb`
 
 ### Install the CLI
