@@ -85,9 +85,13 @@ Run one of the following commands to install the skill for your preferred AI age
   ```bash
   mkdir -p ~/.cursor/rules && debroid skill > ~/.cursor/rules/debroid.mdc
   ```
-* **Codex / OpenCode**:
+* **Codex**:
   ```bash
   mkdir -p ~/.codex/rules && debroid skill > ~/.codex/rules/debroid.md
+  ```
+* **OpenCode**:
+  ```bash
+  mkdir -p ~/.opencode/rules && debroid skill > ~/.opencode/rules/debroid.md
   ```
 
 *(Note: If you haven't installed the CLI binary yet, replace `debroid skill` with `curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/SKILL.md` in any command).*
@@ -99,7 +103,8 @@ Run one of the following commands to install the skill for your preferred AI age
 | **Antigravity & Antigravity CLI** | `~/.gemini/skills/debroid/SKILL.md` | `.gemini/skills/debroid/SKILL.md` |
 | **Claude Code** | `~/.claude/commands/debroid.md` | `.claude/rules/debroid.md` |
 | **Cursor** | `~/.cursor/rules/debroid.mdc` | `.cursor/rules/debroid.mdc` |
-| **Codex / OpenCode** | `~/.codex/rules/debroid.md` | `AGENTS.md` / `CODEX.md` |
+| **Codex** | `~/.codex/rules/debroid.md` | `AGENTS.md` / `CODEX.md` |
+| **OpenCode** | `~/.opencode/rules/debroid.md` | `.opencode/rules/debroid.md` |
 
 ## 🔌 How it Works
 
