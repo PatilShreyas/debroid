@@ -253,3 +253,18 @@ fun EventPollResult.toCli() = CliEventPollResult(
     nextCursor,
     hasMore
 )
+
+@Serializable
+@SerialDescription("Result of checking or performing CLI auto-update")
+data class CliUpdateResult(
+    @SerialDescription("Current installed CLI version")
+    val currentVersion: String,
+    @SerialDescription("Latest available CLI version on GitHub")
+    val latestVersion: String,
+    @SerialDescription("Whether a newer version is available")
+    val updateAvailable: Boolean,
+    @SerialDescription("Whether the update was downloaded and applied")
+    val updated: Boolean,
+    @SerialDescription("Status message")
+    val message: String
+)

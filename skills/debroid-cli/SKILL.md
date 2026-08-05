@@ -169,4 +169,5 @@ Here is the full list of commands and their signatures (note: all JSON commands 
 | `coroutine` | `debroid coroutine <session_id> <continuation_id> [--pretty]` | Retrieves locals from a Continuation object |
 | `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>] [--pretty]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`) |
 | `step` | `debroid step <session_id> <thread_id> <action> [--pretty]` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
+| `update` | `debroid update [--check-only] [--pretty]` | Checks for CLI updates or performs an in-place self-update to the latest release |
 | `skill` | `debroid skill` | Prints embedded skill instructions to stdout (e.g. `debroid skill > ~/.claude/skills/debroid/SKILL.md`) |

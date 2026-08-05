@@ -28,11 +28,13 @@ import dev.shreyaspatil.debroid.cli.models.CliSessionStatus
 import dev.shreyaspatil.debroid.cli.models.CliShutdownResult
 import dev.shreyaspatil.debroid.cli.models.CliStackFrameInfo
 import dev.shreyaspatil.debroid.cli.models.CliStatusResult
+import dev.shreyaspatil.debroid.cli.models.CliUpdateResult
 import dev.shreyaspatil.debroid.cli.models.CliVariableInfo
 import dev.shreyaspatil.debroid.cli.models.CliWatchpointResult
 import dev.shreyaspatil.debroid.cli.models.DaemonIpcRequest
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
 import dev.shreyaspatil.debroid.cli.models.JsonSchemaGenerator
+import dev.shreyaspatil.debroid.cli.update.AutoUpdateManager
 import dev.shreyaspatil.debroid.models.StepAction
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
@@ -485,12 +487,41 @@ object CliRunner {
                 CoroutineCommand(),
                 InspectCommand(),
                 StepCommand(),
-                SkillCommand()
+                SkillCommand(),
+                UpdateCommand()
             )
+    }
+
+    class UpdateCommand : BaseJsonCommand(
+        name = "update",
+        help = "Checks for CLI updates or performs an in-place self-update to the latest release",
+        serializer = CliUpdateResult.serializer()
+    ) {
+        private val checkOnly by option(
+            "--check-only",
+            help = "Check for available updates without downloading or updating"
+        ).flag(default = false)
+
+        override fun run() {
+            val result = AutoUpdateManager.DEFAULT.checkOrUpdate(checkOnly)
+            val jsonFormatter = if (pretty) {
+                Json {
+                    prettyPrint = true
+                    encodeDefaults = true
+                }
+            } else {
+                Json {
+                    encodeDefaults = true
+                }
+            }
+            println(jsonFormatter.encodeToString(CliUpdateResult.serializer(), result))
+        }
     }
 
     @Suppress("TooGenericExceptionCaught")
     fun execute(args: Array<String>) {
+        AutoUpdateManager.DEFAULT.checkAndPerformSilentAutoUpdateAsync()
+
         val cli = createCli()
         if (args.isEmpty()) {
             println(cli.getFormattedHelp())
