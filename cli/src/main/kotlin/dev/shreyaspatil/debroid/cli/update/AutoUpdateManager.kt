@@ -47,29 +47,15 @@ class AutoUpdateManager(
     /**
      * Performs an on-demand update check or in-place binary upgrade.
      */
-    @Suppress("ReturnCount")
     fun checkOrUpdate(checkOnly: Boolean): CliUpdateResult {
         val releaseInfo = releaseClient.fetchLatestRelease()
-            ?: return CliUpdateResult(
-                currentVersion = VERSION,
-                latestVersion = VERSION,
-                updateAvailable = false,
-                updated = false,
-                message = "No published stable release found on GitHub or unable to reach GitHub API."
-            )
+            ?: return createFailureResult("No published stable release found on GitHub or unable to reach GitHub API.")
 
         val latestVersion = SemanticVersion.parse(releaseInfo.tagName)
-            ?: return CliUpdateResult(
-                currentVersion = VERSION,
-                latestVersion = VERSION,
-                updateAvailable = false,
-                updated = false,
-                message = "Latest release version tag (${releaseInfo.tagName}) is not a recognized stable release."
-            )
+            ?: return createFailureResult("Latest tag (${releaseInfo.tagName}) is not a recognized stable release.")
 
         val currentVersion = SemanticVersion.parse(VERSION)
         val cleanLatestTag = releaseInfo.tagName.removePrefix("v")
-
         val isNewer = currentVersion == null || latestVersion.isNewerThan(currentVersion)
 
         if (!isNewer) {
@@ -92,7 +78,18 @@ class AutoUpdateManager(
             )
         }
 
-        // Perform in-place binary download and update
+        return performBinaryUpgrade(releaseInfo.downloadUrl, cleanLatestTag)
+    }
+
+    private fun createFailureResult(message: String) = CliUpdateResult(
+        currentVersion = VERSION,
+        latestVersion = VERSION,
+        updateAvailable = false,
+        updated = false,
+        message = message
+    )
+
+    private fun performBinaryUpgrade(downloadUrl: String, cleanLatestTag: String): CliUpdateResult {
         val targetBinary = binaryUpdater.resolveCurrentBinaryLocation()
             ?: return CliUpdateResult(
                 currentVersion = VERSION,
@@ -102,24 +99,18 @@ class AutoUpdateManager(
                 message = "Could not locate debroid binary file path on system."
             )
 
-        val success = binaryUpdater.downloadAndReplaceBinary(releaseInfo.downloadUrl, targetBinary)
-        return if (success) {
-            CliUpdateResult(
-                currentVersion = VERSION,
-                latestVersion = cleanLatestTag,
-                updateAvailable = true,
-                updated = true,
-                message = "Successfully updated Debroid from v$VERSION to v$cleanLatestTag."
-            )
-        } else {
-            CliUpdateResult(
-                currentVersion = VERSION,
-                latestVersion = cleanLatestTag,
-                updateAvailable = true,
-                updated = false,
-                message = "Failed to replace binary file at ${targetBinary.absolutePath}."
-            )
-        }
+        val success = binaryUpdater.downloadAndReplaceBinary(downloadUrl, targetBinary)
+        return CliUpdateResult(
+            currentVersion = VERSION,
+            latestVersion = cleanLatestTag,
+            updateAvailable = true,
+            updated = success,
+            message = if (success) {
+                "Successfully updated Debroid from v$VERSION to v$cleanLatestTag."
+            } else {
+                "Failed to replace binary file at ${targetBinary.absolutePath}."
+            }
+        )
     }
 
     companion object {
