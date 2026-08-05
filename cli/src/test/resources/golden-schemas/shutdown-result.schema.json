@@ -1,0 +1,11 @@
+{
+    "type": "object",
+    "properties": {
+        "shutdown": {
+            "type": "boolean"
+        },
+        "message": {
+            "type": "string"
+        }
+    }
+}

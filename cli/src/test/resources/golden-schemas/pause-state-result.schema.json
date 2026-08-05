@@ -1,0 +1,87 @@
+{
+    "type": "object",
+    "properties": {
+        "threadId": {
+            "type": "string"
+        },
+        "threadName": {
+            "type": "string"
+        },
+        "frames": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "frameIndex": {
+                        "type": "integer"
+                    },
+                    "methodName": {
+                        "type": "string"
+                    },
+                    "declaringClass": {
+                        "type": "string"
+                    },
+                    "sourceFile": {
+                        "type": "string",
+                        "nullable": true
+                    },
+                    "lineNumber": {
+                        "type": "integer"
+                    },
+                    "coroutineContinuationObjectId": {
+                        "type": "string",
+                        "nullable": true
+                    }
+                }
+            }
+        },
+        "locals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "type": {
+                        "type": "string"
+                    },
+                    "valuePreview": {
+                        "type": "string"
+                    },
+                    "isPrimitive": {
+                        "type": "boolean"
+                    },
+                    "objectId": {
+                        "type": "string",
+                        "nullable": true
+                    }
+                }
+            }
+        },
+        "instanceVariables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "type": {
+                        "type": "string"
+                    },
+                    "valuePreview": {
+                        "type": "string"
+                    },
+                    "isPrimitive": {
+                        "type": "boolean"
+                    },
+                    "objectId": {
+                        "type": "string",
+                        "nullable": true
+                    }
+                }
+            }
+        }
+    }
+}

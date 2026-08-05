@@ -1,0 +1,8 @@
+{
+    "type": "object",
+    "properties": {
+        "watchpointId": {
+            "type": "string"
+        }
+    }
+}

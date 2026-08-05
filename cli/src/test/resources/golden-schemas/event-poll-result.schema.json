@@ -1,0 +1,77 @@
+{
+    "type": "object",
+    "properties": {
+        "events": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "eventType": {
+                        "type": "string"
+                    },
+                    "sessionId": {
+                        "type": "string"
+                    },
+                    "threadId": {
+                        "type": "string",
+                        "nullable": true
+                    },
+                    "threadName": {
+                        "type": "string",
+                        "nullable": true
+                    },
+                    "location": {
+                        "type": "string",
+                        "nullable": true
+                    },
+                    "className": {
+                        "type": "string",
+                        "nullable": true
+                    },
+                    "exceptionMessage": {
+                        "type": "string",
+                        "nullable": true
+                    },
+                    "stacktrace": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "frameIndex": {
+                                    "type": "integer"
+                                },
+                                "methodName": {
+                                    "type": "string"
+                                },
+                                "declaringClass": {
+                                    "type": "string"
+                                },
+                                "sourceFile": {
+                                    "type": "string",
+                                    "nullable": true
+                                },
+                                "lineNumber": {
+                                    "type": "integer"
+                                },
+                                "coroutineContinuationObjectId": {
+                                    "type": "string",
+                                    "nullable": true
+                                }
+                            }
+                        },
+                        "nullable": true
+                    },
+                    "timestamp": {
+                        "type": "integer"
+                    }
+                }
+            }
+        },
+        "nextCursor": {
+            "type": "string"
+        },
+        "hasMore": {
+            "type": "boolean"
+        }
+    }
+}

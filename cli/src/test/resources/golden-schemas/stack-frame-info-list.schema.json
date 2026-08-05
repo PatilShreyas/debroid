@@ -1,0 +1,28 @@
+{
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "frameIndex": {
+                "type": "integer"
+            },
+            "methodName": {
+                "type": "string"
+            },
+            "declaringClass": {
+                "type": "string"
+            },
+            "sourceFile": {
+                "type": "string",
+                "nullable": true
+            },
+            "lineNumber": {
+                "type": "integer"
+            },
+            "coroutineContinuationObjectId": {
+                "type": "string",
+                "nullable": true
+            }
+        }
+    }
+}

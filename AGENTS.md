@@ -59,3 +59,16 @@ We maintain an AI Agent Skill document at **`skills/debroid-cli/SKILL.md`**. Thi
 
 **You MUST:**
 Update the `skills/debroid-cli/SKILL.md` file to reflect the new command signatures, usage examples, and JSON parsing rules. Keeping the skill file synchronized with the CLI is mandatory to ensure AI agents using Debroid do not break!
+
+## 🚨 CRITICAL RULE: Schema Contracts & Golden Tests
+All CLI JSON response models are guarded by Golden Schema tests in `JsonSchemaGoldenTest` (`cli/src/test/resources/golden-schemas/*.schema.json`) to prevent unintended breaking changes for downstream AI agents.
+
+**Whenever you:**
+1. **Modify an existing response model (`CliModels.kt`)**:
+   - Run `./gradlew test -DupdateGoldenSchemas=true` to update the `.schema.json` files.
+   - Verify the diff in `cli/src/test/resources/golden-schemas/` to ensure no unintended field breakages occurred, and commit the updated `.schema.json` files.
+2. **Add a NEW CLI command or response model**:
+   - Pass the model's `KSerializer` (e.g. `serializer = CliNewResult.serializer()`) to `BaseJsonCommand`.
+   - Add a corresponding test method in `JsonSchemaGoldenTest.kt` (e.g. `assertGoldenSchema("new-model.schema.json", CliNewResult.serializer())`).
+   - Run `./gradlew test -DupdateGoldenSchemas=true` to generate the initial golden schema file and commit it.
+
