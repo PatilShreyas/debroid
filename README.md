@@ -74,56 +74,41 @@ Select your AI agent below for setup instructions and exact skill paths:
 <details>
 <summary><b>🤖 Antigravity & Antigravity CLI</b></summary>
 
-* **Global Path:** `~/.gemini/skills/debroid/SKILL.md`
-* **Project Path:** `.gemini/skills/debroid/SKILL.md`
-* **Installation Command:**
-  ```bash
-  mkdir -p ~/.gemini/skills/debroid && debroid skill > ~/.gemini/skills/debroid/SKILL.md
-  ```
+```bash
+mkdir -p ~/.gemini/skills/debroid && debroid skill > ~/.gemini/skills/debroid/SKILL.md
+```
 </details>
 
 <details>
 <summary><b>🟧 Claude Code</b></summary>
 
-* **Global Path:** `~/.claude/skills/debroid/SKILL.md`
-* **Project Path:** `.claude/skills/debroid/SKILL.md`
-* **Installation Command:**
-  ```bash
-  mkdir -p ~/.claude/skills/debroid && debroid skill > ~/.claude/skills/debroid/SKILL.md
-  ```
+```bash
+mkdir -p ~/.claude/skills/debroid && debroid skill > ~/.claude/skills/debroid/SKILL.md
+```
 </details>
 
 <details>
 <summary><b>🖱️ Cursor</b></summary>
 
-* **Global Path:** Cursor Settings > Rules for AI
-* **Project Path:** `.cursor/rules/debroid.mdc`
-* **Installation Command:**
-  ```bash
-  mkdir -p .cursor/rules && debroid skill > .cursor/rules/debroid.mdc
-  ```
+```bash
+mkdir -p .cursor/rules && debroid skill > .cursor/rules/debroid.mdc
+```
 </details>
 
 <details>
 <summary><b>⚡ OpenAI Codex</b></summary>
 
-* **Global Path:** `~/.codex/AGENTS.md`
-* **Project Path:** `AGENTS.md`
-* **Installation Command:**
-  ```bash
-  mkdir -p ~/.codex && debroid skill >> ~/.codex/AGENTS.md
-  ```
+```bash
+mkdir -p ~/.codex && debroid skill >> ~/.codex/AGENTS.md
+```
 </details>
 
 <details>
 <summary><b>🔓 OpenCode</b></summary>
 
-* **Global Path:** `~/.config/opencode/skills/debroid/SKILL.md` (or `~/.config/opencode/AGENTS.md`)
-* **Project Path:** `.opencode/skills/debroid/SKILL.md`
-* **Installation Command:**
-  ```bash
-  mkdir -p ~/.config/opencode/skills/debroid && debroid skill > ~/.config/opencode/skills/debroid/SKILL.md
-  ```
+```bash
+mkdir -p ~/.config/opencode/skills/debroid && debroid skill > ~/.config/opencode/skills/debroid/SKILL.md
+```
 </details>
 
 *(Note: If you haven't installed the CLI binary yet, replace `debroid skill` with `curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/SKILL.md` in any command).*
