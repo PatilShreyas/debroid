@@ -53,7 +53,6 @@ Clone the repository and build locally:
 ```bash
 ./install.sh
 ```
-*Note: The script installs the `debroid` binary to `/usr/local/bin` (may request `sudo` if `/usr/local/bin` is not user-writable).*
 
 <details>
 <summary><b>🗑️ How to uninstall</b></summary>
@@ -63,9 +62,9 @@ To completely remove Debroid from your system:
    ```bash
    debroid stop
    ```
-2. Remove the binary executable:
+2. Remove the binary executable from your user local directory:
    ```bash
-   sudo rm /usr/local/bin/debroid
+   rm ~/.local/bin/debroid
    ```
 </details>
 
