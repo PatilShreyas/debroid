@@ -148,10 +148,10 @@ class JdiSession(
         val classBasename = file.substringAfterLast('/').substringAfterLast('\\').substringBeforeLast('.')
         val classBasenameKt = "${classBasename}Kt"
 
-        val fastPathClasses = packageName?.let {
+        val fastPathClasses = packageName?.let { pkg ->
             try {
-                val classMatches = vm.classesByName("$packageName.$classBasename")
-                val kotlinFacadeMatches = vm.classesByName("$packageName.$classBasenameKt")
+                val classMatches = vm.classesByName("$pkg.$classBasename")
+                val kotlinFacadeMatches = vm.classesByName("$pkg.$classBasenameKt")
                 (classMatches + kotlinFacadeMatches).distinct()
             } catch (_: Throwable) {
                 emptyList()
@@ -163,6 +163,11 @@ class JdiSession(
         if (requests.isEmpty()) {
             val matchingClasses = vm.allClasses().filter { ref ->
                 val name = try { ref.name() } catch (_: Throwable) { return@filter false }
+
+                if (packageName != null && !name.startsWith(packageName)) {
+                    return@filter false
+                }
+
                 val simpleName = name.substringAfterLast('.')
                 val nameMatchesHeuristic = simpleName == classBasename ||
                     simpleName == classBasenameKt ||

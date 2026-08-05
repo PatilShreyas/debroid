@@ -292,6 +292,37 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `setBreakpoint with packageName skips sourceName call on non-matching package classes during fallback`() {
+        val matchingType = mockk<ReferenceType>(relaxed = true)
+        val nonMatchingType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { vm.classesByName("com.example.data.DataRepository") } returns emptyList()
+        every { vm.classesByName("com.example.data.DataRepositoryKt") } returns emptyList()
+
+        every { matchingType.name() } returns "com.example.data.DefaultDataRepository"
+        every { matchingType.sourceName() } returns "DataRepository.kt"
+        every { matchingType.locationsOfLine(41) } returns listOf(location)
+
+        every { nonMatchingType.name() } returns "com.other.UnrelatedClass"
+        every { nonMatchingType.sourceName() } returns "UnrelatedClass.java"
+
+        every { vm.allClasses() } returns listOf(nonMatchingType, matchingType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(
+            file = "DataRepository.kt",
+            line = 41,
+            packageName = "com.example.data"
+        )
+
+        assertTrue(info.verified)
+        verify(exactly = 0) { nonMatchingType.sourceName() }
+        verify(exactly = 1) { matchingType.sourceName() }
+    }
+
+    @Test
     fun `stepExecution clears old requests and creates new step request`() {
         val thread = mockk<ThreadReference>(relaxed = true)
         every { thread.uniqueID() } returns 1L
