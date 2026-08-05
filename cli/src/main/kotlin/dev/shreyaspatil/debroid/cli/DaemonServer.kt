@@ -17,6 +17,7 @@ import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
@@ -39,12 +40,14 @@ object DaemonServer {
 
     fun startDaemon() {
         if (isDaemonRunning()) {
-            println("Debroid daemon is already running on port ${DaemonConfig.PORT}.")
+            val result = CliStatusResult("Debroid daemon is already running on port ${DaemonConfig.PORT}.")
+            println(Json.encodeToString(result))
             return
         }
 
-        val serverSocket = ServerSocket(DaemonConfig.PORT)
-        println("🤖 Debroid Daemon started on ${DaemonConfig.HOST}:${DaemonConfig.PORT}...")
+        val serverSocket = ServerSocket(DaemonConfig.PORT, DaemonConfig.BACKLOG, InetAddress.getByName(DaemonConfig.HOST))
+        val startResult = CliStatusResult("🤖 Debroid Daemon started on ${DaemonConfig.HOST}:${DaemonConfig.PORT}...")
+        println(Json.encodeToString(startResult))
 
         val executor = Executors.newCachedThreadPool()
         while (true) {
