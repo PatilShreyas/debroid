@@ -24,7 +24,7 @@ Activate this skill whenever the user or task involves:
 4. **Track trap IDs and remove them when done**. Every `break`, `catch-exception`, and `watch` returns an ID. Use `remove-break`, `remove-catch-exception`, `remove-watch` to clear traps you no longer need so they don't fire unexpectedly and waste poll cycles.
 5. **Keep IDs in working memory, not in long scratch buffers.** A typical session uses 1–3 trap IDs plus 1 thread ID — keep them inline.
 6. **Use Background Tasks**: If you are using an agentic system that supports background tasks, run `debroid daemon` as a background task.
-7. **Token efficiency**: All JSON responses are compact by design. Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
+7. **Token efficiency**: All JSON responses are compact single-line by default to conserve agent context tokens. If formatted multi-line JSON is required, append the `--pretty` flag to any JSON command. Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
 8. **Self-Recovery**: If a session becomes unresponsive or gets out of sync, run `debroid stop` to cleanly terminate the daemon and release ADB ports. The next `debroid` command will auto-restart a fresh daemon.
 
 ## 🔄 Standard Debugging Workflow
@@ -53,7 +53,7 @@ You must attach the debugger to obtain a `sessionId`.
 
 ### Step 3: Set Traps
 Set your breakpoints or watchpoints *before* polling. **Save the returned IDs.**
-- **Line Breakpoint**: `debroid break <session_id> <FileName.kt> <line_number> [--package <pkg>]` → returns `{ "id": "bp_1", "verified": true|false, ... }`
+- **Line Breakpoint**: `debroid break <session_id> <FileName.kt> <line_number> [--package <pkg>] [--pretty]` → returns `{ "id": "bp_1", "verified": true|false, ... }`
   - **Always pass `--package`** when you know it (e.g. `--package com.example.app.search`). Providing the package name lets the daemon resolve the class with a single targeted lookup instead of scanning every loaded class across the entire VM, which takes seconds or minutes on large applications and drastically improves responsiveness.
   - If `verified=false`, the class isn't loaded yet. Debroid will **automatically** bind it the moment the class is prepared — you do **not** need to do anything; just poll. (No more deferred-breakpoint dead-ends.)
   - Use `remove-break <session_id> <breakpoint_id>` to clear it.
@@ -122,29 +122,29 @@ debroid detach <session_id>
 - **Daemon or Session Unresponsive**: Run `debroid stop` to terminate the background server and clear ADB port forwards. The next `debroid` command will automatically spawn a fresh, clean daemon.
 
 ## 📖 Complete CLI Command Reference
-Here is the full list of commands and their signatures:
+Here is the full list of commands and their signatures (note: all JSON commands accept an optional `--pretty` flag to format response JSON):
 | Command | Signature | Description |
 | :--- | :--- | :--- |
 | `daemon` | `debroid daemon` | Starts the persistent background daemon |
-| `stop` | `debroid stop` | Shuts down background daemon and detaches all active sessions |
-| `launch` | `debroid launch <app_id>` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
-| `attach` | `debroid attach <app_id>` | Attaches to a running app |
-| `detach` | `debroid detach <session_id>` | Safely detaches debugger; for `launch` sessions also clears `am set-debug-app` |
-| `break` | `debroid break <session_id> <file> <line> [-p/--package=<pkg>]` | Sets a line breakpoint (always pass `--package` for fast targeted lookup; auto-defers if class isn't loaded yet) |
-| `remove-break` | `debroid remove-break <session_id> <breakpoint_id>` | Removes a previously set line breakpoint |
-| `catch-exception` | `debroid catch-exception <session_id> [class_name] [--caught] [--uncaught]` | Sets an exception breakpoint (default: `--uncaught` only) |
-| `remove-catch-exception` | `debroid remove-catch-exception <session_id> <exception_breakpoint_id>` | Removes an exception breakpoint |
-| `watch` | `debroid watch <session_id> <class_name> <field_name> [--access] [--modify]` | Sets a field watchpoint (default: access+modify) |
-| `remove-watch` | `debroid remove-watch <session_id> <watchpoint_id>` | Removes a watchpoint |
-| `threads` | `debroid threads <session_id>` | Lists active threads |
-| `locals` | `debroid locals <session_id> <thread_id>` | Gets shallow local variables |
-| `pause-state` | `debroid pause-state <session_id> <thread_id>` | Gets frames, locals, and instance state |
-| `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value>` | Mutates local variable |
-| `eval` | `debroid eval <session_id> <thread_id> <expression...>` | Evaluates string expression |
-| `resume` | `debroid resume <session_id>` | Resumes **all** threads (use `step ... RESUME_THREAD` for per-thread resume) |
-| `poll` | `debroid poll <session_id> [cursor=0] [--with-stacktrace]` | Polls for asynchronous debugger events |
-| `frames` | `debroid frames <session_id> <thread_id>` | Retrieves thread stack frames |
-| `coroutine` | `debroid coroutine <session_id> <continuation_id>` | Retrieves locals from a Continuation object |
-| `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`) |
-| `step` | `debroid step <session_id> <thread_id> <action>` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
+| `stop` | `debroid stop [--pretty]` | Shuts down background daemon and detaches all active sessions |
+| `launch` | `debroid launch <app_id> [--pretty]` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
+| `attach` | `debroid attach <app_id> [--pretty]` | Attaches to a running app |
+| `detach` | `debroid detach <session_id> [--pretty]` | Safely detaches debugger; for `launch` sessions also clears `am set-debug-app` |
+| `break` | `debroid break <session_id> <file> <line> [-p/--package=<pkg>] [--pretty]` | Sets a line breakpoint (always pass `--package` for fast targeted lookup; auto-defers if class isn't loaded yet) |
+| `remove-break` | `debroid remove-break <session_id> <breakpoint_id> [--pretty]` | Removes a previously set line breakpoint |
+| `catch-exception` | `debroid catch-exception <session_id> [class_name] [--caught] [--uncaught] [--pretty]` | Sets an exception breakpoint (default: `--uncaught` only) |
+| `remove-catch-exception` | `debroid remove-catch-exception <session_id> <exception_breakpoint_id> [--pretty]` | Removes an exception breakpoint |
+| `watch` | `debroid watch <session_id> <class_name> <field_name> [--access] [--modify] [--pretty]` | Sets a field watchpoint (default: access+modify) |
+| `remove-watch` | `debroid remove-watch <session_id> <watchpoint_id> [--pretty]` | Removes a watchpoint |
+| `threads` | `debroid threads <session_id> [--pretty]` | Lists active threads |
+| `locals` | `debroid locals <session_id> <thread_id> [--pretty]` | Gets shallow local variables |
+| `pause-state` | `debroid pause-state <session_id> <thread_id> [--pretty]` | Gets frames, locals, and instance state |
+| `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value> [--pretty]` | Mutates local variable |
+| `eval` | `debroid eval <session_id> <thread_id> <expression...> [--pretty]` | Evaluates string expression |
+| `resume` | `debroid resume <session_id> [--pretty]` | Resumes **all** threads (use `step ... RESUME_THREAD` for per-thread resume) |
+| `poll` | `debroid poll <session_id> [cursor=0] [--with-stacktrace] [--pretty]` | Polls for asynchronous debugger events |
+| `frames` | `debroid frames <session_id> <thread_id> [--pretty]` | Retrieves thread stack frames |
+| `coroutine` | `debroid coroutine <session_id> <continuation_id> [--pretty]` | Retrieves locals from a Continuation object |
+| `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>] [--pretty]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`) |
+| `step` | `debroid step <session_id> <thread_id> <action> [--pretty]` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
 | `skill` | `debroid skill` | Prints embedded skill instructions to stdout (e.g. `debroid skill > ~/.claude/skills/debroid/SKILL.md`) |

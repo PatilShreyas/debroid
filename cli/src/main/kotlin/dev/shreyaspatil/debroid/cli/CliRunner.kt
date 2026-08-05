@@ -18,6 +18,7 @@ import com.github.ajalt.clikt.parameters.types.enum
 import com.github.ajalt.clikt.parameters.types.int
 import dev.shreyaspatil.debroid.cli.models.CliDebugError
 import dev.shreyaspatil.debroid.cli.models.CliShutdownResult
+import dev.shreyaspatil.debroid.cli.models.DaemonIpcRequest
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
 import dev.shreyaspatil.debroid.models.StepAction
 import kotlinx.serialization.encodeToString
@@ -32,8 +33,23 @@ object CliRunner {
 
     private val json = Json { encodeDefaults = true }
 
+    abstract class BaseJsonCommand(
+        name: String? = null,
+        help: String = "",
+        epilog: String = ""
+    ) : CliktCommand(name = name, help = help, epilog = epilog) {
+        val pretty by option(
+            "--pretty",
+            help = "Format JSON output with line breaks and indentation"
+        ).flag(default = false)
+
+        protected fun ensureDaemonAndSend(request: DaemonRequest) {
+            CliRunner.ensureDaemonAndSend(request, pretty)
+        }
+    }
+
     @Suppress("MagicNumber", "MaxLineLength", "TooGenericExceptionCaught")
-    private fun ensureDaemonAndSend(request: DaemonRequest) {
+    private fun ensureDaemonAndSend(request: DaemonRequest, pretty: Boolean = false) {
         if (!DaemonServer.isDaemonRunning()) {
             val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
             val classPath = System.getProperty("java.class.path")
@@ -74,7 +90,8 @@ object CliRunner {
                 val writer = PrintWriter(socket.getOutputStream(), true)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
 
-                writer.println(json.encodeToString(request))
+                val ipcRequest = DaemonIpcRequest(pretty = pretty, request = request)
+                writer.println(json.encodeToString(ipcRequest))
                 println(reader.readText())
             }
         } catch (e: Exception) {
@@ -111,14 +128,14 @@ object CliRunner {
         }
     }
 
-    class ShutdownCommand : CliktCommand(
+    class ShutdownCommand : BaseJsonCommand(
         name = "stop",
         help = "Shuts down the Debroid persistent background daemon and detaches all active sessions.",
         epilog = "Safely disposes all active debug sessions and closes ADB port forwards."
     ) {
         override fun run() {
             if (!DaemonServer.isDaemonRunning()) {
-                val jsonRes = Json { prettyPrint = true }
+                val jsonRes = Json { prettyPrint = pretty }
                 println(jsonRes.encodeToString(CliShutdownResult(shutdown = true, message = "Daemon is not running")))
                 return
             }
@@ -126,7 +143,7 @@ object CliRunner {
         }
     }
 
-    class LaunchCommand : CliktCommand(
+    class LaunchCommand : BaseJsonCommand(
         name = "launch",
         help = "Launches an application in suspended mode and attaches the debugger.",
         epilog = "This is the safest way to debug initialization code. " +
@@ -136,7 +153,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Launch(appId))
     }
 
-    class AttachCommand : CliktCommand(
+    class AttachCommand : BaseJsonCommand(
         name = "attach",
         help = "Attaches the debugger to an already running application process."
     ) {
@@ -144,7 +161,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Attach(appId))
     }
 
-    class DetachCommand : CliktCommand(
+    class DetachCommand : BaseJsonCommand(
         name = "detach",
         help = "Detaches the debugger and safely terminates the debug session.",
         epilog = "The application will continue to run normally after detachment."
@@ -156,7 +173,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Detach(sessionId))
     }
 
-    class BreakCommand : CliktCommand(
+    class BreakCommand : BaseJsonCommand(
         name = "break",
         help = "Sets a line breakpoint in a specific source file."
     ) {
@@ -181,7 +198,7 @@ object CliRunner {
         )
     }
 
-    class RemoveBreakCommand : CliktCommand(
+    class RemoveBreakCommand : BaseJsonCommand(
         name = "remove-break",
         help = "Removes a previously set line breakpoint."
     ) {
@@ -190,7 +207,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.RemoveBreak(sessionId, breakpointId))
     }
 
-    class CatchExceptionCommand : CliktCommand(
+    class CatchExceptionCommand : BaseJsonCommand(
         name = "catch-exception",
         help = "Sets a breakpoint that triggers when an exception is thrown.",
         epilog = "By default only UNCAUGHT exceptions are trapped. Use --caught to also trap caught exceptions, " +
@@ -209,7 +226,7 @@ object CliRunner {
         )
     }
 
-    class RemoveCatchExceptionCommand : CliktCommand(
+    class RemoveCatchExceptionCommand : BaseJsonCommand(
         name = "remove-catch-exception",
         help = "Removes a previously set exception breakpoint."
     ) {
@@ -221,7 +238,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.RemoveCatchException(sessionId, bpId))
     }
 
-    class WatchCommand : CliktCommand(
+    class WatchCommand : BaseJsonCommand(
         name = "watch",
         help = "Sets a watchpoint on a specific field to monitor access and/or modifications.",
         epilog = "Defaults to BOTH access and modify. Pass --no-access or --no-modify to disable either."
@@ -248,7 +265,7 @@ object CliRunner {
         )
     }
 
-    class RemoveWatchCommand : CliktCommand(
+    class RemoveWatchCommand : BaseJsonCommand(
         name = "remove-watch",
         help = "Removes a previously set watchpoint."
     ) {
@@ -257,7 +274,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.RemoveWatch(sessionId, watchpointId))
     }
 
-    class ThreadsCommand : CliktCommand(
+    class ThreadsCommand : BaseJsonCommand(
         name = "threads",
         help = "Lists all active threads in the target application.",
         epilog = "Useful for finding the thread ID (e.g., '1' for main thread) to inspect locals or pause state."
@@ -266,7 +283,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Threads(sessionId))
     }
 
-    class LocalsCommand : CliktCommand(
+    class LocalsCommand : BaseJsonCommand(
         name = "locals",
         help = "Retrieves shallow local variables for the top stack frame of a suspended thread."
     ) {
@@ -275,7 +292,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Locals(sessionId, threadId))
     }
 
-    class PauseStateCommand : CliktCommand(
+    class PauseStateCommand : BaseJsonCommand(
         name = "pause-state",
         help = "Retrieves the current execution state (stack trace, current file, line) of a suspended thread."
     ) {
@@ -284,7 +301,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.PauseState(sessionId, threadId))
     }
 
-    class SetVarCommand : CliktCommand(
+    class SetVarCommand : BaseJsonCommand(
         name = "set-var",
         help = "Mutates the value of a local variable in the currently suspended frame memory."
     ) {
@@ -297,7 +314,7 @@ object CliRunner {
         )
     }
 
-    class EvalCommand : CliktCommand(
+    class EvalCommand : BaseJsonCommand(
         name = "eval",
         help = "Evaluates a raw string expression or performs string concatenation within the debugged process."
     ) {
@@ -309,7 +326,7 @@ object CliRunner {
         )
     }
 
-    class ResumeCommand : CliktCommand(
+    class ResumeCommand : BaseJsonCommand(
         name = "resume",
         help = "Resumes execution of all threads."
     ) {
@@ -317,7 +334,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Resume(sessionId))
     }
 
-    class PollCommand : CliktCommand(
+    class PollCommand : BaseJsonCommand(
         name = "poll",
         help = "Polls the JDWP event queue for new debugger events (like breakpoints hit).",
         epilog = "Returns events sequentially. Provide the cursor returned by the last poll to get newer events."
@@ -334,7 +351,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Poll(sessionId, cursor, withStacktrace))
     }
 
-    class FramesCommand : CliktCommand(
+    class FramesCommand : BaseJsonCommand(
         name = "frames",
         help = "Retrieves the stack frames for a suspended thread."
     ) {
@@ -343,7 +360,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Frames(sessionId, threadId))
     }
 
-    class CoroutineCommand : CliktCommand(
+    class CoroutineCommand : BaseJsonCommand(
         name = "coroutine",
         help = "Retrieves local variables from a suspended coroutine continuation object."
     ) {
@@ -352,7 +369,7 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Coroutine(sessionId, continuationId))
     }
 
-    class InspectCommand : CliktCommand(
+    class InspectCommand : BaseJsonCommand(
         name = "inspect",
         help = "Inspects an object's fields up to a specified depth."
     ) {
@@ -364,7 +381,7 @@ object CliRunner {
         )
     }
 
-    class StepCommand : CliktCommand(
+    class StepCommand : BaseJsonCommand(
         name = "step",
         help = "Performs a stepping action (over, into, out, resume, resume-all) on a suspended thread."
     ) {
@@ -376,7 +393,8 @@ object CliRunner {
 
     class SkillCommand : CliktCommand(
         name = "skill",
-        help = "Prints embedded AI Agent skill instructions (SKILL.md) to stdout (e.g. debroid skill > .cursor/rules/debroid.md)."
+        help = "Prints embedded AI Agent skill instructions (SKILL.md) to stdout " +
+            "(e.g. debroid skill > .cursor/rules/debroid.md)."
     ) {
         override fun run() {
             val skillContent = object {}.javaClass.getResourceAsStream("/SKILL.md")
