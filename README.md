@@ -1,60 +1,74 @@
-# Debroid 🤖⚡
+<div align="center">
+  <h1>Debroid 🤖⚡</h1>
+  <p><b>The Headless Android Debugger for AI Agents</b></p>
 
-**Debroid** (*DEBug + AnDROID*) is an autonomous, headless Android debugging CLI utility designed specifically for AI Agents (Claude Code, Codex, Cursor, OpenCode, Antigravity, etc.) to debug Android applications.
+  <p>
+    <a href="https://github.com/PatilShreyas/debroid/actions/workflows/ci.yml"><img src="https://github.com/PatilShreyas/debroid/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://github.com/PatilShreyas/debroid/actions/workflows/release.yml"><img src="https://github.com/PatilShreyas/debroid/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+    <a href="https://github.com/PatilShreyas/debroid/blob/main/LICENSE"><img src="https://img.shields.io/github/license/PatilShreyas/debroid?color=blue&style=flat-square" alt="License"></a>
+  </p>
+</div>
 
-It uses a background Daemon and a lightweight CLI to allow AI coding assistants to set breakpoints, inspect runtime stack frames, mutate variables live in thread memory, catch uncaught exceptions, and step through code execution.
+**Debroid** (*DEBug + AnDROID*) is a headless CLI that speaks the Java Debug Wire protocol (JDWP) so AI agents — Claude Code, Codex, OpenCode, Cursor, Antigravity, or anything with a terminal — can debug a live Android app the way a human would in Android Studio: set breakpoints, catch exceptions, step through code, inspect and mutate variables, and watch fields — all without a GUI, and all through strict, machine-parseable JSON.
 
+## ❓ Why it exists
 
-## 🛠️ Installation & Build
+Traditional Android development environments are highly visual. While AI coding assistants can write code, they are effectively "blind" when it comes to runtime debugging because they cannot click through the Android Studio UI to inspect memory or pause execution.
+
+**Debroid closes this gap.** It acts as a translation layer between the raw terminal (which AI agents are great at using) and the Android Virtual Machine. By providing a CLI that outputs deterministic JSON, an AI agent can autonomously hypothesize a bug, launch the app, trap the exact line of code, read the live state of the device, and evaluate a fix — granting agents the same deep runtime awareness previously reserved for human developers.
+
+## ✨ Features
+
+- **🔴 Breakpoints**: Set line breakpoints in any class. Debroid automatically defers them if the class isn't loaded yet.
+- **⚡ Exception Traps**: Catch caught or uncaught exceptions globally across the app.
+- **👀 Watchpoints**: Monitor field access and modification live.
+- **🔬 Deep Inspection**: Recursively inspect deep object memory, local variables, and call frames with built-in cycle-guards.
+- **🧬 Live Mutation**: Modify variable memory dynamically on paused threads using `set-var`.
+- **🧮 Live Evaluation**: Fully-featured expression evaluator supporting Java syntax, method calls, and arithmetic directly in the target VM.
+- **🐾 Stepping**: Step Over, Step Into, Step Out, or Resume at will.
+- **🧵 Coroutine Aware**: Built-in mechanism to extract shallow locals from Kotlin Continuation frames.
+
+## 🚀 Installation
 
 ### Prerequisites
 * Java JDK 11+ (`JAVA_HOME`)
-* Android SDK & `adb`
+* Android SDK & `adb` configured in your `PATH`
 
 ### Install the CLI
 To build the CLI and install it as a standalone executable in your `/usr/local/bin`, simply run:
 ```bash
 ./install.sh
 ```
-*Note: This script will prompt for your `sudo` password to move the binary to your local bin.*
-
-On Linux or if you prefer not to use `sudo`, you can install to a user-writable directory:
-```bash
-./gradlew :cli:jar
-VERSION=$(cat version.txt | tr -d '[:space:]')
-# Create a self-extracting bash+jar executable
-printf '#!/usr/bin/env bash\nexec java --enable-native-access=ALL-UNNAMED -jar "$0" "$@"\n' > ~/.local/bin/debroid
-cat cli/build/libs/debroid-$VERSION.jar >> ~/.local/bin/debroid
-chmod +x ~/.local/bin/debroid
-```
-Ensure `~/.local/bin` is on your `PATH`.
-
-Once installed, you can use the CLI from anywhere:
-```bash
-debroid --help
-```
+*Note: This script will prompt for `sudo` to move the binary to your local bin.*
 
 ## 🧠 AI Agent Skill Setup
 
-Debroid is designed to be operated autonomously by AI agents (like Antigravity or Cursor). To teach your agent how to use Debroid effectively, you need to provide it with the skill instructions.
+Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, you must provide it with the skill instructions.
 
-We have included a highly-optimized skill file at `skills/debroid-cli/SKILL.md`.
+We have included a highly-optimized skill file inside the repository.
 
-**To install the skill:**
-Simply copy the contents of `skills/debroid-cli/SKILL.md` into your agent's context, prompt, or custom instructions/rules file. This gives the LLM explicit instructions on how to orchestrate the background daemon, set breakpoints, and poll the JDWP event queue without hallucinations or infinite loops.
+**Skill Location:** `skills/debroid-cli/SKILL.md`
+
+**How to install the skill:**
+Copy the contents of the `SKILL.md` file into your agent's context, prompt, or custom instructions/rules configuration. This gives the LLM explicit instructions on how to orchestrate the background daemon, set breakpoints, evaluate expressions, and poll the event queue without hallucinating CLI flags or getting stuck in infinite loops.
 
 ## 🔌 How it Works
 
-Debroid runs a lightweight daemon in the background that connects to the Android app via JDWP. The CLI communicates with this daemon to send commands and poll for events.
+Debroid separates the persistent debugging connection from the transient CLI commands to maintain state across agent invocations.
 
-Agents can use the CLI to orchestrate the debug session. The daemon is auto-started on the first command if it isn't already running, so agents can also just start sending commands directly.
+```mermaid
+flowchart LR
+    A["🤖 AI Agent\n(Terminal / CLI)"] <-->|Terminal Commands| B("⚡ Debroid Daemon\n(Background Server)")
+    B <-->|JDWP over ADB| C["📱 Android App\n(Dalvik/ART VM)"]
+```
 
-### Daemon Lifecycle
-- **Auto-start**: The daemon starts automatically on the first CLI command if it isn't running.
-- **Manual start**: `debroid daemon` (run in background or as a background task).
-- **Stop**: `debroid stop` (shuts down daemon and detaches active debug sessions).
+1. **The AI Agent** runs `debroid` commands in the terminal (e.g. `debroid break ...`).
+2. **The Debroid CLI** forwards these requests to the **Debroid Daemon**, which starts automatically in the background on the first command.
+3. **The Debroid Daemon** holds the long-lived JDWP socket connection open via ADB port forwarding, managing the breakpoints, event queue, and thread states of the **Android App**.
+4. The Daemon returns the result back to the CLI as a strict JSON payload, which the Agent reads from standard output.
 
-### Full Command List
+## 📖 Command Reference
+
 | Command | Signature | Description |
 | :--- | :--- | :--- |
 | `daemon` | `debroid daemon` | Starts the persistent background daemon |
@@ -80,7 +94,14 @@ Agents can use the CLI to orchestrate the debug session. The daemon is auto-star
 | `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`) |
 | `step` | `debroid step <session_id> <thread_id> <action>` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
 
-All command outputs are strict JSON for machine-readability.
+> **Security Note:** The Debroid daemon listens on `localhost` (127.0.0.1) without authentication to enable fast communication with the CLI. It exposes live JVM manipulation. Only run Debroid on a machine where every local user is fully trusted.
+
+## 🤝 Contributing
+
+We welcome contributions! If you're building an AI agent or improving the underlying JDI wrappers, please see `AGENTS.md` for architectural guidelines and rules for maintaining the strict JSON CLI contract.
+
+If Debroid saves your agent from a debugging dead end, consider giving the repo a ⭐ - it helps others find it :)
 
 ## 📄 License
+
 This project is licensed under the [Apache 2.0 License](LICENSE).
