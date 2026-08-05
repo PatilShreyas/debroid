@@ -32,7 +32,6 @@ data class BreakpointInfo(
     val sessionId: String,
     val file: String,
     val line: Int,
-    val condition: String? = null,
     val verified: Boolean
 )
 

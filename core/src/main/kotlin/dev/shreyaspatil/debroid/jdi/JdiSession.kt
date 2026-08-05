@@ -120,14 +120,13 @@ class JdiSession(
 
     // --- Breakpoints & Watchpoints ---
 
-    fun setBreakpoint(file: String, line: Int, condition: String?, packageName: String? = null): BreakpointInfo {
+    fun setBreakpoint(file: String, line: Int, packageName: String? = null): BreakpointInfo {
         val id = "bp_${breakpointIdCounter.getAndIncrement()}"
         val info = BreakpointInfo(
             id = id,
             sessionId = sessionId,
             file = file,
             line = line,
-            condition = condition,
             verified = false
         )
         activeBreakpoints[id] = info
