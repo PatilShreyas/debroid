@@ -374,6 +374,19 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Step(sessionId, threadId, action))
     }
 
+    class SkillCommand : CliktCommand(
+        name = "skill",
+        help = "Prints the embedded AI Agent skill instructions (SKILL.md) to stdout."
+    ) {
+        override fun run() {
+            val skillContent = object {}.javaClass.getResourceAsStream("/SKILL.md")
+                ?.bufferedReader()
+                ?.use { it.readText() }
+                ?: error("Embedded SKILL.md resource not found in CLI binary.")
+            print(skillContent)
+        }
+    }
+
     class DebroidCli : CliktCommand(name = "debroid") {
         override fun run() = Unit
     }
@@ -402,7 +415,8 @@ object CliRunner {
                 FramesCommand(),
                 CoroutineCommand(),
                 InspectCommand(),
-                StepCommand()
+                StepCommand(),
+                SkillCommand()
             )
     }
 
