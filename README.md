@@ -9,7 +9,7 @@
   </p>
 </div>
 
-**Debroid** (*DEBug + AnDROID*) is a headless CLI that speaks the Java Debug Wire protocol (JDWP) so AI agents — Claude Code, Codex, OpenCode, Cursor, Antigravity, or anything with a terminal — can debug a live Android app the way a human would in Android Studio: set breakpoints, catch exceptions, step through code, inspect and mutate variables, and watch fields — all without a GUI, and all through strict, machine-parseable JSON.
+**Debroid** (*DEBug + AnDROID*) is a headless CLI that speaks the Java Debug Wire protocol (JDWP) so AI agents — Claude Code, Grok Build, Codex, OpenCode, Cursor, Antigravity, or anything with a terminal — can debug a live Android app the way a human would in Android Studio: set breakpoints, catch exceptions, step through code, inspect and mutate variables, and watch fields — all without a GUI, and all through strict, machine-parseable JSON.
 
 ## ❓ Why it exists
 
@@ -97,6 +97,14 @@ mkdir -p ~/.claude/skills/debroid && debroid skill > ~/.claude/skills/debroid/SK
 
 ```bash
 mkdir -p .cursor/rules && debroid skill > .cursor/rules/debroid.mdc
+```
+</details>
+
+<details>
+<summary><b>✨ Grok Build</b></summary>
+
+```bash
+mkdir -p ~/.grok/skills/debroid && debroid skill > ~/.grok/skills/debroid/SKILL.md
 ```
 </details>
 
