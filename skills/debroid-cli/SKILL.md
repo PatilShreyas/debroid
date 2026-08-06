@@ -26,6 +26,7 @@ Activate this skill whenever the user or task involves:
 6. **Use Background Tasks**: If you are using an agentic system that supports background tasks, run `debroid daemon` as a background task.
 7. **Token efficiency & Schema Inspection**: All JSON responses are compact single-line by default to conserve agent context tokens. If formatted multi-line JSON is required, append the `--pretty` flag to any JSON command. To inspect the expected output JSON structure for any command without running a session, pass the `--schema` flag (e.g., `debroid pause-state --schema`). Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
 8. **Self-Recovery**: If a session becomes unresponsive or gets out of sync, run `debroid stop` to cleanly terminate the daemon and release ADB ports. The next `debroid` command will auto-restart a fresh daemon.
+9. **Report, don't silently work around**: If you hit unexpected Debroid behavior or have feedback on the tool itself, see **"🐛 Reporting Bugs & Feedback"** below instead of giving up or quietly routing around it.
 
 ## 🔄 Standard Debugging Workflow
 
@@ -120,6 +121,16 @@ debroid detach <session_id>
 - **Autonomous UI Interaction**: Instead of asking the user to click buttons on the device, inspect the UI bounds using `android layout --pretty` (prefer `android-cli` if installed) or `adb shell uiautomator dump /sdcard/window_dump.xml && adb shell cat /sdcard/window_dump.xml`, locate the target element's `bounds="[minX,minY][maxX,maxY]"`, calculate the center coordinates `(minX + maxX)/2`, and simulate a tap with `adb shell input tap X Y`.
 - **`detached` of `launch`'d session and app won't start normally**: Should not happen — `detach` clears `am set-debug-app`. If it does (e.g. daemon was forcibly killed), run `adb shell am clear-debug-app` once.
 - **Daemon or Session Unresponsive**: Run `debroid stop` to terminate the background server and clear ADB port forwards. The next `debroid` command will automatically spawn a fresh, clean daemon.
+
+## 🐛 Reporting Bugs & Feedback (Debroid Tool Itself)
+
+If you hit unexpected Debroid behavior (a crash, a wrong/malformed result, a stuck session `debroid stop` doesn't fix) — not a bug in the app you're debugging — or have feedback on the tool itself, don't silently retry, work around it, or give up.
+
+Before doing anything else, fetch the full reporting workflow (sanitizing details, exact report format, mandatory user confirmation, filing via `gh`):
+```bash
+curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/references/reporting-feedback.md
+```
+Then follow it exactly.
 
 ## 📊 Token-Efficient JSON Extraction & Querying Guidelines
 
