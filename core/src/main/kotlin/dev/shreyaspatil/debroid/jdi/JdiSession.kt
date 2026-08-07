@@ -54,6 +54,7 @@ class JdiSession(
     private val clearDebugAppOnDetach: Boolean = false
 ) {
     private val isConnected = AtomicBoolean(true)
+    private val isFirstResume = AtomicBoolean(true)
     private val breakpointIdCounter = AtomicInteger(1)
 
     // Breakpoint & Watchpoint tracking
@@ -398,6 +399,7 @@ class JdiSession(
                 while (thread.suspendCount() > 0) {
                     thread.resume()
                 }
+                rearmRequestsIfFirstResume()
             }
             StepAction.RESUME_ALL -> {
                 resumeAll()
@@ -408,6 +410,45 @@ class JdiSession(
     fun resumeAll() {
         repeat(vm.allThreads().maxOfOrNull { it.suspendCount() } ?: 1) {
             vm.resume()
+        }
+        rearmRequestsIfFirstResume()
+    }
+
+    private fun rearmRequestsIfFirstResume() {
+        if (isFirstResume.getAndSet(false)) {
+            try {
+                val erm = vm.eventRequestManager()
+                erm.breakpointRequests().forEach { req ->
+                    val wasEnabled = req.isEnabled
+                    if (wasEnabled) {
+                        req.disable()
+                        req.enable()
+                    }
+                }
+                erm.accessWatchpointRequests().forEach { req ->
+                    val wasEnabled = req.isEnabled
+                    if (wasEnabled) {
+                        req.disable()
+                        req.enable()
+                    }
+                }
+                erm.modificationWatchpointRequests().forEach { req ->
+                    val wasEnabled = req.isEnabled
+                    if (wasEnabled) {
+                        req.disable()
+                        req.enable()
+                    }
+                }
+                erm.exceptionRequests().forEach { req ->
+                    val wasEnabled = req.isEnabled
+                    if (wasEnabled) {
+                        req.disable()
+                        req.enable()
+                    }
+                }
+            } catch (_: Exception) {
+                // Ignore transient JDI errors during re-arming
+            }
         }
     }
 
