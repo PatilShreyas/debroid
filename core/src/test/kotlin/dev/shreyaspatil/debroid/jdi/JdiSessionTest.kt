@@ -880,4 +880,97 @@ class JdiSessionTest {
         attachedSession.detach()
         verify(exactly = 0) { adbManager.clearDebugApp() }
     }
+
+    // ---------------- First Resume Re-arming ----------------
+
+    @Test
+    fun `first resumeAll re-arms all JDI requests`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.suspendCount() } returns 1
+        every { vm.allThreads() } returns listOf(thread)
+
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        val exReq = mockk<ExceptionRequest>(relaxed = true)
+
+        every { bpReq.isEnabled } returns true
+        every { exReq.isEnabled } returns false // should not re-arm if was not enabled
+
+        every { erm.breakpointRequests() } returns listOf(bpReq)
+        every { erm.exceptionRequests() } returns listOf(exReq)
+        every { erm.accessWatchpointRequests() } returns emptyList()
+        every { erm.modificationWatchpointRequests() } returns emptyList()
+
+        session.resumeAll()
+
+        // Verify thread resumed
+        verify(exactly = 1) { vm.resume() }
+
+        // Verify re-arming for enabled requests
+        verify(exactly = 1) { bpReq.disable() }
+        verify(exactly = 1) { bpReq.enable() }
+
+        // Verify NO re-arming for disabled requests
+        verify(exactly = 0) { exReq.disable() }
+        verify(exactly = 0) { exReq.enable() }
+    }
+
+    @Test
+    fun `subsequent resumeAll does not re-arm JDI requests`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.suspendCount() } returns 1
+        every { vm.allThreads() } returns listOf(thread)
+
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { bpReq.isEnabled } returns true
+        every { erm.breakpointRequests() } returns listOf(bpReq)
+
+        // First resume
+        session.resumeAll()
+        verify(exactly = 1) { bpReq.disable() }
+        verify(exactly = 1) { bpReq.enable() }
+
+        // Second resume
+        session.resumeAll()
+        // Should not be called again
+        verify(exactly = 1) { bpReq.disable() }
+        verify(exactly = 1) { bpReq.enable() }
+    }
+
+    @Test
+    fun `stepExecution RESUME_THREAD re-arms JDI requests on first call`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        var suspendCount = 1
+        every { thread.suspendCount() } answers { suspendCount }
+        every { thread.resume() } answers { suspendCount-- }
+        every { vm.allThreads() } returns listOf(thread)
+
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { bpReq.isEnabled } returns true
+        every { erm.breakpointRequests() } returns listOf(bpReq)
+
+        session.stepExecution("1", StepAction.RESUME_THREAD)
+
+        verify(exactly = 1) { bpReq.disable() }
+        verify(exactly = 1) { bpReq.enable() }
+    }
+
+    @Test
+    fun `re-arming ignores transient JDI exceptions`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.suspendCount() } returns 1
+        every { vm.allThreads() } returns listOf(thread)
+
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { bpReq.isEnabled } returns true
+        // Throw an exception during disable to simulate a transient JDI error
+        every { bpReq.disable() } throws VMDisconnectedException()
+
+        every { erm.breakpointRequests() } returns listOf(bpReq)
+
+        // Should not throw
+        session.resumeAll()
+
+        verify(exactly = 1) { bpReq.disable() }
+    }
 }
