@@ -891,7 +891,7 @@ class JdiSessionTest {
 
         val bpReq = mockk<BreakpointRequest>(relaxed = true)
         val exReq = mockk<ExceptionRequest>(relaxed = true)
-        
+
         every { bpReq.isEnabled } returns true
         every { exReq.isEnabled } returns false // should not re-arm if was not enabled
 
@@ -923,7 +923,7 @@ class JdiSessionTest {
         val bpReq = mockk<BreakpointRequest>(relaxed = true)
         every { bpReq.isEnabled } returns true
         every { erm.breakpointRequests() } returns listOf(bpReq)
-        
+
         // First resume
         session.resumeAll()
         verify(exactly = 1) { bpReq.disable() }
@@ -965,12 +965,12 @@ class JdiSessionTest {
         every { bpReq.isEnabled } returns true
         // Throw an exception during disable to simulate a transient JDI error
         every { bpReq.disable() } throws VMDisconnectedException()
-        
+
         every { erm.breakpointRequests() } returns listOf(bpReq)
 
         // Should not throw
         session.resumeAll()
-        
+
         verify(exactly = 1) { bpReq.disable() }
     }
 }
