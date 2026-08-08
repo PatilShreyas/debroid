@@ -14,6 +14,10 @@ Before writing code or making significant changes, please follow these standard 
 ### 1. Build, Test, and Lint Before Committing
 Whenever you make a change, verify that the project compiles, static analysis passes, and all tests pass:
 ```bash
+# Fast iterative verification
+./gradlew detekt test :cli:build
+
+# Full comprehensive build (run before final commit)
 ./gradlew build
 ```
 
