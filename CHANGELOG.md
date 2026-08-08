@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [UNRELEASED]
 
 ### Added
+
+### Fixed
+
+### Changed
+
+## [v0.1.0] - 2026-08-08
+
+### Added
 - **Points Command:** Introduce `debroid points` to list all active debug hooks (breakpoints, watchpoints, and exception points) for an ongoing session to maintain agent state awareness (#37, #36).
 
 ### Changed
