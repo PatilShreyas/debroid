@@ -417,7 +417,11 @@ object CliRunner {
         serializer = MapSerializer(String.serializer(), CliVariableInfo.serializer())
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
-        private val continuationId by argument("continuation_id", help = "The object ID of the Coroutine Continuation.")
+        private val continuationId by argument(
+            "continuation_id",
+            help = "The object ID of the Coroutine Continuation. Guaranteed to remain valid across " +
+                "multiple commands for the entire duration of the current suspend."
+        )
         override fun run() = ensureDaemonAndSend(DaemonRequest.Coroutine(sessionId, continuationId))
     }
 
@@ -427,7 +431,11 @@ object CliRunner {
         serializer = CliObjectInspectionResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
-        private val objectId by argument("object_id", help = "The ID of the object to inspect.")
+        private val objectId by argument(
+            "object_id",
+            help = "The ID of the object to inspect. Guaranteed to remain valid across " +
+                "multiple commands for the entire duration of the current suspend."
+        )
         private val maxDepth by option("--max-depth", "-d", help = "Maximum depth to inspect").int().default(1)
         override fun run() = ensureDaemonAndSend(
             DaemonRequest.Inspect(sessionId = sessionId, objectId = objectId, maxDepth = maxDepth)
