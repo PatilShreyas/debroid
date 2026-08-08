@@ -24,6 +24,7 @@ import dev.shreyaspatil.debroid.cli.models.CliEventPollResult
 import dev.shreyaspatil.debroid.cli.models.CliExceptionBreakpointResult
 import dev.shreyaspatil.debroid.cli.models.CliObjectInspectionResult
 import dev.shreyaspatil.debroid.cli.models.CliPauseStateResult
+import dev.shreyaspatil.debroid.cli.models.CliPointsResult
 import dev.shreyaspatil.debroid.cli.models.CliSessionStatus
 import dev.shreyaspatil.debroid.cli.models.CliShutdownResult
 import dev.shreyaspatil.debroid.cli.models.CliStackFrameInfo
@@ -317,6 +318,15 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.RemoveWatch(sessionId, watchpointId))
     }
 
+    class PointsCommand : BaseJsonCommand(
+        name = "points",
+        help = "Retrieves all active debug points (breakpoints, exception points, watchpoints) for a session.",
+        serializer = CliPointsResult.serializer()
+    ) {
+        private val sessionId by argument("session_id", help = "The active debug session ID.")
+        override fun run() = ensureDaemonAndSend(DaemonRequest.Points(sessionId))
+    }
+
     class ThreadsCommand : BaseJsonCommand(
         name = "threads",
         help = "Lists all active threads in the target application.",
@@ -504,6 +514,7 @@ object CliRunner {
                 RemoveCatchExceptionCommand(),
                 WatchCommand(),
                 RemoveWatchCommand(),
+                PointsCommand(),
                 ThreadsCommand(),
                 LocalsCommand(),
                 PauseStateCommand(),

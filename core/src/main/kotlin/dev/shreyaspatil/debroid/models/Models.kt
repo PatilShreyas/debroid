@@ -108,3 +108,24 @@ data class EventPollResult(
     val nextCursor: String,
     val hasMore: Boolean
 )
+
+data class ExceptionBreakpointInfo(
+    val id: String,
+    val className: String?,
+    val notifyCaught: Boolean,
+    val notifyUncaught: Boolean
+)
+
+data class WatchpointInfo(
+    val id: String,
+    val className: String,
+    val fieldName: String,
+    val access: Boolean,
+    val modify: Boolean
+)
+
+data class PointsResult(
+    val breakpoints: List<BreakpointInfo>,
+    val exceptionBreakpoints: List<ExceptionBreakpointInfo>,
+    val watchpoints: List<WatchpointInfo>
+)

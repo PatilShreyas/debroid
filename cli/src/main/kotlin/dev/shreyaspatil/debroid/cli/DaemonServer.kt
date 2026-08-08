@@ -214,6 +214,10 @@ object DaemonServer {
                     )
                     serializer.encodeToString(result.toCli())
                 }
+                is DaemonRequest.Points -> {
+                    val session = sessionManager.getSession(request.sessionId)
+                    serializer.encodeToString(session.getPoints().toCli())
+                }
                 is DaemonRequest.Step -> {
                     val session = sessionManager.getSession(request.sessionId)
                     session.stepExecution(request.threadId, request.action)

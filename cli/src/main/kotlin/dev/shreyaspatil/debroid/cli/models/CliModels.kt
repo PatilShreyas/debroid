@@ -108,6 +108,66 @@ fun BreakpointInfo.toCli() = CliBreakpointInfo(
 )
 
 @Serializable
+@SerialDescription("Information about an exception breakpoint")
+data class CliExceptionBreakpointInfo(
+    @SerialDescription("Unique exception breakpoint ID")
+    val id: String,
+    @SerialDescription("Fully qualified exception class name, if restricted")
+    val className: String?,
+    @SerialDescription("Whether this triggers on caught exceptions")
+    val notifyCaught: Boolean,
+    @SerialDescription("Whether this triggers on uncaught exceptions")
+    val notifyUncaught: Boolean
+)
+
+fun dev.shreyaspatil.debroid.models.ExceptionBreakpointInfo.toCli() = CliExceptionBreakpointInfo(
+    id = id,
+    className = className,
+    notifyCaught = notifyCaught,
+    notifyUncaught = notifyUncaught
+)
+
+@Serializable
+@SerialDescription("Information about a watchpoint")
+data class CliWatchpointInfo(
+    @SerialDescription("Unique watchpoint ID")
+    val id: String,
+    @SerialDescription("Fully qualified class name containing the field")
+    val className: String,
+    @SerialDescription("Name of the watched field")
+    val fieldName: String,
+    @SerialDescription("Whether this triggers on field access")
+    val access: Boolean,
+    @SerialDescription("Whether this triggers on field modification")
+    val modify: Boolean
+)
+
+fun dev.shreyaspatil.debroid.models.WatchpointInfo.toCli() = CliWatchpointInfo(
+    id = id,
+    className = className,
+    fieldName = fieldName,
+    access = access,
+    modify = modify
+)
+
+@Serializable
+@SerialDescription("Result containing all active debug points for a session")
+data class CliPointsResult(
+    @SerialDescription("List of line breakpoints")
+    val breakpoints: List<CliBreakpointInfo>,
+    @SerialDescription("List of exception breakpoints")
+    val exceptionBreakpoints: List<CliExceptionBreakpointInfo>,
+    @SerialDescription("List of watchpoints")
+    val watchpoints: List<CliWatchpointInfo>
+)
+
+fun dev.shreyaspatil.debroid.models.PointsResult.toCli() = CliPointsResult(
+    breakpoints = breakpoints.map { it.toCli() },
+    exceptionBreakpoints = exceptionBreakpoints.map { it.toCli() },
+    watchpoints = watchpoints.map { it.toCli() }
+)
+
+@Serializable
 @SerialDescription("Information about a single stack frame")
 data class CliStackFrameInfo(
     @SerialDescription("0-indexed frame depth index")

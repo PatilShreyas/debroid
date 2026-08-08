@@ -20,10 +20,12 @@ import com.sun.jdi.event.ModificationWatchpointEvent
 import com.sun.jdi.event.StepEvent
 import com.sun.jdi.event.VMDeathEvent
 import com.sun.jdi.event.VMDisconnectEvent
+import com.sun.jdi.request.AccessWatchpointRequest
 import com.sun.jdi.request.BreakpointRequest
 import com.sun.jdi.request.ClassPrepareRequest
 import com.sun.jdi.request.EventRequest
 import com.sun.jdi.request.ExceptionRequest
+import com.sun.jdi.request.ModificationWatchpointRequest
 import com.sun.jdi.request.StepRequest
 import com.sun.jdi.request.WatchpointRequest
 import dev.shreyaspatil.debroid.adb.AdbManager
@@ -33,13 +35,16 @@ import dev.shreyaspatil.debroid.models.DebugEventPayload
 import dev.shreyaspatil.debroid.models.ErrorCode
 import dev.shreyaspatil.debroid.models.EventPollResult
 import dev.shreyaspatil.debroid.models.EventType
+import dev.shreyaspatil.debroid.models.ExceptionBreakpointInfo
 import dev.shreyaspatil.debroid.models.ObjectInspectionResult
 import dev.shreyaspatil.debroid.models.PauseStateResult
+import dev.shreyaspatil.debroid.models.PointsResult
 import dev.shreyaspatil.debroid.models.SessionStatus
 import dev.shreyaspatil.debroid.models.StackFrameInfo
 import dev.shreyaspatil.debroid.models.StepAction
 import dev.shreyaspatil.debroid.models.VariableInfo
 import dev.shreyaspatil.debroid.models.VariableScope
+import dev.shreyaspatil.debroid.models.WatchpointInfo
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -132,6 +137,14 @@ class JdiSession(
     }
 
     // --- Breakpoints & Watchpoints ---
+
+    fun getPoints(): PointsResult {
+        return PointsResult(
+            breakpoints = listBreakpoints(),
+            exceptionBreakpoints = listExceptionBreakpoints(),
+            watchpoints = listWatchpoints()
+        )
+    }
 
     fun setBreakpoint(file: String, line: Int, packageName: String? = null): BreakpointInfo {
         val id = "bp_${breakpointIdCounter.getAndIncrement()}"
@@ -407,7 +420,51 @@ class JdiSession(
         }
     }
 
-    fun listBreakpoints(): List<BreakpointInfo> = activeBreakpoints.values.toList()
+    private fun listBreakpoints(): List<BreakpointInfo> = activeBreakpoints.values.toList()
+
+    private fun listExceptionBreakpoints(): List<ExceptionBreakpointInfo> {
+        val active = exceptionRequests.map { (id, req) ->
+            ExceptionBreakpointInfo(
+                id = id,
+                className = req.getProperty("className") as? String,
+                notifyCaught = req.notifyCaught(),
+                notifyUncaught = req.notifyUncaught()
+            )
+        }
+        val deferred = deferredExceptionBreakpoints.values.flatten().map { deferred ->
+            ExceptionBreakpointInfo(
+                id = deferred.id,
+                className = deferredExceptionBreakpoints.entries.find { it.value.contains(deferred) }?.key,
+                notifyCaught = deferred.notifyCaught,
+                notifyUncaught = deferred.notifyUncaught
+            )
+        }
+        return active + deferred
+    }
+
+    private fun listWatchpoints(): List<WatchpointInfo> {
+        val active = watchpointRequests.mapNotNull { (id, reqs) ->
+            val req = reqs.firstOrNull() ?: return@mapNotNull null
+            val field = req.field()
+            WatchpointInfo(
+                id = id,
+                className = field.declaringType().name(),
+                fieldName = field.name(),
+                access = reqs.any { it is AccessWatchpointRequest },
+                modify = reqs.any { it is ModificationWatchpointRequest }
+            )
+        }
+        val deferred = deferredWatchpoints.values.flatten().map { deferred ->
+            WatchpointInfo(
+                id = deferred.id,
+                className = deferredWatchpoints.entries.find { it.value.contains(deferred) }?.key ?: "",
+                fieldName = deferred.fieldName,
+                access = deferred.access,
+                modify = deferred.modify
+            )
+        }
+        return active + deferred
+    }
 
     // --- Execution Control ---
 

@@ -1,0 +1,93 @@
+{
+    "description": "Result containing all active debug points for a session",
+    "type": "object",
+    "properties": {
+        "breakpoints": {
+            "type": "array",
+            "items": {
+                "description": "Information about a line breakpoint",
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Unique breakpoint ID"
+                    },
+                    "sessionId": {
+                        "type": "string",
+                        "description": "Session ID owning this breakpoint"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Source file name"
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "1-indexed line number"
+                    },
+                    "verified": {
+                        "type": "boolean",
+                        "description": "Whether the breakpoint is bound to a loaded VM class"
+                    }
+                }
+            },
+            "description": "List of line breakpoints"
+        },
+        "exceptionBreakpoints": {
+            "type": "array",
+            "items": {
+                "description": "Information about an exception breakpoint",
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Unique exception breakpoint ID"
+                    },
+                    "className": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Fully qualified exception class name, if restricted"
+                    },
+                    "notifyCaught": {
+                        "type": "boolean",
+                        "description": "Whether this triggers on caught exceptions"
+                    },
+                    "notifyUncaught": {
+                        "type": "boolean",
+                        "description": "Whether this triggers on uncaught exceptions"
+                    }
+                }
+            },
+            "description": "List of exception breakpoints"
+        },
+        "watchpoints": {
+            "type": "array",
+            "items": {
+                "description": "Information about a watchpoint",
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Unique watchpoint ID"
+                    },
+                    "className": {
+                        "type": "string",
+                        "description": "Fully qualified class name containing the field"
+                    },
+                    "fieldName": {
+                        "type": "string",
+                        "description": "Name of the watched field"
+                    },
+                    "access": {
+                        "type": "boolean",
+                        "description": "Whether this triggers on field access"
+                    },
+                    "modify": {
+                        "type": "boolean",
+                        "description": "Whether this triggers on field modification"
+                    }
+                }
+            },
+            "description": "List of watchpoints"
+        }
+    }
+}
