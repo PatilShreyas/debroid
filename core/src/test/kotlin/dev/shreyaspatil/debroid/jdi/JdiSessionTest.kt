@@ -1150,6 +1150,232 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `inspectObject filters static and synthetic fields by default`() {
+        val parentRef = mockk<ObjectReference>(relaxed = true)
+        val parentType = mockk<ReferenceType>(relaxed = true)
+        every { parentRef.uniqueID() } returns 100L
+        every { parentRef.referenceType() } returns parentType
+        every { parentType.name() } returns "ParentType"
+
+        val normalField = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { normalField.name() } returns "normal"
+        every { normalField.isStatic } returns false
+        every { normalField.isSynthetic } returns false
+
+        val staticField = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { staticField.name() } returns "staticField"
+        every { staticField.isStatic } returns true
+        every { staticField.isSynthetic } returns false
+
+        val syntheticField = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { syntheticField.name() } returns "shadow\$_klass_"
+        every { syntheticField.isStatic } returns false
+        every { syntheticField.isSynthetic } returns true
+
+        val shadowField = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { shadowField.name() } returns "shadow\$_monitor_"
+        every { shadowField.isStatic } returns false
+        every { shadowField.isSynthetic } returns false
+
+        every { parentType.allFields() } returns listOf(normalField, staticField, syntheticField, shadowField)
+
+        val valRef = mockk<PrimitiveValue>(relaxed = true)
+        every { parentRef.getValues(any()) } answers {
+            val requestedFields = firstArg<List<com.sun.jdi.Field>>()
+            requestedFields.associateWith { valRef }
+        }
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<com.sun.jdi.StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns parentRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        val resultDefault = session.inspectObject("100", null, maxDepth = 1)
+        assertTrue(resultDefault.fields.containsKey("normal"))
+        assertFalse(resultDefault.fields.containsKey("staticField"))
+        assertFalse(resultDefault.fields.containsKey("shadow\$_klass_"))
+        assertFalse(resultDefault.fields.containsKey("shadow\$_monitor_"))
+
+        val resultIncludeAll = session.inspectObject(
+            "100",
+            null,
+            maxDepth = 1,
+            includeStatic = true,
+            includeInternal = true
+        )
+        assertTrue(resultIncludeAll.fields.containsKey("normal"))
+        assertTrue(resultIncludeAll.fields.containsKey("staticField"))
+        assertTrue(resultIncludeAll.fields.containsKey("shadow\$_klass_"))
+        assertTrue(resultIncludeAll.fields.containsKey("shadow\$_monitor_"))
+    }
+
+    @Test
+    fun `inspectObject does not recurse into terminal types`() {
+        val parentRef = mockk<ObjectReference>(relaxed = true)
+        val parentType = mockk<ReferenceType>(relaxed = true)
+        every { parentRef.uniqueID() } returns 100L
+        every { parentRef.referenceType() } returns parentType
+        every { parentType.name() } returns "ParentType"
+
+        val stringRef = mockk<ObjectReference>(relaxed = true)
+        val stringType = mockk<ReferenceType>(relaxed = true)
+        every { stringRef.uniqueID() } returns 200L
+        every { stringRef.referenceType() } returns stringType
+        every { stringType.name() } returns "java.lang.String"
+
+        val enumRef = mockk<ObjectReference>(relaxed = true)
+        val enumType = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { enumRef.uniqueID() } returns 300L
+        every { enumRef.referenceType() } returns enumType
+        every { enumType.name() } returns "com.example.MyEnum"
+        every { enumType.isEnum } returns true
+
+        val strField = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { strField.name() } returns "myString"
+        every { strField.isStatic } returns false
+        every { strField.isSynthetic } returns false
+
+        val enumField = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { enumField.name() } returns "myEnum"
+        every { enumField.isStatic } returns false
+        every { enumField.isSynthetic } returns false
+
+        every { parentType.allFields() } returns listOf(strField, enumField)
+        every { parentRef.getValues(any()) } returns mapOf(strField to stringRef, enumField to enumRef)
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<com.sun.jdi.StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns parentRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        val result = session.inspectObject("100", null, maxDepth = 2)
+
+        // It should contain the fields, but `nested` should NOT contain them because they are terminal
+        assertTrue(result.fields.containsKey("myString"))
+        assertTrue(result.fields.containsKey("myEnum"))
+        assertNull(result.nested) // no nested recursions occurred
+    }
+
+    @Test
+    fun `inspectObject guards against cyclic references`() {
+        val parentRef = mockk<ObjectReference>(relaxed = true)
+        val parentType = mockk<ReferenceType>(relaxed = true)
+        every { parentRef.uniqueID() } returns 100L
+        every { parentRef.referenceType() } returns parentType
+        every { parentType.name() } returns "ParentType"
+
+        val childRef = mockk<ObjectReference>(relaxed = true)
+        val childType = mockk<ReferenceType>(relaxed = true)
+        every { childRef.uniqueID() } returns 200L
+        every { childRef.referenceType() } returns childType
+        every { childType.name() } returns "ChildType"
+
+        val parentField = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { parentField.name() } returns "child"
+        every { parentField.isStatic } returns false
+        every { parentField.isSynthetic } returns false
+
+        val childField = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { childField.name() } returns "parent"
+        every { childField.isStatic } returns false
+        every { childField.isSynthetic } returns false
+
+        every { parentType.allFields() } returns listOf(parentField)
+        every { parentRef.getValues(any()) } answers {
+            mapOf(parentField to childRef)
+        }
+
+        every { childType.allFields() } returns listOf(childField)
+        every { childRef.getValues(any()) } answers {
+            mapOf(childField to parentRef)
+        }
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<com.sun.jdi.StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns parentRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        val result = session.inspectObject("100", null, maxDepth = 3)
+
+        // Assert parent has child
+        assertTrue(result.fields.containsKey("child"))
+        assertNotNull(result.nested)
+        assertTrue(result.nested!!.containsKey("child"))
+
+        val nestedChild = result.nested!!["child"]!!
+        // Assert child has parent field, but NO nested parent map because of cycle guard
+        assertTrue(nestedChild.fields.containsKey("parent"))
+        assertNull(nestedChild.nested)
+    }
+
+    @Test
+    fun `inspectObject properly handles maxDepth boundaries`() {
+        val parentRef = mockk<ObjectReference>(relaxed = true)
+        val parentType = mockk<ReferenceType>(relaxed = true)
+        every { parentRef.uniqueID() } returns 100L
+        every { parentRef.referenceType() } returns parentType
+        every { parentType.name() } returns "ParentType"
+
+        val childRef = mockk<ObjectReference>(relaxed = true)
+        val childType = mockk<ReferenceType>(relaxed = true)
+        every { childRef.uniqueID() } returns 200L
+        every { childRef.referenceType() } returns childType
+        every { childType.name() } returns "ChildType"
+
+        val grandChildRef = mockk<ObjectReference>(relaxed = true)
+        val grandChildType = mockk<ReferenceType>(relaxed = true)
+        every { grandChildRef.uniqueID() } returns 300L
+        every { grandChildRef.referenceType() } returns grandChildType
+        every { grandChildType.name() } returns "GrandChildType"
+
+        val field1 = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { field1.name() } returns "f1"
+        every { field1.isStatic } returns false
+        every { field1.isSynthetic } returns false
+
+        val field2 = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { field2.name() } returns "f2"
+        every { field2.isStatic } returns false
+        every { field2.isSynthetic } returns false
+
+        every { parentType.allFields() } returns listOf(field1)
+        every { parentRef.getValues(any()) } returns mapOf(field1 to childRef)
+
+        every { childType.allFields() } returns listOf(field2)
+        every { childRef.getValues(any()) } returns mapOf(field2 to grandChildRef)
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<com.sun.jdi.StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns parentRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        // Depth 1: No recursion
+        val r1 = session.inspectObject("100", null, maxDepth = 1)
+        assertNull(r1.nested)
+
+        // Depth 2: Recurse one level
+        val r2 = session.inspectObject("100", null, maxDepth = 2)
+        assertNotNull(r2.nested)
+        assertTrue(r2.nested!!.containsKey("f1"))
+        assertNull(r2.nested!!["f1"]!!.nested) // Child should not recurse into grandchild
+
+        // Depth 3: Recurse two levels
+        val r3 = session.inspectObject("100", null, maxDepth = 3)
+        assertNotNull(r3.nested)
+        assertTrue(r3.nested!!.containsKey("f1"))
+        assertNotNull(r3.nested!!["f1"]!!.nested) // Child should have nested map
+        assertTrue(r3.nested!!["f1"]!!.nested!!.containsKey("f2")) // Grandchild is there
+    }
+
+    @Test
     fun `resumeAll clears object reference cache`() {
         // Setup cache by inspecting a mock object
         val parentRef = mockk<ObjectReference>(relaxed = true)
