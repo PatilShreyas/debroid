@@ -4,6 +4,7 @@ import com.sun.jdi.AbsentInformationException
 import com.sun.jdi.ArrayReference
 import com.sun.jdi.Location
 import com.sun.jdi.ObjectReference
+import com.sun.jdi.PrimitiveType
 import com.sun.jdi.PrimitiveValue
 import com.sun.jdi.ReferenceType
 import com.sun.jdi.StringReference
@@ -598,21 +599,43 @@ class JdiSession(
         val visVar = frame.visibleVariables().find { it.name() == varName }
             ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "Variable $varName not found in current local scope.")
 
-        val newJdiVal: Value = when (visVar.typeName()) {
-            "double" -> vm.mirrorOf(newValueStr.toDouble())
-            "float" -> vm.mirrorOf(newValueStr.toFloat())
-            "int" -> vm.mirrorOf(newValueStr.toInt())
-            "long" -> vm.mirrorOf(newValueStr.toLong())
-            "boolean" -> vm.mirrorOf(newValueStr.toBoolean())
-            "java.lang.String" -> vm.mirrorOf(newValueStr)
-            else -> throw DebugException(
-                ErrorCode.INTERNAL_ERROR,
-                "Unsupported type for mutation: ${visVar.typeName()}"
+        val newJdiVal: Value = try {
+            JdiExpressionEvaluator.evaluate(newValueStr, vm, frame)
+        } catch (e: Exception) {
+            throw DebugException(
+                ErrorCode.EVALUATION_FAILED,
+                "Failed to evaluate new value expression: ${e.message}"
             )
         }
 
-        frame.setValue(visVar, newJdiVal)
-        return formatValue(varName, newJdiVal)
+        // Type checking and assignment
+        val targetType = visVar.type()
+        val finalJdiVal = if (newJdiVal.type() != targetType) {
+            // Attempt primitive coercion (e.g., float evaluated from '88.88' to target double)
+            if (newJdiVal is PrimitiveValue && targetType is PrimitiveType) {
+                when (targetType.name()) {
+                    "int" -> vm.mirrorOf(newJdiVal.intValue())
+                    "long" -> vm.mirrorOf(newJdiVal.longValue())
+                    "double" -> vm.mirrorOf(newJdiVal.doubleValue())
+                    "float" -> vm.mirrorOf(newJdiVal.floatValue())
+                    "boolean" -> vm.mirrorOf(newJdiVal.booleanValue())
+                    "short" -> vm.mirrorOf(newJdiVal.shortValue())
+                    "byte" -> vm.mirrorOf(newJdiVal.byteValue())
+                    "char" -> vm.mirrorOf(newJdiVal.charValue())
+                    else -> newJdiVal
+                }
+            } else {
+                throw DebugException(
+                    ErrorCode.INTERNAL_ERROR,
+                    "Type mismatch: Cannot assign ${newJdiVal.type().name()} to ${targetType.name()}"
+                )
+            }
+        } else {
+            newJdiVal
+        }
+
+        frame.setValue(visVar, finalJdiVal)
+        return formatValue(varName, finalJdiVal)
     }
 
     fun getStackFrames(threadId: String): List<StackFrameInfo> {
