@@ -138,6 +138,14 @@ class JdiSession(
 
     // --- Breakpoints & Watchpoints ---
 
+    fun getPoints(): PointsResult {
+        return PointsResult(
+            breakpoints = listBreakpoints(),
+            exceptionBreakpoints = listExceptionBreakpoints(),
+            watchpoints = listWatchpoints()
+        )
+    }
+
     fun setBreakpoint(file: String, line: Int, packageName: String? = null): BreakpointInfo {
         val id = "bp_${breakpointIdCounter.getAndIncrement()}"
         val info = BreakpointInfo(
@@ -412,9 +420,9 @@ class JdiSession(
         }
     }
 
-    fun listBreakpoints(): List<BreakpointInfo> = activeBreakpoints.values.toList()
+    private fun listBreakpoints(): List<BreakpointInfo> = activeBreakpoints.values.toList()
 
-    fun listExceptionBreakpoints(): List<ExceptionBreakpointInfo> {
+    private fun listExceptionBreakpoints(): List<ExceptionBreakpointInfo> {
         val active = exceptionRequests.map { (id, req) ->
             ExceptionBreakpointInfo(
                 id = id,
@@ -434,7 +442,7 @@ class JdiSession(
         return active + deferred
     }
 
-    fun listWatchpoints(): List<WatchpointInfo> {
+    private fun listWatchpoints(): List<WatchpointInfo> {
         val active = watchpointRequests.mapNotNull { (id, reqs) ->
             val req = reqs.firstOrNull() ?: return@mapNotNull null
             val field = req.field()
@@ -456,14 +464,6 @@ class JdiSession(
             )
         }
         return active + deferred
-    }
-
-    fun getPoints(): PointsResult {
-        return PointsResult(
-            breakpoints = listBreakpoints(),
-            exceptionBreakpoints = listExceptionBreakpoints(),
-            watchpoints = listWatchpoints()
-        )
     }
 
     // --- Execution Control ---
