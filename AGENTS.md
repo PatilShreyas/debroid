@@ -74,6 +74,7 @@ We maintain a `CHANGELOG.md` in the root of the project to track all notable cha
 1. Add an entry describing your changes to the `## [UNRELEASED]` section of `CHANGELOG.md`.
 2. Categorize the entry under the appropriate subsection (e.g., `### Added`, `### Fixed`, `### Changed`).
 3. If your change fixes a GitHub issue, mention the issue number in the changelog entry.
+4. **Never manually mention or change the version number** in `CHANGELOG.md` or `version.txt`. Always append your changes strictly under the `## [UNRELEASED]` header. Versions are bumped automatically during the release process.
 
 ## 🚨 CRITICAL RULE: Schema Contracts & Golden Tests
 All CLI JSON response models are guarded by Golden Schema tests in `JsonSchemaGoldenTest` (`cli/src/test/resources/golden-schemas/*.schema.json`) to prevent unintended breaking changes for downstream AI agents.
