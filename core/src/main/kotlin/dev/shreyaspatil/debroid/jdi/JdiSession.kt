@@ -136,6 +136,17 @@ class JdiSession(
         )
     }
 
+    /**
+     * Safely detaches the debugger from the target Android application.
+     *
+     * This method is idempotent and performs a clean teardown of the JDI session.
+     * It interrupts the background event listening thread, removes all active
+     * breakpoints, watchpoints, and event requests, disposes the VirtualMachine
+     * connection, and cleans up any ADB port forwarding and debug app flags
+     * that were set during attachment.
+     */
+    fun detach() = shutdown(isExpected = true)
+
     // --- Breakpoints & Watchpoints ---
 
     fun getPoints(): PointsResult {
@@ -1036,7 +1047,7 @@ class JdiSession(
             } catch (_: InterruptedException) {
                 break
             } catch (_: VMDisconnectedException) {
-                isConnected.set(false)
+                handleDisconnectEvent()
                 break
             } catch (e: Throwable) {
                 if (!isConnected.get()) break
@@ -1253,34 +1264,87 @@ class JdiSession(
         )
     }
 
-    private fun handleDisconnectEvent() {
-        isConnected.set(false)
-        objectReferenceCache.clear()
-        adbManager.removePortForward(localPort)
-        pushEvent(
-            DebugEventPayload(
-                eventType = EventType.DISCONNECT,
-                sessionId = sessionId,
-                threadId = null,
-                threadName = null,
-                location = null,
-                className = null
-            )
-        )
+    private fun deleteAllEventRequests() {
+        try {
+            activeBreakpoints.clear()
+            jdiBreakpointRequests.values.flatten().forEach { req ->
+                try {
+                    vm.eventRequestManager().deleteEventRequest(req)
+                } catch (_: Exception) {}
+            }
+            jdiBreakpointRequests.clear()
+            deferredBreakpoints.clear()
+            deferredWatchpoints.clear()
+            deferredExceptionBreakpoints.clear()
+            exceptionRequests.values.forEach { req ->
+                try {
+                    vm.eventRequestManager().deleteEventRequest(req)
+                } catch (_: Exception) {}
+            }
+            exceptionRequests.clear()
+            watchpointRequests.values.flatten().forEach { req ->
+                try {
+                    vm.eventRequestManager().deleteEventRequest(req)
+                } catch (_: Exception) {}
+            }
+            watchpointRequests.clear()
+            classPrepareRequest.get()?.let { req ->
+                try {
+                    vm.eventRequestManager().deleteEventRequest(req)
+                } catch (_: Exception) {}
+            }
+            classPrepareRequest.set(null)
+
+            val erm = vm.eventRequestManager()
+            erm.breakpointRequests().toList().forEach { erm.deleteEventRequest(it) }
+            erm.stepRequests().toList().forEach { erm.deleteEventRequest(it) }
+            erm.accessWatchpointRequests().toList().forEach { erm.deleteEventRequest(it) }
+            erm.modificationWatchpointRequests().toList().forEach { erm.deleteEventRequest(it) }
+            erm.exceptionRequests().toList().forEach { erm.deleteEventRequest(it) }
+            erm.classPrepareRequests().toList().forEach { erm.deleteEventRequest(it) }
+        } catch (_: Exception) {}
     }
 
-    fun detach() {
-        isConnected.set(false)
+    private fun markDisconnected(): Boolean {
+        return !isConnected.getAndSet(false)
+    }
+
+    private fun shutdown(isExpected: Boolean) {
+        if (markDisconnected()) return
+
+        try {
+            eventThread.interrupt()
+            if (Thread.currentThread() !== eventThread) {
+                eventThread.join(500)
+            }
+        } catch (_: Throwable) {}
+
+        deleteAllEventRequests()
         objectReferenceCache.clear()
-        try { eventThread.interrupt() } catch (_: Throwable) {}
+
         try { vm.dispose() } catch (_: Exception) {}
+
         adbManager.removePortForward(localPort)
-        // If this session was launched suspended via `am set-debug-app -w`, the wait-for-debugger
-        // flag persists on the device. Clear it so the next normal launch doesn't hang (B4).
+
         if (clearDebugAppOnDetach) {
             try { adbManager.clearDebugApp() } catch (_: Exception) {}
         }
+
+        if (!isExpected) {
+            pushEvent(
+                DebugEventPayload(
+                    eventType = EventType.DISCONNECT,
+                    sessionId = sessionId,
+                    threadId = null,
+                    threadName = null,
+                    location = null,
+                    className = null
+                )
+            )
+        }
     }
+
+    private fun handleDisconnectEvent() = shutdown(isExpected = false)
 
     companion object {
         private const val MAX_EVENT_BUFFER_SIZE = 1000

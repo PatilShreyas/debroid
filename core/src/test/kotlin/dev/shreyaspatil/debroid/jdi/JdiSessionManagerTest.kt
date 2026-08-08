@@ -141,4 +141,88 @@ class JdiSessionManagerTest {
         session.detach()
         verify(exactly = 0) { adbManager.clearDebugApp() }
     }
+
+    @Test
+    fun `launchAndAttach sweeps dead sessions`() {
+        val vm1 = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        val vm2 = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm1 andThen vm2
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.findPid(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+        every { adbManager.launchAppSuspended(any()) } returns Result.success(1234)
+
+        // Create first session
+        val session1 = sessionManager.launchAndAttach("com.test.app1")
+
+        // Mock it as disconnected so it becomes a "dead" session
+        every { vm1.allThreads() } throws com.sun.jdi.VMDisconnectedException()
+
+        // Assert it throws SESSION_NOT_FOUND when queried, but wait, the sweep is what we are testing.
+        // If we launch a new session, the first one should be detached and swept.
+        val session2 = sessionManager.launchAndAttach("com.test.app2")
+
+        // Now if we try to get session1, it should be removed.
+        assertThrows<DebugException> {
+            sessionManager.getSession(session1.sessionId)
+        }
+
+        // Assert session2 is alive and valid
+        assertTrue(session2.isAlive())
+    }
+
+    @Test
+    fun `attachToRunningApp sweeps dead sessions`() {
+        val vm1 = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        val vm2 = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm1 andThen vm2
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.findPid(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        // Create first session
+        val session1 = sessionManager.attachToRunningApp("com.test.app1")
+
+        // Mock it as disconnected so it becomes a "dead" session
+        every { vm1.allThreads() } throws com.sun.jdi.VMDisconnectedException()
+
+        // If we attach a new session, the first one should be detached and swept.
+        val session2 = sessionManager.attachToRunningApp("com.test.app2")
+
+        // Now if we try to get session1, it should be removed.
+        assertThrows<DebugException> {
+            sessionManager.getSession(session1.sessionId)
+        }
+
+        // Assert session2 is alive and valid
+        assertTrue(session2.isAlive())
+    }
+
+    @Test
+    fun `attachToPid dedups existing active sessions for same appId`() {
+        val vm1 = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        val vm2 = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm1 andThen vm2
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.findPid(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        // Create first session for "com.test.app"
+        val session1 = sessionManager.attachToRunningApp("com.test.app")
+
+        // Create a second session for the SAME app
+        val session2 = sessionManager.attachToRunningApp("com.test.app")
+
+        // The first session should be detached and removed
+        assertThrows<DebugException> {
+            sessionManager.getSession(session1.sessionId)
+        }
+
+        // Assert old session's detach() side-effects ran (vm.dispose)
+        verify { vm1.dispose() }
+
+        // Assert session2 is the only remaining session and is alive
+        assertTrue(session2.isAlive())
+        assertEquals(session2.sessionId, sessionManager.getSession(session2.sessionId).sessionId)
+    }
 }
