@@ -445,8 +445,19 @@ object CliRunner {
                 "multiple commands for the entire duration of the current suspend."
         )
         private val maxDepth by option("--max-depth", "-d", help = "Maximum depth to inspect").int().default(1)
+        private val includeStatic by option("--include-static", help = "Include static fields").flag()
+        private val includeInternal by option(
+            "--include-internal",
+            help = "Include synthetic and internal ART fields"
+        ).flag()
         override fun run() = ensureDaemonAndSend(
-            DaemonRequest.Inspect(sessionId = sessionId, objectId = objectId, maxDepth = maxDepth)
+            DaemonRequest.Inspect(
+                sessionId = sessionId,
+                objectId = objectId,
+                maxDepth = maxDepth,
+                includeStatic = includeStatic,
+                includeInternal = includeInternal
+            )
         )
     }
 

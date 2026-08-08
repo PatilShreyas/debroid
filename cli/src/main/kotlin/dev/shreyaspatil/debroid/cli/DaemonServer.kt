@@ -208,7 +208,9 @@ object DaemonServer {
                     val result = session.inspectObject(
                         objectId = request.objectId,
                         fieldsFilter = null,
-                        maxDepth = request.maxDepth
+                        maxDepth = request.maxDepth,
+                        includeStatic = request.includeStatic,
+                        includeInternal = request.includeInternal
                     )
                     serializer.encodeToString(result.toCli())
                 }

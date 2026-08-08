@@ -83,7 +83,9 @@ sealed class DaemonRequest {
     data class Inspect(
         val sessionId: String,
         val objectId: String,
-        val maxDepth: Int = 1
+        val maxDepth: Int = 1,
+        val includeStatic: Boolean = false,
+        val includeInternal: Boolean = false
     ) : DaemonRequest()
 
     @Serializable data class Step(val sessionId: String, val threadId: String, val action: StepAction) : DaemonRequest()

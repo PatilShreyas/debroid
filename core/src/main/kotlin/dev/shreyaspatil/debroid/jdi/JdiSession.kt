@@ -740,26 +740,37 @@ class JdiSession(
         )
     }
 
-    fun inspectObject(objectId: String, fieldsFilter: List<String>?, maxDepth: Int = 1): ObjectInspectionResult {
+    fun inspectObject(
+        objectId: String,
+        fieldsFilter: List<String>?,
+        maxDepth: Int = 1,
+        includeStatic: Boolean = false,
+        includeInternal: Boolean = false
+    ): ObjectInspectionResult {
         val objRef =
             findObjectReference(
                 objectId.toLongOrNull() ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "Invalid object ID format")
             )
         val visited = HashSet<String>()
         visited.add(objectId)
-        return inspectRecursive(objRef, fieldsFilter, maxDepth, visited)
+        return inspectRecursive(objRef, fieldsFilter, maxDepth, visited, includeStatic, includeInternal)
     }
 
+    @Suppress("LongParameterList")
     private fun inspectRecursive(
         objRef: ObjectReference,
         fieldsFilter: List<String>?,
         maxDepth: Int,
-        visited: MutableSet<String>
+        visited: MutableSet<String>,
+        includeStatic: Boolean,
+        includeInternal: Boolean
     ): ObjectInspectionResult {
         val refType = objRef.referenceType()
+
         val fields = refType.allFields()
             .filter { f -> fieldsFilter == null || fieldsFilter.contains(f.name()) }
-            .take(50)
+            .filter { f -> includeStatic || !f.isStatic }
+            .filter { f -> includeInternal || (!f.isSynthetic && !f.name().startsWith("shadow\$_")) }
 
         val fieldValues = objRef.getValues(fields)
         val resultFields = mutableMapOf<String, VariableInfo>()
@@ -769,11 +780,17 @@ class JdiSession(
             resultFields[f.name()] = formatValue(f.name(), valRef)
             if (maxDepth <= 1) continue
             if (valRef !is ObjectReference) continue
+
+            val childType = valRef.referenceType()
+            val isChildTerminal = TERMINAL_TYPES.contains(childType.name()) ||
+                (childType is com.sun.jdi.ClassType && childType.isEnum)
+            if (isChildTerminal) continue // Do not recurse into fields of terminal types (e.g. String's backing array)
+
             val oid = valRef.uniqueID().toString()
             if (oid in visited) continue // cycle guard
             visited.add(oid)
             try {
-                nested[f.name()] = inspectRecursive(valRef, null, maxDepth - 1, visited)
+                nested[f.name()] = inspectRecursive(valRef, null, maxDepth - 1, visited, includeStatic, includeInternal)
             } catch (e: Exception) {
                 // Best-effort: nested resolvers (e.g. findObjectReference) can recurse over
                 // suspended frames and may throw on transient state; silently skip such
@@ -1196,5 +1213,18 @@ class JdiSession(
 
     companion object {
         private const val MAX_EVENT_BUFFER_SIZE = 1000
+
+        @Suppress("ObjectPropertyNaming")
+        private val TERMINAL_TYPES = setOf(
+            "java.lang.String",
+            "java.lang.Integer",
+            "java.lang.Long",
+            "java.lang.Double",
+            "java.lang.Float",
+            "java.lang.Boolean",
+            "java.lang.Byte",
+            "java.lang.Character",
+            "java.lang.Short"
+        )
     }
 }
