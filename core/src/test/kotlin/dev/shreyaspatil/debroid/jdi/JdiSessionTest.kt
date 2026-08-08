@@ -973,4 +973,143 @@ class JdiSessionTest {
 
         verify(exactly = 1) { bpReq.disable() }
     }
+
+    // ---------------- Object Caching ----------------
+
+    @Test
+    fun `inspectObject on cached nested object succeeds`() {
+        val parentRef = mockk<ObjectReference>(relaxed = true)
+        val parentType = mockk<ReferenceType>(relaxed = true)
+        every { parentRef.uniqueID() } returns 100L
+        every { parentRef.referenceType() } returns parentType
+        every { parentType.name() } returns "ParentType"
+
+        val childRef = mockk<ObjectReference>(relaxed = true)
+        val childType = mockk<ReferenceType>(relaxed = true)
+        every { childRef.uniqueID() } returns 200L
+        every { childRef.referenceType() } returns childType
+        every { childType.name() } returns "ChildType"
+
+        val field = mockk<com.sun.jdi.Field>(relaxed = true)
+        every { field.name() } returns "child"
+        every { parentType.allFields() } returns listOf(field)
+        every { parentRef.getValues(any()) } returns mapOf(field to childRef)
+
+        // Mock threads so the parent can be found if not cached
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<com.sun.jdi.StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns parentRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        // First inspect on parent should cache the child
+        val parentResult = session.inspectObject("100", null, maxDepth = 2)
+        assertEquals("100", parentResult.objectId)
+        assertEquals("ParentType", parentResult.type)
+        assertTrue(parentResult.nested!!.containsKey("child"))
+        assertEquals("200", parentResult.nested!!["child"]!!.objectId)
+
+        // Now inspect the child independently. It should be found via the cache
+        // If not cached, it would fail because findObjectReference only checks thisObject and visibleVariables.
+        val childResult = session.inspectObject("200", null, maxDepth = 1)
+        assertEquals("200", childResult.objectId)
+        assertEquals("ChildType", childResult.type)
+    }
+
+    @Test
+    fun `resumeAll clears object reference cache`() {
+        // Setup cache by inspecting a mock object
+        val parentRef = mockk<ObjectReference>(relaxed = true)
+        val parentType = mockk<ReferenceType>(relaxed = true)
+        every { parentRef.uniqueID() } returns 100L
+        every { parentRef.referenceType() } returns parentType
+        every { parentType.name() } returns "ParentType"
+        every { parentType.allFields() } returns emptyList()
+        every { parentRef.getValues(any()) } returns emptyMap()
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<com.sun.jdi.StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns parentRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        // Cache the object
+        session.inspectObject("100", null, maxDepth = 1)
+
+        // Resume should clear the cache
+        session.resumeAll()
+
+        // Since cache is cleared, and we change the frame mock to no longer return parentRef,
+        // the next inspect should fail.
+        every { frame.thisObject() } returns null
+
+        assertThrows<DebugException> {
+            session.inspectObject("100", null, maxDepth = 1)
+        }
+    }
+
+    @Test
+    fun `stepExecution clears object reference cache`() {
+        // Setup cache
+        val parentRef = mockk<ObjectReference>(relaxed = true)
+        val parentType = mockk<ReferenceType>(relaxed = true)
+        every { parentRef.uniqueID() } returns 100L
+        every { parentRef.referenceType() } returns parentType
+        every { parentType.name() } returns "ParentType"
+        every { parentType.allFields() } returns emptyList()
+        every { parentRef.getValues(any()) } returns emptyMap()
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<com.sun.jdi.StackFrame>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns parentRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        // Cache the object
+        session.inspectObject("100", null, maxDepth = 1)
+
+        // Step should clear the cache
+        session.stepExecution("1", StepAction.STEP_OVER)
+
+        // Change frame to not return object, proving cache is gone
+        every { frame.thisObject() } returns null
+
+        assertThrows<DebugException> {
+            session.inspectObject("100", null, maxDepth = 1)
+        }
+    }
+
+    @Test
+    fun `detach clears object reference cache`() {
+        val parentRef = mockk<ObjectReference>(relaxed = true)
+        val parentType = mockk<ReferenceType>(relaxed = true)
+        every { parentRef.uniqueID() } returns 100L
+        every { parentRef.referenceType() } returns parentType
+        every { parentType.name() } returns "ParentType"
+        every { parentType.allFields() } returns emptyList()
+        every { parentRef.getValues(any()) } returns emptyMap()
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<com.sun.jdi.StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns parentRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        // Cache the object
+        session.inspectObject("100", null, maxDepth = 1)
+
+        // Detach should clear the cache
+        session.detach()
+
+        every { frame.thisObject() } returns null
+
+        assertThrows<DebugException> {
+            session.inspectObject("100", null, maxDepth = 1)
+        }
+    }
 }
