@@ -91,6 +91,7 @@ debroid pause-state <session_id> <thread_id>
 
 ### Step 6: Mutate or Step
 - Mutate memory: `debroid set-var <session_id> <thread_id> <variableName> <newValue>`
+  - **Important:** `newValue` is parsed as a Java expression! To set a String literal, you must wrap the value in escaped quotes (e.g., `\"my string\"`). To set it to the result of an expression, provide the expression (e.g., `5`, `true`, `varName + 1`, Int/Long: `10`, `100L`, Float/Double: `10.5f`, `20.5d`).
 - Evaluate expressions: `debroid eval <session_id> <thread_id> "<expression>"`
   - **Expression Engine**: Evaluates full expressions using standard Java syntax.
   - **Evaluating Kotlin Code using Java Syntax**:
@@ -172,7 +173,7 @@ Here is the full list of commands and their signatures (note: all JSON commands 
 | `threads` | `debroid threads <session_id> [--pretty]` | Lists active threads |
 | `locals` | `debroid locals <session_id> <thread_id> [--pretty]` | Gets shallow local variables |
 | `pause-state` | `debroid pause-state <session_id> <thread_id> [--pretty]` | Gets frames, locals, and instance state |
-| `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value> [--pretty]` | Mutates local variable |
+| `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value> [--pretty]` | Mutates local variable. `<new_value>` is parsed as a Java expression (e.g. `10`, `100L`, `10.5f`, `20.5d`, `true`, `"\"my string\""`). Ensure quotes are escaped in shell. |
 | `eval` | `debroid eval <session_id> <thread_id> <expression...> [--pretty]` | Evaluates string expression |
 | `resume` | `debroid resume <session_id> [--pretty]` | Resumes **all** threads (use `step ... RESUME_THREAD` for per-thread resume) |
 | `poll` | `debroid poll <session_id> [cursor=0] [--with-stacktrace] [--pretty]` | Polls for asynchronous debugger events |

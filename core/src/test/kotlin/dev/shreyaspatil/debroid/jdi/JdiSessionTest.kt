@@ -1,6 +1,8 @@
 package dev.shreyaspatil.debroid.jdi
 
+import com.sun.jdi.DoubleValue
 import com.sun.jdi.Field
+import com.sun.jdi.FloatValue
 import com.sun.jdi.IntegerValue
 import com.sun.jdi.LocalVariable
 import com.sun.jdi.Location
@@ -616,13 +618,91 @@ class JdiSessionTest {
         every { local.name() } returns "myInt"
         every { local.typeName() } returns "int"
 
+        val intType = mockk<com.sun.jdi.IntegerType>(relaxed = true)
+        every { intType.name() } returns "int"
+        every { local.type() } returns intType
+
         val intValue = mockk<IntegerValue>(relaxed = true)
-        every { vm.mirrorOf(42) } returns intValue
+        every { intValue.type() } returns intType
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("42", vm, frame) } returns intValue
 
         val result = session.setVariable(threadId = "1", varName = "myInt", newValueStr = "42")
 
         verify { frame.setValue(local, intValue) }
         assertEquals("myInt", result.name)
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable coerces primitives when types mismatch but are compatible`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "myDouble"
+
+        val doubleType = mockk<com.sun.jdi.DoubleType>(relaxed = true)
+        every { doubleType.name() } returns "double"
+        every { local.type() } returns doubleType
+
+        val floatType = mockk<com.sun.jdi.FloatType>(relaxed = true)
+        val evaluatedFloatValue = mockk<FloatValue>(relaxed = true)
+        every { evaluatedFloatValue.type() } returns floatType
+        every { evaluatedFloatValue.doubleValue() } returns 88.88
+
+        val coercedDoubleValue = mockk<DoubleValue>(relaxed = true)
+        every { vm.mirrorOf(88.88) } returns coercedDoubleValue
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("88.88", vm, frame) } returns evaluatedFloatValue
+
+        val result = session.setVariable(threadId = "1", varName = "myDouble", newValueStr = "88.88")
+
+        verify { frame.setValue(local, coercedDoubleValue) }
+        assertEquals("myDouble", result.name)
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable throws INTERNAL_ERROR when primitive coercion is not possible due to incompatibility`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "myString"
+
+        val stringType = mockk<com.sun.jdi.ReferenceType>(relaxed = true)
+        every { stringType.name() } returns "java.lang.String"
+        every { local.type() } returns stringType
+
+        val floatType = mockk<com.sun.jdi.FloatType>(relaxed = true)
+        val evaluatedFloatValue = mockk<FloatValue>(relaxed = true)
+        every { evaluatedFloatValue.type() } returns floatType
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("88.88", vm, frame) } returns evaluatedFloatValue
+
+        val exception = assertThrows<DebugException> {
+            session.setVariable(threadId = "1", varName = "myString", newValueStr = "88.88")
+        }
+
+        assertEquals(ErrorCode.INTERNAL_ERROR, exception.code)
+        assertTrue(exception.message!!.contains("Type mismatch"))
+        unmockkStatic(JdiExpressionEvaluator::class)
     }
 
     @Test

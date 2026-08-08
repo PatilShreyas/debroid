@@ -355,7 +355,15 @@ object CliRunner {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         private val threadId by argument("thread_id", help = "The ID of the suspended thread.")
         private val varName by argument("variable_name", help = "The name of the local variable to mutate.")
-        private val newValue by argument("new_value", help = "The new primitive or string value to assign.")
+        private val newValue by argument(
+            "new_value",
+            help = "The new value to assign, parsed as a Java expression. " +
+                "Examples: " +
+                "Int/Long: `10`, `100L` | " +
+                "Float/Double: `10.5f`, `20.5`, `20.5d` | " +
+                "Boolean: `true`, `false` | " +
+                "String: `\"my string\"` (ensure quotes are escaped in shell, e.g., '\"value\"' or \\\"value\\\")"
+        )
         override fun run() = ensureDaemonAndSend(
             DaemonRequest.SetVar(sessionId = sessionId, threadId = threadId, varName = varName, newValue = newValue)
         )
