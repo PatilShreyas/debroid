@@ -850,6 +850,58 @@ class JdiSessionTest {
         verify(exactly = 1) { erm.deleteEventRequest(classPrepReq) }
     }
 
+    @Test
+    fun `setExceptionBreakpoint on deferred class arms single ClassPrepareRequest`() {
+        every { vm.classesByName("com.example.FooException") } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val id1 = session.setExceptionBreakpoint("com.example.FooException", true, true)
+        val id2 = session.setExceptionBreakpoint("com.example.FooException", false, true)
+
+        assertNotEquals(id1, id2)
+        verify(exactly = 1) { erm.createClassPrepareRequest() }
+
+        // Removing one should NOT disarm the shared ClassPrepareRequest (other deferred remains).
+        assertTrue(session.removeExceptionBreakpoint(id1))
+        verify(exactly = 0) { erm.deleteEventRequest(classPrepReq) }
+
+        // Removing the second should NOW disarm it.
+        assertTrue(session.removeExceptionBreakpoint(id2))
+        verify(exactly = 1) { erm.deleteEventRequest(classPrepReq) }
+    }
+
+    @Test
+    fun `client side exception filter ignores unrelated exceptions`() {
+        val req = mockk<ExceptionRequest>(relaxed = true)
+        every { req.getProperty("className") } returns "com.example.ExpectedException"
+
+        val thrownClass = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { thrownClass.name() } returns "com.example.UnrelatedException"
+        every { thrownClass.superclass() } returns null
+        every { thrownClass.allInterfaces() } returns emptyList()
+
+        val exceptionObj = mockk<com.sun.jdi.ObjectReference>(relaxed = true)
+        every { exceptionObj.referenceType() } returns thrownClass
+
+        val event = mockk<com.sun.jdi.event.ExceptionEvent>(relaxed = true)
+        every { event.request() } returns req
+        every { event.exception() } returns exceptionObj
+        every { event.virtualMachine() } returns vm
+
+        // Use reflection to invoke private handleExceptionEvent method
+        val handleMethod = JdiSession::class.java.getDeclaredMethod(
+            "handleExceptionEvent",
+            com.sun.jdi.event.ExceptionEvent::class.java
+        )
+        handleMethod.isAccessible = true
+        handleMethod.invoke(session, event)
+
+        // Event should have been ignored and VM resumed
+        verify { vm.resume() }
+        assertEquals(0, session.pollEvents("0").events.size)
+    }
+
     // ---------------- B4: clearDebugApp called on detach when launched -----
 
     @Test

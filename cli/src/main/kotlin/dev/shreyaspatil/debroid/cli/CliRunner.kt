@@ -248,8 +248,9 @@ object CliRunner {
     class CatchExceptionCommand : BaseJsonCommand(
         name = "catch-exception",
         help = "Sets a breakpoint that triggers when an exception is thrown.",
-        epilog = "By default only UNCAUGHT exceptions are trapped. Use --caught to also trap caught exceptions, " +
-            "and (optionally) restrict to a specific exception class.",
+        epilog = "By default only UNCAUGHT exceptions are trapped. (Note: On Android, fatal app " +
+            "crashes are usually caught by the system's UncaughtExceptionHandler. To trap real app crashes, " +
+            "use --caught and provide a specific exception class like java.lang.RuntimeException).",
         serializer = CliExceptionBreakpointResult.serializer()
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")

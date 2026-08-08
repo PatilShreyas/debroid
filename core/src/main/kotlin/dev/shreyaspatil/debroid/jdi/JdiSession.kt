@@ -62,6 +62,7 @@ class JdiSession(
     private val jdiBreakpointRequests = ConcurrentHashMap<String, MutableList<BreakpointRequest>>()
     private val deferredBreakpoints = ConcurrentHashMap<String, DeferredBreakpoint>()
     private val deferredWatchpoints = ConcurrentHashMap<String, MutableList<DeferredWatchpoint>>()
+    private val deferredExceptionBreakpoints = ConcurrentHashMap<String, MutableList<DeferredExceptionBreakpoint>>()
     private val exceptionRequests = ConcurrentHashMap<String, ExceptionRequest>()
     private val watchpointRequests = ConcurrentHashMap<String, MutableList<WatchpointRequest>>()
     private val classPrepareRequest = AtomicReference<ClassPrepareRequest?>(null)
@@ -72,6 +73,11 @@ class JdiSession(
         val fieldName: String,
         val access: Boolean,
         val modify: Boolean
+    )
+    private data class DeferredExceptionBreakpoint(
+        val id: String,
+        val notifyCaught: Boolean,
+        val notifyUncaught: Boolean
     )
 
     private val exceptionIdCounter = AtomicInteger(1)
@@ -224,13 +230,40 @@ class JdiSession(
 
     fun setExceptionBreakpoint(className: String?, notifyCaught: Boolean, notifyUncaught: Boolean): String {
         val erm = vm.eventRequestManager()
-        val refType = className?.let { name -> vm.classesByName(name).firstOrNull() }
+        val id = "ex_bp_${exceptionIdCounter.getAndIncrement()}"
+
+        if (className != null) {
+            val refTypes = vm.classesByName(className)
+            if (refTypes.isEmpty()) {
+                deferredExceptionBreakpoints.computeIfAbsent(className) { mutableListOf() }.add(
+                    DeferredExceptionBreakpoint(id, notifyCaught, notifyUncaught)
+                )
+                ensureClassPrepareRequest()
+                return id
+            }
+            bindExceptionBreakpointForRefType(id, refTypes.first(), className, notifyCaught, notifyUncaught)
+            return id
+        }
+
+        bindExceptionBreakpointForRefType(id, null, null, notifyCaught, notifyUncaught)
+        return id
+    }
+
+    private fun bindExceptionBreakpointForRefType(
+        id: String,
+        refType: ReferenceType?,
+        className: String?,
+        notifyCaught: Boolean,
+        notifyUncaught: Boolean
+    ) {
+        val erm = vm.eventRequestManager()
         val req: ExceptionRequest = erm.createExceptionRequest(refType, notifyCaught, notifyUncaught)
+        if (className != null) {
+            req.putProperty("className", className)
+        }
         req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
         req.enable()
-        val id = "ex_bp_${exceptionIdCounter.getAndIncrement()}"
         exceptionRequests[id] = req
-        return id
     }
 
     fun setWatchpoint(className: String, fieldName: String, access: Boolean = true, modify: Boolean = true): String {
@@ -307,9 +340,27 @@ class JdiSession(
     }
 
     fun removeExceptionBreakpoint(id: String): Boolean {
-        val req = exceptionRequests.remove(id) ?: return false
-        try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
-        return true
+        var removed = false
+        val req = exceptionRequests.remove(id)
+        if (req != null) {
+            try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
+            removed = true
+        } else {
+            removed = removeFromDeferredExceptionBreakpoints(id)
+        }
+        maybeDisableClassPrepareRequest()
+        return removed
+    }
+
+    private fun removeFromDeferredExceptionBreakpoints(id: String): Boolean {
+        var removed = false
+        for ((_, list) in deferredExceptionBreakpoints) {
+            if (list.removeIf { it.id == id }) {
+                removed = true
+            }
+        }
+        deferredExceptionBreakpoints.entries.removeIf { it.value.isEmpty() }
+        return removed
     }
 
     fun removeWatchpoint(id: String): Boolean {
@@ -348,7 +399,7 @@ class JdiSession(
      * that could leave the deferral queue empty (B6).
      */
     private fun maybeDisableClassPrepareRequest() {
-        if (deferredBreakpoints.isEmpty() && deferredWatchpoints.isEmpty()) {
+        if (deferredBreakpoints.isEmpty() && deferredWatchpoints.isEmpty() && deferredExceptionBreakpoints.isEmpty()) {
             classPrepareRequest.getAndSet(null)?.let { req ->
                 try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
             }
@@ -899,8 +950,22 @@ class JdiSession(
         val preparedClass = event.referenceType()
         resolveDeferredWatchpointsForClass(preparedClass)
         resolveDeferredBreakpointsForClass(preparedClass)
+        resolveDeferredExceptionBreakpointsForClass(preparedClass)
         maybeDisableClassPrepareRequest()
         eventSet.resume()
+    }
+
+    private fun resolveDeferredExceptionBreakpointsForClass(preparedClass: ReferenceType) {
+        val deferredExs = deferredExceptionBreakpoints.remove(preparedClass.name())
+        deferredExs?.forEach { de ->
+            bindExceptionBreakpointForRefType(
+                id = de.id,
+                refType = preparedClass,
+                className = preparedClass.name(),
+                notifyCaught = de.notifyCaught,
+                notifyUncaught = de.notifyUncaught
+            )
+        }
     }
 
     private fun resolveDeferredWatchpointsForClass(preparedClass: ReferenceType) {
@@ -1005,6 +1070,33 @@ class JdiSession(
     }
 
     private fun handleExceptionEvent(event: ExceptionEvent) {
+        // Client-side filtering because JDWP ExceptionOnly filters can sometimes be buggy/too-broad
+        val expectedClassName = event.request()?.getProperty("className") as? String
+        if (expectedClassName != null) {
+            val thrownClass = event.exception().referenceType()
+            var matches = false
+            var currentClass: com.sun.jdi.ClassType? = thrownClass as? com.sun.jdi.ClassType
+            while (currentClass != null) {
+                if (currentClass.name() == expectedClassName) {
+                    matches = true
+                    break
+                }
+                currentClass = currentClass.superclass()
+            }
+            if (!matches) {
+                // Also check if it's an interface (less common for exceptions, but possible)
+                if (thrownClass is com.sun.jdi.ClassType) {
+                    if (thrownClass.allInterfaces().any { it.name() == expectedClassName }) {
+                        matches = true
+                    }
+                }
+                if (!matches) {
+                    event.virtualMachine().resume()
+                    return
+                }
+            }
+        }
+
         val loc = event.location()
         pushEvent(
             DebugEventPayload(
