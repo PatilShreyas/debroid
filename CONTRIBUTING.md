@@ -2,6 +2,13 @@
 
 Welcome! This document outlines the rules and guidelines for contributing to this project.
 
+## 📖 General Contribution Guidelines
+
+Before writing code or making significant changes, please follow these standard practices:
+1. **Check Existing Issues:** Before opening a new issue or starting work, please search the issue tracker to check if the bug or feature request has already been reported.
+2. **Discuss Major Changes:** For significant architectural changes, large refactors, or new features, please open an issue to discuss your proposal with the maintainers *before* writing code. This saves time and ensures alignment.
+3. **Small Changes:** For minor bug fixes, typos, or small documentation updates, feel free to open a Pull Request directly.
+
 ## 🛠️ How to Work on This Project
 
 ### 1. Build, Test, and Lint Before Committing
