@@ -19,12 +19,14 @@ fi
 
 # We use awk to extract the section.
 # We look for a line starting with "## [$VERSION]"
+# We set found=1 and skip the header itself.
+# We also skip any immediate leading blank lines.
 # We print lines until we see the next line starting with "## ["
 
 awk -v version="$VERSION" '
+  BEGIN { found=0; skip_blank=1 }
   $0 ~ "^## \\[" version "\\]" { 
     found = 1; 
-    print; 
     next; 
   }
   /^## \[/ { 
@@ -33,6 +35,10 @@ awk -v version="$VERSION" '
     } 
   }
   found { 
+    if (skip_blank && $0 == "") {
+      next;
+    }
+    skip_blank = 0;
     print; 
   }
 ' "$CHANGELOG_FILE" | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba'
