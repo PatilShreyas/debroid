@@ -17,6 +17,7 @@ open class JdiSessionManager(
     private val sessionCounter = AtomicInteger(100)
 
     fun launchAndAttach(appId: String): JdiSession {
+        sweepDeadSessions()
         // 1. Check debuggability
         val debuggableRes = adbManager.isAppDebuggable(appId)
         if (debuggableRes.isFailure) {
@@ -38,6 +39,7 @@ open class JdiSessionManager(
     }
 
     fun attachToRunningApp(appId: String): JdiSession {
+        sweepDeadSessions()
         // 1. Check debuggability
         val debuggableRes = adbManager.isAppDebuggable(appId)
         if (debuggableRes.isFailure) {
@@ -55,6 +57,12 @@ open class JdiSessionManager(
     }
 
     private fun attachToPid(appId: String, pid: Int, clearDebugAppOnDetach: Boolean): JdiSession {
+        // Ensure only one active debug session per app: detach any existing
+        val existingSessionIds = sessions.values.filter { it.appId == appId }.map { it.sessionId }
+        for (id in existingSessionIds) {
+            detachSession(id)
+        }
+
         val port = findAvailableLocalPort()
         adbManager.forwardJdwpPort(port, pid).getOrThrow()
 
@@ -100,10 +108,17 @@ open class JdiSessionManager(
         val session = sessions[sessionId]
             ?: throw DebugException(ErrorCode.SESSION_NOT_FOUND, "Session $sessionId not found.")
         if (!session.isAlive()) {
-            sessions.remove(sessionId)
+            detachSession(sessionId)
             throw DebugException(ErrorCode.SESSION_NOT_FOUND, "Session $sessionId has disconnected.")
         }
         return session
+    }
+
+    private fun sweepDeadSessions() {
+        val deadIds = sessions.filterValues { !it.isAlive() }.keys.toList()
+        for (id in deadIds) {
+            detachSession(id)
+        }
     }
 
     fun detachSession(sessionId: String): Boolean {

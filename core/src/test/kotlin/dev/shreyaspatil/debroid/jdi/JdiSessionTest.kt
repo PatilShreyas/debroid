@@ -1628,4 +1628,156 @@ class JdiSessionTest {
             session.inspectObject("100", null, maxDepth = 1)
         }
     }
+
+    @Test
+    fun `detach clears all EventRequests`() {
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        val stepReq = mockk<StepRequest>(relaxed = true)
+        every { erm.breakpointRequests() } returns listOf(bpReq)
+        every { erm.stepRequests() } returns listOf(stepReq)
+
+        session.detach()
+
+        verify { erm.deleteEventRequest(bpReq) }
+        verify { erm.deleteEventRequest(stepReq) }
+    }
+
+    @Test
+    fun `VMDisconnectedException triggers disconnect event and clears requests`() {
+        val customVm = mockk<VirtualMachine>(relaxed = true)
+        val eventQueue = mockk<com.sun.jdi.event.EventQueue>()
+        every { customVm.eventQueue() } returns eventQueue
+        every { eventQueue.remove(any()) } throws VMDisconnectedException()
+
+        val customErm = mockk<EventRequestManager>(relaxed = true)
+        every { customVm.eventRequestManager() } returns customErm
+
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { customErm.breakpointRequests() } returns listOf(bpReq)
+
+        val customSession = JdiSession(
+            sessionId = "sess_custom",
+            appId = "com.test.app",
+            localPort = 8080,
+            vm = customVm,
+            adbManager = adbManager
+        )
+
+        // Verify the background event loop caught the exception and processed the disconnect.
+        // Using timeout since the event loop runs on a separate thread.
+        verify(timeout = 2000) { customErm.deleteEventRequest(bpReq) }
+        verify(timeout = 2000) { adbManager.removePortForward(8080) }
+
+        assertFalse(customSession.isAlive())
+    }
+
+    @Test
+    fun `detach is idempotent and does not clear twice`() {
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { erm.breakpointRequests() } returns listOf(bpReq)
+
+        session.detach()
+        session.detach() // Second call
+
+        // deleteEventRequest should only be called once because of getAndSet(false)
+        verify(exactly = 1) { erm.deleteEventRequest(bpReq) }
+    }
+
+    @Test
+    fun `detach completes successfully even if clearAllEventRequests throws`() {
+        every { vm.eventRequestManager() } throws RuntimeException("Erm failure")
+
+        // Should not throw
+        session.detach()
+
+        assertFalse(session.isAlive())
+    }
+
+    @Test
+    fun `detach after unexpected disconnect still clears debug app and forward`() {
+        val isolatedAdbManager = mockk<AdbManager>(relaxed = true)
+        val isolatedVm = mockk<VirtualMachine>(relaxed = true)
+        val customErm = mockk<EventRequestManager>(relaxed = true)
+        every { isolatedVm.eventRequestManager() } returns customErm
+
+        // Simulating the disconnect through the thread exception BEFORE thread starts
+        val eventQueue = mockk<com.sun.jdi.event.EventQueue>()
+        every { isolatedVm.eventQueue() } returns eventQueue
+        every { eventQueue.remove(any()) } throws VMDisconnectedException()
+
+        val sessionWithClear = JdiSession(
+            sessionId = "sess_clear",
+            appId = "com.test.app",
+            localPort = 8080,
+            vm = isolatedVm,
+            adbManager = isolatedAdbManager,
+            clearDebugAppOnDetach = true
+        )
+
+        // Wait for background event loop to catch it and perform cleanup EXACTLY ONCE
+        verify(timeout = 2000, exactly = 1) { isolatedAdbManager.removePortForward(8080) }
+        verify(timeout = 2000, exactly = 1) { isolatedAdbManager.clearDebugApp() }
+
+        // Now explicit detach should be a complete no-op (idempotent)
+        sessionWithClear.detach()
+
+        // Assert that they were still only called exactly once
+        verify(exactly = 1) { isolatedAdbManager.removePortForward(8080) }
+        verify(exactly = 1) { isolatedAdbManager.clearDebugApp() }
+    }
+
+    @Test
+    fun `shutdown semantics for DISCONNECT event`() {
+        // 1. Explicit detach -> NO disconnect event
+        session.detach()
+
+        val events1 = session.pollEvents("0")
+        assertFalse(events1.events.any { it.eventType == EventType.DISCONNECT })
+
+        // 2. Unexpected disconnect -> DISCONNECT event
+        val isolatedAdbManager = mockk<AdbManager>(relaxed = true)
+        val isolatedVm = mockk<VirtualMachine>(relaxed = true)
+        val customErm = mockk<EventRequestManager>(relaxed = true)
+        every { isolatedVm.eventRequestManager() } returns customErm
+
+        val eventQueue = mockk<com.sun.jdi.event.EventQueue>()
+        every { isolatedVm.eventQueue() } returns eventQueue
+        every { eventQueue.remove(any()) } throws VMDisconnectedException()
+
+        val sessionUnexpected = JdiSession("sess_unexp", "app", 8080, isolatedVm, isolatedAdbManager)
+
+        // Wait for shutdown to complete via adbManager mock
+        verify(timeout = 2000) { isolatedAdbManager.removePortForward(8080) }
+
+        val events2 = sessionUnexpected.pollEvents("0")
+        assertTrue(events2.events.any { it.eventType == EventType.DISCONNECT })
+    }
+
+    @Test
+    fun `deleteAllEventRequests clears tracked maps`() {
+        // Add a real breakpoint which populates maps
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        every { location.lineNumber() } returns 10
+        val method = mockk<Method>(relaxed = true)
+        val declType = mockk<ReferenceType>(relaxed = true)
+        every { declType.name() } returns "com.test.Target"
+        every { declType.sourceName() } returns "Target.kt"
+        every { method.declaringType() } returns declType
+        every { location.method() } returns method
+        every { declType.locationsOfLine(any()) } returns listOf(location)
+        every { erm.createBreakpointRequest(any()) } returns bpReq
+        every { vm.classesByName("com.test.Target") } returns listOf(declType)
+
+        session.setBreakpoint("Target.kt", 10, "com.test.Target")
+
+        val pointsBefore = session.getPoints()
+        assertEquals(1, pointsBefore.breakpoints.size)
+
+        // Detach should call deleteAllEventRequests
+        session.detach()
+
+        val pointsAfter = session.getPoints()
+        assertEquals(0, pointsAfter.breakpoints.size)
+    }
 }

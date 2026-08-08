@@ -52,6 +52,9 @@ You must attach the debugger to obtain a `sessionId`.
   ```
 **Action:** Extract the `sessionId` from the JSON response.
 
+> ⚠️ **Session Lifecycle & Breakpoints (Crucial!)**: 
+> Breakpoints, watchpoints, and exception traps are strictly **session-scoped**. When you call `attach` or `launch` for an `app_id` that is already being debugged by an older/stale session, Debroid's automatic deduping will instantly safely detach that stale session. **This completely wipes all breakpoints and watchpoints you may have set previously.** You MUST recreate any breakpoints or watchpoints you need using your new `sessionId` returned by the new `attach`/`launch` command!
+
 ### Step 3: Set Traps
 Set your breakpoints or watchpoints *before* polling. **Save the returned IDs.**
 - **Line Breakpoint**: `debroid break <session_id> <FileName.kt> <line_number> [--package <pkg>] [--pretty]` → returns `{ "id": "bp_1", "verified": true|false, ... }`
