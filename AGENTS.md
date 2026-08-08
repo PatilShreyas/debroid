@@ -49,8 +49,8 @@ The `core` layer handles live VM connections. Always ensure that:
 - Event queues (like in `JdiSession`) are bounded to prevent OutOfMemory errors during long-running polls.
 - Exceptions thrown by the Android VM (like `AbsentInformationException` or `IncompatibleThreadStateException`) are caught and handled gracefully without crashing the daemon.
 
-## 🚨 CRITICAL RULE: Keeping Skills in Sync
-We maintain an AI Agent Skill document at **`skills/debroid-cli/SKILL.md`**. This document teaches *other* AI agents how to use the Debroid CLI.
+## 🚨 CRITICAL RULE: Keeping Skills and Documentation in Sync
+We maintain an AI Agent Skill document at **`skills/debroid-cli/SKILL.md`**. This document teaches *other* AI agents how to use the Debroid CLI. We also maintain a command reference in the project's **`README.md`**.
 
 **Whenever you:**
 1. Add a new CLI command.
@@ -58,7 +58,8 @@ We maintain an AI Agent Skill document at **`skills/debroid-cli/SKILL.md`**. Thi
 3. Modify the JSON output structure.
 
 **You MUST:**
-Update the `skills/debroid-cli/SKILL.md` file to reflect the new command signatures, usage examples, and JSON parsing rules. Keeping the skill file synchronized with the CLI is mandatory to ensure AI agents using Debroid do not break!
+1. Update the `skills/debroid-cli/SKILL.md` file to reflect the new command signatures, usage examples, and JSON parsing rules. Keeping the skill file synchronized with the CLI is mandatory to ensure AI agents using Debroid do not break!
+2. Update the `README.md` file's Command Reference section to include the new or updated command signature and description.
 
 ## 🚨 CRITICAL RULE: Schema Contracts & Golden Tests
 All CLI JSON response models are guarded by Golden Schema tests in `JsonSchemaGoldenTest` (`cli/src/test/resources/golden-schemas/*.schema.json`) to prevent unintended breaking changes for downstream AI agents.
