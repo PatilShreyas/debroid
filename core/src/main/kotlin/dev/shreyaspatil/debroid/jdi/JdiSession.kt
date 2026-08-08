@@ -147,6 +147,10 @@ class JdiSession(
     }
 
     fun setBreakpoint(file: String, line: Int, packageName: String? = null): BreakpointInfo {
+        val existing = activeBreakpoints.values.find { it.file == file && it.line == line }
+        if (existing != null) {
+            return existing
+        }
         val id = "bp_${breakpointIdCounter.getAndIncrement()}"
         val info = BreakpointInfo(
             id = id,
@@ -243,6 +247,11 @@ class JdiSession(
     }
 
     fun setExceptionBreakpoint(className: String?, notifyCaught: Boolean, notifyUncaught: Boolean): String {
+        val existing = listExceptionBreakpoints().find { it.className == className }
+        if (existing != null) {
+            removeExceptionBreakpoint(existing.id)
+        }
+
         val erm = vm.eventRequestManager()
         val id = "ex_bp_${exceptionIdCounter.getAndIncrement()}"
 
@@ -281,6 +290,11 @@ class JdiSession(
     }
 
     fun setWatchpoint(className: String, fieldName: String, access: Boolean = true, modify: Boolean = true): String {
+        val existing = listWatchpoints().find { it.className == className && it.fieldName == fieldName }
+        if (existing != null) {
+            removeWatchpoint(existing.id)
+        }
+
         val erm = vm.eventRequestManager()
         val refTypes = vm.classesByName(className)
         val id = "wp_${watchpointIdCounter.getAndIncrement()}"
