@@ -34,6 +34,15 @@ jobs:
           VERSION=$(cat version.txt | xargs)
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
+      - name: Verify release notes exist
+        run: |
+          CHANGELOG_CONTENT=$(./scripts/read_changelog.sh "v${{ env.VERSION }}")
+          if [ -z "$CHANGELOG_CONTENT" ]; then
+            echo "Error: No changelog entry found for v${{ env.VERSION }}."
+            exit 1
+          fi
+          echo "$CHANGELOG_CONTENT" > release_notes.md
+
       - name: Create and push git tag
         run: |
           TAG="v${{ env.VERSION }}"
@@ -63,7 +72,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./scripts/read_changelog.sh "v${{ env.VERSION }}" > release_notes.md
           gh release create "v${{ env.VERSION }}" \
             debroid.jar \
             debroid \
