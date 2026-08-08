@@ -77,6 +77,9 @@ class JdiSession(
     private val exceptionIdCounter = AtomicInteger(1)
     private val watchpointIdCounter = AtomicInteger(1)
 
+    // Object Reference Cache for robust inspect lookup
+    private val objectReferenceCache = ConcurrentHashMap<Long, ObjectReference>()
+
     // Event buffer for polling
     private val eventQueueLock = Any()
     private val eventQueueBuffer = ArrayDeque<DebugEventPayload>()
@@ -368,6 +371,7 @@ class JdiSession(
     }
 
     fun stepExecution(threadId: String, action: StepAction) {
+        objectReferenceCache.clear()
         val thread = findThread(threadId)
         val erm = vm.eventRequestManager()
 
@@ -408,6 +412,7 @@ class JdiSession(
     }
 
     fun resumeAll() {
+        objectReferenceCache.clear()
         repeat(vm.allThreads().maxOfOrNull { it.suspendCount() } ?: 1) {
             vm.resume()
         }
@@ -581,7 +586,9 @@ class JdiSession(
                 } catch (e: Exception) { false }
 
                 if (isContinuation) {
-                    continuationObjId = thisObj.uniqueID().toString()
+                    val uid = thisObj.uniqueID()
+                    continuationObjId = uid.toString()
+                    objectReferenceCache[uid] = thisObj
                 }
             }
 
@@ -728,21 +735,21 @@ class JdiSession(
                 valuePreview = "\"${value.value()}\"",
                 isPrimitive = true,
                 objectId = value.uniqueID().toString()
-            )
+            ).also { objectReferenceCache[value.uniqueID()] = value }
             is ArrayReference -> VariableInfo(
                 name = name,
                 type = value.type().name(),
                 valuePreview = "Array(size=${value.length()})",
                 isPrimitive = false,
                 objectId = value.uniqueID().toString()
-            )
+            ).also { objectReferenceCache[value.uniqueID()] = value }
             is ObjectReference -> VariableInfo(
                 name = name,
                 type = value.referenceType().name(),
                 valuePreview = "<${value.referenceType().name()} id=${value.uniqueID()}>",
                 isPrimitive = false,
                 objectId = value.uniqueID().toString()
-            )
+            ).also { objectReferenceCache[value.uniqueID()] = value }
             else -> VariableInfo(
                 name = name,
                 type = value.type().name(),
@@ -759,6 +766,16 @@ class JdiSession(
     }
 
     private fun findObjectReference(objectId: Long): ObjectReference {
+        objectReferenceCache[objectId]?.let {
+            try {
+                // Best effort check if it's still valid
+                it.type()
+                return it
+            } catch (_: Exception) {
+                objectReferenceCache.remove(objectId)
+            }
+        }
+
         for (thread in vm.allThreads()) {
             if (thread.isSuspended) {
                 try {
@@ -1035,6 +1052,7 @@ class JdiSession(
 
     private fun handleDisconnectEvent() {
         isConnected.set(false)
+        objectReferenceCache.clear()
         adbManager.removePortForward(localPort)
         pushEvent(
             DebugEventPayload(
@@ -1050,6 +1068,7 @@ class JdiSession(
 
     fun detach() {
         isConnected.set(false)
+        objectReferenceCache.clear()
         try { eventThread.interrupt() } catch (_: Throwable) {}
         try { vm.dispose() } catch (_: Exception) {}
         adbManager.removePortForward(localPort)
