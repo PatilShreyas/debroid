@@ -175,6 +175,7 @@ Here is the full list of commands and their signatures (note: all JSON commands 
 | `remove-catch-exception` | `debroid remove-catch-exception <session_id> <exception_breakpoint_id> [--pretty]` | Removes an exception breakpoint |
 | `watch` | `debroid watch <session_id> <class_name> <field_name> [--access] [--modify] [--pretty]` | Sets a field watchpoint (default: access+modify) |
 | `remove-watch` | `debroid remove-watch <session_id> <watchpoint_id> [--pretty]` | Removes a watchpoint |
+| `points` | `debroid points <session_id> [--pretty]` | Retrieves all active debug points (breakpoints, exception points, watchpoints) for a session |
 | `threads` | `debroid threads <session_id> [--pretty]` | Lists active threads |
 | `locals` | `debroid locals <session_id> <thread_id> [--pretty]` | Gets shallow local variables |
 | `pause-state` | `debroid pause-state <session_id> <thread_id> [--pretty]` | Gets frames, locals, and instance state |
