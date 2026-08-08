@@ -47,6 +47,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 
+@Suppress("LargeClass")
 class JdiSessionTest {
 
     private lateinit var adbManager: AdbManager
@@ -130,6 +131,37 @@ class JdiSessionTest {
         assertEquals(42, info.line)
         assertEquals("MainActivity.kt", info.file)
         verify { bpReq.enable() }
+    }
+
+    @Test
+    fun `setBreakpoint returns existing breakpoint if duplicate is requested`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { refType.name() } returns "com.test.MainActivity"
+        every { refType.sourceName() } returns "MainActivity.kt"
+        every { refType.locationsOfLine(42) } returns listOf(location)
+        every { vm.allClasses() } returns listOf(refType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info1 = session.setBreakpoint(file = "MainActivity.kt", line = 42)
+        val info2 = session.setBreakpoint(file = "MainActivity.kt", line = 42)
+
+        assertTrue(info1.verified)
+        assertEquals(info1.id, info2.id)
+        verify(exactly = 1) { erm.createBreakpointRequest(location) }
+    }
+
+    @Test
+    fun `setBreakpoint returns existing deferred breakpoint if duplicate is requested`() {
+        every { vm.allClasses() } returns emptyList()
+
+        val info1 = session.setBreakpoint(file = "MainActivity.kt", line = 42)
+        val info2 = session.setBreakpoint(file = "MainActivity.kt", line = 42)
+
+        assertFalse(info1.verified)
+        assertEquals(info1.id, info2.id)
     }
 
     @Test
@@ -599,6 +631,80 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `setExceptionBreakpoint replaces existing breakpoint if className matches`() {
+        val exReq1 = mockk<ExceptionRequest>(relaxed = true)
+        val exReq2 = mockk<ExceptionRequest>(relaxed = true)
+        every { exReq1.getProperty("className") } returns "java.lang.NullPointerException"
+        every { exReq2.getProperty("className") } returns "java.lang.NullPointerException"
+
+        every { exReq1.notifyCaught() } returns false
+        every { exReq1.notifyUncaught() } returns true
+
+        every { exReq2.notifyCaught() } returns true
+        every { exReq2.notifyUncaught() } returns false
+
+        every { vm.classesByName("java.lang.NullPointerException") } returns listOf(mockk(relaxed = true))
+
+        // Mock returning req1 first, then req2
+        every { erm.createExceptionRequest(any(), any(), any()) } returnsMany listOf(exReq1, exReq2)
+
+        val id1 = session.setExceptionBreakpoint(
+            className = "java.lang.NullPointerException",
+            notifyCaught = false,
+            notifyUncaught = true
+        )
+        val id2 = session.setExceptionBreakpoint(
+            className = "java.lang.NullPointerException",
+            notifyCaught = true,
+            notifyUncaught = false
+        )
+
+        assertNotEquals(id1, id2)
+        verify(exactly = 2) { erm.createExceptionRequest(any(), any(), any()) }
+        verify { erm.deleteEventRequest(exReq1) } // Make sure the first one was removed
+    }
+
+    @Test
+    fun `setWatchpoint replaces existing watchpoint if className and fieldName match`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val field = mockk<Field>(relaxed = true)
+        every { field.name() } returns "count"
+        every { field.declaringType().name() } returns "com.test.DataRepo"
+        every { refType.fieldByName("count") } returns field
+        every { vm.classesByName("com.test.DataRepo") } returns listOf(refType)
+
+        val accessReq1 = mockk<AccessWatchpointRequest>(relaxed = true)
+        val modReq2 = mockk<ModificationWatchpointRequest>(relaxed = true)
+
+        every { accessReq1.field() } returns field
+        every { modReq2.field() } returns field
+
+        every { erm.createAccessWatchpointRequest(field) } returns accessReq1
+        every { erm.createModificationWatchpointRequest(field) } returns modReq2
+
+        // First call sets access=true, modify=false
+        val id1 = session.setWatchpoint(
+            className = "com.test.DataRepo",
+            fieldName = "count",
+            access = true,
+            modify = false
+        )
+
+        // Second call sets access=false, modify=true
+        val id2 = session.setWatchpoint(
+            className = "com.test.DataRepo",
+            fieldName = "count",
+            access = false,
+            modify = true
+        )
+
+        assertNotEquals(id1, id2)
+        verify(exactly = 1) { erm.createAccessWatchpointRequest(field) }
+        verify(exactly = 1) { erm.createModificationWatchpointRequest(field) }
+        verify { erm.deleteEventRequest(accessReq1) } // Ensure old event request was deleted
+    }
+
+    @Test
     fun `detach cleans up properly`() {
         session.detach()
         verify { vm.dispose() }
@@ -984,11 +1090,12 @@ class JdiSessionTest {
     @Test
     fun `setExceptionBreakpoint on deferred class arms single ClassPrepareRequest`() {
         every { vm.classesByName("com.example.FooException") } returns emptyList()
+        every { vm.classesByName("com.example.BarException") } returns emptyList()
         val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
         every { erm.createClassPrepareRequest() } returns classPrepReq
 
         val id1 = session.setExceptionBreakpoint("com.example.FooException", true, true)
-        val id2 = session.setExceptionBreakpoint("com.example.FooException", false, true)
+        val id2 = session.setExceptionBreakpoint("com.example.BarException", false, true)
 
         assertNotEquals(id1, id2)
         verify(exactly = 1) { erm.createClassPrepareRequest() }
