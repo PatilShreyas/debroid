@@ -63,10 +63,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          ./scripts/read_changelog.sh "v${{ env.VERSION }}" > release_notes.md
           gh release create "v${{ env.VERSION }}" \
             debroid.jar \
             debroid \
             debroid.jar.sha256 \
             debroid.sha256 \
             --title "v${{ env.VERSION }}" \
-            --generate-notes
+            --notes-file release_notes.md

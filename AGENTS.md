@@ -61,6 +61,20 @@ We maintain an AI Agent Skill document at **`skills/debroid-cli/SKILL.md`**. Thi
 1. Update the `skills/debroid-cli/SKILL.md` file to reflect the new command signatures, usage examples, and JSON parsing rules. Keeping the skill file synchronized with the CLI is mandatory to ensure AI agents using Debroid do not break!
 2. Update the `README.md` file's Command Reference section to include the new or updated command signature and description.
 
+## 🚨 CRITICAL RULE: Changelog Maintenance
+We maintain a `CHANGELOG.md` in the root of the project to track all notable changes. 
+
+**Whenever you:**
+1. Make any source code related change.
+2. Make a tooling related change.
+3. Make a SKILL related change.
+4. Raise a Pull Request.
+
+**You MUST:**
+1. Add an entry describing your changes to the `## [UNRELEASED]` section of `CHANGELOG.md`.
+2. Categorize the entry under the appropriate subsection (e.g., `### Added`, `### Fixed`, `### Changed`).
+3. If your change fixes a GitHub issue, mention the issue number in the changelog entry.
+
 ## 🚨 CRITICAL RULE: Schema Contracts & Golden Tests
 All CLI JSON response models are guarded by Golden Schema tests in `JsonSchemaGoldenTest` (`cli/src/test/resources/golden-schemas/*.schema.json`) to prevent unintended breaking changes for downstream AI agents.
 
