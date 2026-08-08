@@ -89,6 +89,9 @@ debroid pause-state <session_id> <thread_id>
   - `--max-depth N` now recurses N levels deep into object fields. Responses include a `nested` map keyed by field name; each value is itself a `CliObjectInspectionResult` with `objectId`, `type`, `fields`, and (optionally) its own `nested`. Cycles are guarded automatically (an object already visited in the current inspection is skipped).
 - Coroutine state: `debroid coroutine <session_id> <continuation_id>`
 
+> **ObjectId Lifecycle & Reuse (Crucial!)**: 
+> Any `objectId` or `continuation_id` returned by ANY command (including `locals`, `pause-state`, `poll` stacktraces, `eval`, or even inside a deeply nested `inspect` result) is globally cached by the daemon and **guaranteed to remain valid and reusable across multiple standalone commands** for the entire duration of the current suspend. You can confidently extract nested `objectId`s from a shallow inspect and drill into them later. These IDs are only invalidated/cleared when the VM is explicitly resumed (e.g. via `step`, `resume`) or detached.
+
 ### Step 6: Mutate or Step
 - Mutate memory: `debroid set-var <session_id> <thread_id> <variableName> <newValue>`
   - **Important:** `newValue` is parsed as a Java expression! To set a String literal, you must wrap the value in escaped quotes (e.g., `\"my string\"`). To set it to the result of an expression, provide the expression (e.g., `5`, `true`, `varName + 1`, Int/Long: `10`, `100L`, Float/Double: `10.5f`, `20.5d`).
