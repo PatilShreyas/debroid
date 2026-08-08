@@ -548,6 +548,57 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `getPoints returns all active and deferred points`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        // Set an active breakpoint
+        every { refType.name() } returns "com.test.MainActivity"
+        every { refType.locationsOfLine(42) } returns listOf(location)
+        every { vm.allClasses() } returns listOf(refType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+        session.setBreakpoint(file = "MainActivity.kt", line = 42)
+
+        // Set a deferred watchpoint (class not found)
+        every { vm.classesByName("com.test.DataRepo") } returns emptyList()
+        val wpId = session.setWatchpoint(
+            className = "com.test.DataRepo",
+            fieldName = "count",
+            access = true,
+            modify = true
+        )
+
+        // Set an active exception breakpoint
+        val exReq = mockk<ExceptionRequest>(relaxed = true)
+        every { exReq.getProperty("className") } returns "java.lang.NullPointerException"
+        every { exReq.notifyCaught() } returns false
+        every { exReq.notifyUncaught() } returns true
+        every { vm.classesByName("java.lang.NullPointerException") } returns listOf(mockk(relaxed = true))
+        every { erm.createExceptionRequest(any(), any(), any()) } returns exReq
+        val exBpId = session.setExceptionBreakpoint(
+            className = "java.lang.NullPointerException",
+            notifyCaught = false,
+            notifyUncaught = true
+        )
+
+        val points = session.getPoints()
+
+        assertEquals(1, points.breakpoints.size)
+        assertEquals(42, points.breakpoints[0].line)
+        assertEquals("MainActivity.kt", points.breakpoints[0].file)
+
+        assertEquals(1, points.exceptionBreakpoints.size)
+        assertEquals(exBpId, points.exceptionBreakpoints[0].id)
+        assertEquals("java.lang.NullPointerException", points.exceptionBreakpoints[0].className)
+
+        assertEquals(1, points.watchpoints.size)
+        assertEquals(wpId, points.watchpoints[0].id)
+        assertEquals("com.test.DataRepo", points.watchpoints[0].className)
+        assertEquals("count", points.watchpoints[0].fieldName)
+    }
+
+    @Test
     fun `detach cleans up properly`() {
         session.detach()
         verify { vm.dispose() }
