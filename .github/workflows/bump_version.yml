@@ -1,0 +1,45 @@
+name: Bump Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version to bump to (e.g., 0.1.1)'
+        required: true
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create branch
+        run: |
+          git checkout -b bump-v${{ github.event.inputs.version }}
+
+      - name: Update version.txt
+        run: |
+          echo "${{ github.event.inputs.version }}" > version.txt
+
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.txt
+          git commit -m "chore: bump version to ${{ github.event.inputs.version }}"
+          git push origin bump-v${{ github.event.inputs.version }}
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "chore: Bump version to v${{ github.event.inputs.version }}" \
+            --body "Automated PR to bump version to v${{ github.event.inputs.version }}." \
+            --head bump-v${{ github.event.inputs.version }} \
+            --base main
