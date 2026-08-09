@@ -26,20 +26,36 @@ jobs:
         run: |
           echo "${{ github.event.inputs.version }}" > version.txt
 
+      - name: Update Changelog
+        run: |
+          ./scripts/update_changelog.sh "v${{ github.event.inputs.version }}"
+
       - name: Commit and Push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add version.txt
-          git commit -m "chore: bump version to ${{ github.event.inputs.version }}"
+          git add version.txt CHANGELOG.md
+          git commit -m "chore: bump version to v${{ github.event.inputs.version }} and update changelog"
           git push origin bump-v${{ github.event.inputs.version }}
 
       - name: Create Pull Request
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          CHANGELOG_CONTENT=$(./scripts/read_changelog.sh "v${{ github.event.inputs.version }}")
+          
+          cat << EOF > pr_body.md
+          ## 📦 Version Bump to v${{ github.event.inputs.version }}
+          
+          Automated PR to bump version and update changelog.
+          
+          ### Changelog Preview
+          EOF
+          
+          echo "$CHANGELOG_CONTENT" >> pr_body.md
+          
           gh pr create \
             --title "chore: Bump version to v${{ github.event.inputs.version }}" \
-            --body "Automated PR to bump version to v${{ github.event.inputs.version }}." \
+            --body-file pr_body.md \
             --head bump-v${{ github.event.inputs.version }} \
             --base main
