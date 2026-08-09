@@ -3,9 +3,11 @@ package dev.shreyaspatil.debroid.cli
 import dev.shreyaspatil.debroid.adb.DebugException
 import dev.shreyaspatil.debroid.cli.models.CliDebugError
 import dev.shreyaspatil.debroid.cli.models.CliDetachedResult
+import dev.shreyaspatil.debroid.cli.models.CliErrorCode
 import dev.shreyaspatil.debroid.cli.models.CliExceptionBreakpointResult
 import dev.shreyaspatil.debroid.cli.models.CliShutdownResult
 import dev.shreyaspatil.debroid.cli.models.CliStatusResult
+import dev.shreyaspatil.debroid.cli.models.CliVersionResult
 import dev.shreyaspatil.debroid.cli.models.CliWatchpointResult
 import dev.shreyaspatil.debroid.cli.models.DaemonIpcRequest
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
@@ -76,7 +78,9 @@ object DaemonServer {
                 val ipcRequest = compactJson.decodeFromString<DaemonIpcRequest>(line)
                 processCommand(ipcRequest.request, ipcRequest.pretty)
             } catch (e: Exception) {
-                compactJson.encodeToString(CliDebugError("CLI_ERROR", "Invalid command format: ${e.message}", false))
+                compactJson.encodeToString(
+                    CliDebugError(CliErrorCode.CLI_ERROR.name, "Invalid command format: ${e.message}", false)
+                )
             }
             writer.println(response)
         } catch (e: Exception) {
@@ -222,6 +226,9 @@ object DaemonServer {
                     val session = sessionManager.getSession(request.sessionId)
                     session.stepExecution(request.threadId, request.action)
                     serializer.encodeToString(CliStatusResult("step_${request.action.name.lowercase()}"))
+                }
+                is DaemonRequest.GetVersion -> {
+                    serializer.encodeToString(CliVersionResult(VERSION))
                 }
             }
         } catch (e: DebugException) {

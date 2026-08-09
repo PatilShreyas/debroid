@@ -20,6 +20,7 @@ import com.github.ajalt.clikt.parameters.types.int
 import dev.shreyaspatil.debroid.cli.models.CliBreakpointInfo
 import dev.shreyaspatil.debroid.cli.models.CliDebugError
 import dev.shreyaspatil.debroid.cli.models.CliDetachedResult
+import dev.shreyaspatil.debroid.cli.models.CliErrorCode
 import dev.shreyaspatil.debroid.cli.models.CliEventPollResult
 import dev.shreyaspatil.debroid.cli.models.CliExceptionBreakpointResult
 import dev.shreyaspatil.debroid.cli.models.CliObjectInspectionResult
@@ -44,6 +45,8 @@ import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -113,9 +116,17 @@ object CliRunner {
                 }
             }
             if (!started) {
-                println(json.encodeToString(CliDebugError("CLI_ERROR", "Failed to start background daemon", false)))
+                println(
+                    json.encodeToString(
+                        CliDebugError(CliErrorCode.CLI_ERROR.name, "Failed to start background daemon", false)
+                    )
+                )
                 return
             }
+        }
+
+        if (checkDaemonVersionMismatch(request)) {
+            return
         }
 
         try {
@@ -130,10 +141,48 @@ object CliRunner {
         } catch (e: Exception) {
             println(
                 json.encodeToString(
-                    CliDebugError("CLI_ERROR", "Failed to communicate with daemon: ${e.message}", false)
+                    CliDebugError(CliErrorCode.CLI_ERROR.name, "Failed to communicate with daemon: ${e.message}", false)
                 )
             )
         }
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private fun checkDaemonVersionMismatch(request: DaemonRequest): Boolean {
+        if (request is DaemonRequest.GetVersion || request is DaemonRequest.Shutdown) {
+            return false
+        }
+
+        try {
+            Socket(DaemonConfig.HOST, DaemonConfig.PORT).use { socket ->
+                val writer = PrintWriter(socket.getOutputStream(), true)
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                val ipcRequest = DaemonIpcRequest(pretty = false, request = DaemonRequest.GetVersion)
+                writer.println(json.encodeToString(ipcRequest))
+
+                val responseLine = reader.readText()
+                var isMismatch = false
+                try {
+                    val element = json.parseToJsonElement(responseLine).jsonObject
+                    if (element["errorCode"] != null || element["version"]?.jsonPrimitive?.content != VERSION) {
+                        isMismatch = true
+                    }
+                } catch (e: Exception) {
+                    isMismatch = true
+                }
+
+                if (isMismatch) {
+                    val msg = "Daemon version mismatch due to recent background update. [For AI agent: 1. Run " +
+                        "`debroid stop` to kill the old daemon. 2. Discard old skill knowledge and re-read the " +
+                        "skill file from your symlink to get updated instructions. 3. Retry your command.]"
+                    println(json.encodeToString(CliDebugError(CliErrorCode.VERSION_MISMATCH.name, msg, false)))
+                    return true
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore socket errors here; the actual command block will handle and report them.
+        }
+        return false
     }
 
     @Suppress("MagicNumber")
@@ -482,26 +531,13 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Step(sessionId, threadId, action))
     }
 
-    class SkillCommand : CliktCommand(
-        name = "skill",
-        help = "Prints embedded AI Agent skill instructions (SKILL.md) to stdout " +
-            "(e.g. debroid skill > .cursor/rules/debroid.md)."
-    ) {
-        override fun run() {
-            val skillContent = object {}.javaClass.getResourceAsStream("/SKILL.md")
-                ?.bufferedReader()
-                ?.use { it.readText() }
-                ?: error("Embedded SKILL.md resource not found in CLI binary.")
-            print(skillContent)
-        }
-    }
-
     class DebroidCli : CliktCommand(name = "debroid") {
         override fun run() = Unit
     }
 
     private fun createCli(): CliktCommand {
         return DebroidCli()
+            .versionOption(VERSION)
             .subcommands(
                 DaemonCommand(),
                 ShutdownCommand(),
@@ -526,7 +562,6 @@ object CliRunner {
                 CoroutineCommand(),
                 InspectCommand(),
                 StepCommand(),
-                SkillCommand(),
                 UpdateCommand()
             )
     }
@@ -557,9 +592,16 @@ object CliRunner {
         }
     }
 
-    @Suppress("TooGenericExceptionCaught")
     fun execute(args: Array<String>) {
-        AutoUpdateManager.DEFAULT.checkAndPerformSilentAutoUpdateAsync()
+        val isUpdated = AutoUpdateManager.DEFAULT.checkAndPerformSilentAutoUpdateAsync()
+
+        if (isUpdated) {
+            val msg = "Debroid CLI was updated to a new version. [For AI agent: The skill instructions " +
+                "have changed. Please discard old skill knowledge, re-read the skill file from your symlink, " +
+                "then retry your command.]"
+            println(json.encodeToString(CliDebugError(CliErrorCode.CLI_UPDATED.name, msg, true)))
+            return
+        }
 
         val cli = createCli()
         if (args.isEmpty()) {
@@ -577,11 +619,15 @@ object CliRunner {
                     println(e.message)
                     e.context?.command?.getFormattedHelp()?.let { println(it) }
                 }
-                else -> println(json.encodeToString(CliDebugError("CLI_ERROR", e.message ?: "Unknown error", false)))
+                else -> println(
+                    json.encodeToString(CliDebugError(CliErrorCode.CLI_ERROR.name, e.message ?: "Unknown error", false))
+                )
             }
             exitProcess(1)
         } catch (e: Exception) {
-            println(json.encodeToString(CliDebugError("CLI_ERROR", e.message ?: "Unknown error", false)))
+            println(
+                json.encodeToString(CliDebugError(CliErrorCode.CLI_ERROR.name, e.message ?: "Unknown error", false))
+            )
             exitProcess(1)
         }
     }

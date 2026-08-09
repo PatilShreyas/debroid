@@ -10,7 +10,8 @@ import java.util.concurrent.Executors
 class AutoUpdateManager(
     private val releaseClient: GitHubReleaseClient = GitHubReleaseClient(),
     private val binaryUpdater: BinaryUpdater = BinaryUpdater(),
-    private val updateCache: UpdateCache = UpdateCache()
+    private val updateCache: UpdateCache = UpdateCache(),
+    private val skillExtractor: SkillExtractor = SkillExtractor()
 ) {
 
     private val backgroundExecutor by lazy { Executors.newSingleThreadExecutor() }
@@ -19,9 +20,12 @@ class AutoUpdateManager(
      * Non-blocking, silent background check and update to stable releases.
      * Throttled to once every 24 hours.
      */
-    fun checkAndPerformSilentAutoUpdateAsync() {
+    fun checkAndPerformSilentAutoUpdateAsync(): Boolean {
+        val isUpdated = syncSkillsIfUpdated()
+
         try {
-            if (!updateCache.shouldCheckForUpdate()) return
+            if (!updateCache.shouldCheckForUpdate()) return isUpdated
+
             updateCache.recordCheckTimestamp()
 
             backgroundExecutor.submit {
@@ -42,6 +46,7 @@ class AutoUpdateManager(
         } catch (_: Throwable) {
             // Ignore filesystem errors for cache check
         }
+        return isUpdated
     }
 
     /**
@@ -111,6 +116,30 @@ class AutoUpdateManager(
                 "Failed to replace binary file at ${targetBinary.absolutePath}."
             }
         )
+    }
+
+    /**
+     * Synchronously checks if the CLI version has changed since the last run.
+     * If so, extracts the new skills to the master symlink location.
+     *
+     * @return true if the CLI was just updated and skills were refreshed, false otherwise.
+     */
+    fun syncSkillsIfUpdated(): Boolean {
+        try {
+            val lastRunVersion = updateCache.readLastRunVersion()
+
+            if (lastRunVersion != null && lastRunVersion != VERSION) {
+                skillExtractor.extractSkillsToMaster()
+                updateCache.recordLastRunVersion(VERSION)
+                return true
+            } else if (lastRunVersion == null) {
+                skillExtractor.extractSkillsToMaster()
+                updateCache.recordLastRunVersion(VERSION)
+            }
+        } catch (_: Throwable) {
+            // Ignore filesystem errors during skill extraction
+        }
+        return false
     }
 
     companion object {

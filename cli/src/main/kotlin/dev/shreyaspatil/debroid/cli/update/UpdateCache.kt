@@ -1,9 +1,20 @@
 package dev.shreyaspatil.debroid.cli.update
 
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+
+/**
+ * Represents the parsed JSON from the update cache file.
+ * NOTE: For backward compatibility, any new fields added here MUST have
+ * nullable types and default values (e.g. `val newField: String? = null`).
+ */
+@Serializable
+data class CacheData(
+    val lastCheckTimestamp: Long = 0L,
+    val lastRunVersion: String? = null
+)
 
 /**
  * Manages cache file persistence (~/.debroid/update-cache.json) for throttling update checks.
@@ -13,29 +24,41 @@ class UpdateCache(private val cacheFile: File = defaultCacheFile()) {
     private val json = Json { ignoreUnknownKeys = true }
 
     fun shouldCheckForUpdate(throttleMs: Long = TWENTY_FOUR_HOURS_MS): Boolean {
-        val lastCheck = readLastCheckTimestamp()
+        val lastCheck = readCacheData().lastCheckTimestamp
         return (System.currentTimeMillis() - lastCheck) >= throttleMs
     }
 
     fun recordCheckTimestamp(now: Long = System.currentTimeMillis()) {
-        try {
-            val parent = cacheFile.parentFile
-            if (parent != null && !parent.exists()) parent.mkdirs()
-            val content = """{"lastCheckTimestamp":$now}"""
-            cacheFile.writeText(content)
+        val currentData = readCacheData()
+        writeCacheData(currentData.copy(lastCheckTimestamp = now))
+    }
+
+    fun readLastRunVersion(): String? {
+        return readCacheData().lastRunVersion
+    }
+
+    fun recordLastRunVersion(version: String) {
+        val currentData = readCacheData()
+        writeCacheData(currentData.copy(lastRunVersion = version))
+    }
+
+    private fun readCacheData(): CacheData {
+        return try {
+            if (!cacheFile.exists()) return CacheData()
+            val text = cacheFile.readText()
+            json.decodeFromString<CacheData>(text)
         } catch (_: Throwable) {
-            // Ignore write failures
+            CacheData()
         }
     }
 
-    private fun readLastCheckTimestamp(): Long {
-        return try {
-            if (!cacheFile.exists()) return 0L
-            val text = cacheFile.readText()
-            val element = json.parseToJsonElement(text).jsonObject
-            element["lastCheckTimestamp"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+    private fun writeCacheData(data: CacheData) {
+        try {
+            val parent = cacheFile.parentFile
+            if (parent != null && !parent.exists()) parent.mkdirs()
+            cacheFile.writeText(json.encodeToString(data))
         } catch (_: Throwable) {
-            0L
+            // Ignore write failures
         }
     }
 

@@ -1,6 +1,8 @@
 package dev.shreyaspatil.debroid.cli.update
 
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -57,5 +59,59 @@ class UpdateCacheTest {
 
         assertTrue(cacheFile.exists())
         assertTrue(cacheFile.length() > 0)
+    }
+
+    @Test
+    fun `readLastRunVersion returns null when cache file does not exist`(@TempDir tempDir: File) {
+        val cacheFile = File(tempDir, "update-cache.json")
+        val cache = UpdateCache(cacheFile)
+
+        assertNull(cache.readLastRunVersion())
+    }
+
+    @Test
+    fun `recordLastRunVersion writes version correctly`(@TempDir tempDir: File) {
+        val cacheFile = File(tempDir, "update-cache.json")
+        val cache = UpdateCache(cacheFile)
+
+        cache.recordLastRunVersion("1.0.0")
+        assertEquals("1.0.0", cache.readLastRunVersion())
+    }
+
+    @Test
+    fun `recordLastRunVersion preserves existing timestamp`(@TempDir tempDir: File) {
+        val cacheFile = File(tempDir, "update-cache.json")
+        val cache = UpdateCache(cacheFile)
+
+        val timestamp = 123456789L
+        cache.recordCheckTimestamp(timestamp)
+        cache.recordLastRunVersion("2.0.0")
+
+        assertEquals("2.0.0", cache.readLastRunVersion())
+        val content = cacheFile.readText()
+        assertTrue(content.contains(""""lastCheckTimestamp":123456789"""))
+    }
+
+    @Test
+    fun `recordCheckTimestamp preserves existing version`(@TempDir tempDir: File) {
+        val cacheFile = File(tempDir, "update-cache.json")
+        val cache = UpdateCache(cacheFile)
+
+        cache.recordLastRunVersion("3.0.0")
+        cache.recordCheckTimestamp(987654321L)
+
+        assertEquals("3.0.0", cache.readLastRunVersion())
+        val content = cacheFile.readText()
+        assertTrue(content.contains(""""lastCheckTimestamp":987654321"""))
+    }
+
+    @Test
+    fun `readLastRunVersion returns null and handles corrupted JSON file gracefully`(@TempDir tempDir: File) {
+        val cacheFile = File(tempDir, "update-cache.json")
+        cacheFile.writeText("invalid json content {{{")
+
+        val cache = UpdateCache(cacheFile)
+
+        assertNull(cache.readLastRunVersion())
     }
 }

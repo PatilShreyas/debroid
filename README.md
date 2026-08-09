@@ -72,15 +72,15 @@ To completely remove Debroid from your system:
 
 Debroid is designed to be operated autonomously by AI agents. To teach your agent how to use Debroid effectively, provide it with the skill instructions (`SKILL.md`).
 
-The skill file is embedded directly inside the `debroid` CLI binary (`debroid skill`) and hosted on GitHub.
+The exact AI skill instructions are automatically extracted by the CLI to `~/.debroid/skills/debroid-cli/SKILL.md` on the first run. 
 
-Select your AI agent below for setup instructions and exact skill paths:
+Select your AI agent below and run the provided command to create a **symbolic link** so your agent always stays up to date when you update the Debroid CLI:
 
 <details>
 <summary><b>🤖 Antigravity & Antigravity CLI</b></summary>
 
 ```bash
-mkdir -p ~/.gemini/skills/debroid && debroid skill > ~/.gemini/skills/debroid/SKILL.md
+mkdir -p ~/.gemini/skills/debroid && ln -s ~/.debroid/skills/debroid-cli/SKILL.md ~/.gemini/skills/debroid/SKILL.md
 ```
 </details>
 
@@ -88,7 +88,7 @@ mkdir -p ~/.gemini/skills/debroid && debroid skill > ~/.gemini/skills/debroid/SK
 <summary><b>🟧 Claude Code</b></summary>
 
 ```bash
-mkdir -p ~/.claude/skills/debroid && debroid skill > ~/.claude/skills/debroid/SKILL.md
+mkdir -p ~/.claude/skills/debroid && ln -s ~/.debroid/skills/debroid-cli/SKILL.md ~/.claude/skills/debroid/SKILL.md
 ```
 </details>
 
@@ -96,7 +96,7 @@ mkdir -p ~/.claude/skills/debroid && debroid skill > ~/.claude/skills/debroid/SK
 <summary><b>🖱️ Cursor</b></summary>
 
 ```bash
-mkdir -p .cursor/rules && debroid skill > .cursor/rules/debroid.mdc
+mkdir -p .cursor/rules && ln -s ~/.debroid/skills/debroid-cli/SKILL.md .cursor/rules/debroid.mdc
 ```
 </details>
 
@@ -104,15 +104,7 @@ mkdir -p .cursor/rules && debroid skill > .cursor/rules/debroid.mdc
 <summary><b>✨ Grok Build</b></summary>
 
 ```bash
-mkdir -p ~/.grok/skills/debroid && debroid skill > ~/.grok/skills/debroid/SKILL.md
-```
-</details>
-
-<details>
-<summary><b>⚡ OpenAI Codex</b></summary>
-
-```bash
-mkdir -p ~/.codex && debroid skill >> ~/.codex/AGENTS.md
+mkdir -p ~/.grok/skills/debroid && ln -s ~/.debroid/skills/debroid-cli/SKILL.md ~/.grok/skills/debroid/SKILL.md
 ```
 </details>
 
@@ -120,11 +112,11 @@ mkdir -p ~/.codex && debroid skill >> ~/.codex/AGENTS.md
 <summary><b>🔓 OpenCode</b></summary>
 
 ```bash
-mkdir -p ~/.config/opencode/skills/debroid && debroid skill > ~/.config/opencode/skills/debroid/SKILL.md
+mkdir -p ~/.config/opencode/skills/debroid && ln -s ~/.debroid/skills/debroid-cli/SKILL.md ~/.config/opencode/skills/debroid/SKILL.md
 ```
 </details>
 
-*(Note: If you haven't installed the CLI binary yet, replace `debroid skill` with `curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/SKILL.md` in any command).*
+> **Note on `debroid skill` removal:** Older versions of this tool provided a `debroid skill` command that printed instructions to standard output. This has been removed to prevent LLM context bloat. The installation script now automatically extracts the `SKILL.md` file to your disk during setup, so you only need to symlink it once!
 
 ## 🔌 How it Works
 
@@ -170,7 +162,6 @@ Here is the full list of commands and their signatures (note: all JSON commands 
 | `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>] [--include-static] [--include-internal] [--pretty]` | Inspects object fields. Filters out static/synthetic noise by default. |
 | `step` | `debroid step <session_id> <thread_id> <action> [--pretty]` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
 | `update` | `debroid update [--check-only] [--pretty]` | Checks for CLI updates or performs an in-place self-update to the latest release |
-| `skill` | `debroid skill` | Prints the embedded AI Agent skill instructions (`SKILL.md`) to stdout |
 
 > **Security Note:** The Debroid daemon listens on `localhost` (127.0.0.1) without authentication to enable fast communication with the CLI. It exposes live JVM manipulation. Only run Debroid on a machine where every local user is fully trusted.
 
