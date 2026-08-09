@@ -2,6 +2,7 @@ name: PR Changelog Update
 
 on:
   pull_request:
+    types: [opened, reopened]
     paths:
       - 'version.txt'
 
