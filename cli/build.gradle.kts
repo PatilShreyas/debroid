@@ -44,6 +44,7 @@ dependencies {
     
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlin.test)
+    testImplementation(libs.mockk)
 }
 
 tasks.test {

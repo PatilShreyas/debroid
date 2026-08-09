@@ -132,7 +132,14 @@ echo "🚀 Installing '${BINARY_NAME}' into ${INSTALL_DIR}..."
 mv "$BINARY_NAME" "${INSTALL_DIR}/${BINARY_NAME}"
 
 # ==============================================================================
-# Execution Step 3: Verify PATH and Java Runtime Environment
+# Execution Step 3: Initialize State & AI Skills
+# ==============================================================================
+
+echo "🚀 Initializing Debroid state and extracting AI skills..."
+"${INSTALL_DIR}/${BINARY_NAME}" --help >/dev/null 2>&1 || true
+
+# ==============================================================================
+# Execution Step 4: Verify PATH and Java Runtime Environment
 # ==============================================================================
 
 echo ""
@@ -156,6 +163,7 @@ fi
 
 echo "=============================================================================="
 echo "🎉 Debroid installed successfully!"
-echo "   Location: ${INSTALL_DIR}/${BINARY_NAME}"
-echo "   Test it:  debroid --help (or ${INSTALL_DIR}/${BINARY_NAME} --help)"
+echo "   Binary Location: ${INSTALL_DIR}/${BINARY_NAME}"
+echo "   AI Skills:       ${HOME}/.debroid/skills/debroid-cli/SKILL.md"
+echo "   Test it:         debroid --help (or ${INSTALL_DIR}/${BINARY_NAME} --help)"
 echo "=============================================================================="

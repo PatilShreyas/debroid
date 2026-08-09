@@ -11,6 +11,12 @@ import dev.shreyaspatil.debroid.models.StackFrameInfo
 import dev.shreyaspatil.debroid.models.VariableInfo
 import kotlinx.serialization.Serializable
 
+enum class CliErrorCode {
+    CLI_UPDATED,
+    VERSION_MISMATCH,
+    CLI_ERROR
+}
+
 @Serializable
 @SerialDescription("Error details when a CLI command or debug operation fails")
 data class CliDebugError(
@@ -327,4 +333,11 @@ data class CliUpdateResult(
     val updated: Boolean,
     @SerialDescription("Status message")
     val message: String
+)
+
+@Serializable
+@SerialDescription("Result containing the background daemon's version")
+data class CliVersionResult(
+    @SerialDescription("The CLI version of the running daemon")
+    val version: String
 )

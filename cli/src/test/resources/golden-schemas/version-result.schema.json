@@ -1,0 +1,10 @@
+{
+    "description": "Result containing the background daemon's version",
+    "type": "object",
+    "properties": {
+        "version": {
+            "type": "string",
+            "description": "The CLI version of the running daemon"
+        }
+    }
+}

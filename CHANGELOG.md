@@ -8,9 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [UNRELEASED]
 
 ### Added
+- **State-Based Auto-Update Synchronization:** The CLI now maintains a version cache (`~/.debroid/update-cache.json`) to track its execution state. Upon detecting a binary update, it will automatically extract the bundled `SKILL.md` to `~/.debroid/skills/debroid-cli/SKILL.md` and synchronously alert AI agents to re-read their symlinked instructions by returning a `CLI_UPDATED` JSON error.
+- **Daemon Version Handshake:** The background daemon now supports a `GetVersion` protocol. The CLI pings this before executing commands to detect stale daemons left running after a binary update, returning a `VERSION_MISMATCH` JSON error to instruct agents to safely restart the daemon via `debroid stop`.
 - **Points Command:** Introduce `debroid points` to list all active debug hooks (breakpoints, watchpoints, and exception points) for an ongoing session to maintain agent state awareness (#37, #36).
 
 ### Changed
+- **Removed `debroid skill` Command:** The CLI command to print raw skill instructions to `stdout` has been removed. AI agents are now instructed via `README.md` to symlink their internal skills directly to the auto-extracted file (`~/.debroid/skills/debroid-cli/SKILL.md`), significantly reducing token bloat and maintaining synchronization.
+- **CLI Error Codes Isolation:** Removed CLI-specific error codes (e.g. `VERSION_MISMATCH`, `CLI_UPDATED`) from the core JDI `ErrorCode` definitions, moving them to a dedicated `CliErrorCode` enum within the CLI module to enforce clean architectural boundaries.
 - **Reduced Inspection Noise:** Filter `static` and `synthetic` fields by default during deep object inspection and prevent useless recursion into terminal types. This drastically reduces JSON output size (~30x reduction) to save LLM context tokens (#33, #30).
 - **Documentation:** Clarify `objectId` lifecycle and reuse guarantees in `SKILL.md` so agents know nested IDs can be reused as long as the VM is suspended (#32, #29).
 

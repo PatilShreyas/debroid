@@ -91,4 +91,6 @@ sealed class DaemonRequest {
     @Serializable data class Points(val sessionId: String) : DaemonRequest()
 
     @Serializable data class Step(val sessionId: String, val threadId: String, val action: StepAction) : DaemonRequest()
+
+    @Serializable data object GetVersion : DaemonRequest()
 }
