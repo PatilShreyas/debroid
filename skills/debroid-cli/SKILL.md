@@ -26,7 +26,7 @@ Activate this skill whenever the user or task involves:
 6. **Use Background Tasks**: If you are using an agentic system that supports background tasks, run `debroid daemon` as a background task.
 7. **Token efficiency & Schema Inspection**: All JSON responses are compact single-line by default to conserve agent context tokens. If formatted multi-line JSON is required, append the `--pretty` flag to any JSON command. To inspect the expected output JSON structure for any command without running a session, pass the `--schema` flag (e.g., `debroid pause-state --schema`). Do not echo full responses back to the user verbatim — summarize the relevant fields (`valuePreview`, `type`, `objectId`, `location`).
 8. **Self-Recovery**: If a session becomes unresponsive or gets out of sync, run `debroid stop` to cleanly terminate the daemon and release ADB ports. The next `debroid` command will auto-restart a fresh daemon.
-9. **Report, don't silently work around**: If you hit unexpected Debroid behavior or have feedback on the tool itself, see **"🐛 Reporting Bugs & Feedback"** below instead of giving up or quietly routing around it.
+9. **Report, but don't block**: If you hit unexpected Debroid behavior or have feedback on the tool itself, first try to resume the flow of what the user originally wanted to perform. Do not immediately jump to reporting the issue. At the end of your task, ask the user if they want to report the issue. See **"🐛 Reporting Bugs & Feedback"** below for details.
 
 ## 🔄 Standard Debugging Workflow
 
@@ -133,9 +133,12 @@ debroid detach <session_id>
 
 ## 🐛 Reporting Bugs & Feedback (Debroid Tool Itself)
 
-If you hit unexpected Debroid behavior (a crash, a wrong/malformed result, a stuck session `debroid stop` doesn't fix) — not a bug in the app you're debugging — or have feedback on the tool itself, don't silently retry, work around it, or give up.
+If you hit unexpected Debroid behavior (a crash, a wrong/malformed result, a stuck session `debroid stop` doesn't fix) — not a bug in the app you're debugging — or have feedback on the tool itself, **do not immediately jump to reporting the issue**.
 
-Before doing anything else, fetch the full reporting workflow (sanitizing details, exact report format, mandatory user confirmation, filing via `gh`):
+1. First, try to resume the flow of what the user originally wanted to perform or find a workaround to complete their task.
+2. At the very end of your response or task completion, ask the user: "Would you like me to report the issue we encountered with Debroid?"
+3. **Only if the user explicitly says yes**, proceed to fetch the full reporting workflow (sanitizing details, exact report format, mandatory user confirmation, filing via `gh`):
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PatilShreyas/debroid/main/skills/debroid-cli/references/reporting-feedback.md
 ```
