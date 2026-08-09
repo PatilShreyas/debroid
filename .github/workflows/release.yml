@@ -19,15 +19,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Read version
         id: get_version
         run: |
@@ -43,17 +34,14 @@ jobs:
           fi
           echo "$CHANGELOG_CONTENT" > release_notes.md
 
-      - name: Create and push git tag
-        run: |
-          TAG="v${{ env.VERSION }}"
-          if git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
-            echo "Tag $TAG already exists on remote."
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "$TAG" -m "Release $TAG"
-            git push origin "$TAG"
-          fi
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Build CLI Fat Jar
         run: ./gradlew :cli:jar
@@ -67,6 +55,18 @@ jobs:
           rm stub.sh
           sha256sum debroid.jar > debroid.jar.sha256
           sha256sum debroid > debroid.sha256
+
+      - name: Create and push git tag
+        run: |
+          TAG="v${{ env.VERSION }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
+            echo "Tag $TAG already exists on remote."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
 
       - name: Create GitHub Release
         env:
