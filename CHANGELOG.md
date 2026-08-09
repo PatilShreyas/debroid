@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [UNRELEASED]
 
 ### Added
+
+### Fixed
+
+### Changed
+
+## [v0.1.0] - 2026-08-09
+
+### Added
 - **State-Based Auto-Update Synchronization:** The CLI now maintains a version cache (`~/.debroid/update-cache.json`) to track its execution state. Upon detecting a binary update, it will automatically extract the bundled `SKILL.md` to `~/.debroid/skills/debroid-cli/SKILL.md` and synchronously alert AI agents to re-read their symlinked instructions by returning a `CLI_UPDATED` JSON error.
 - **Daemon Version Handshake:** The background daemon now supports a `GetVersion` protocol. The CLI pings this before executing commands to detect stale daemons left running after a binary update, returning a `VERSION_MISMATCH` JSON error to instruct agents to safely restart the daemon via `debroid stop`.
 - **Points Command:** Introduce `debroid points` to list all active debug hooks (breakpoints, watchpoints, and exception points) for an ongoing session to maintain agent state awareness (#37, #36).
