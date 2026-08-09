@@ -24,6 +24,12 @@ if [[ "$VERSION" == v* ]]; then
   VERSION="${VERSION:1}"
 fi
 
+# Idempotency check: if the version is already in the changelog, exit early.
+if grep -q "^## \[v$VERSION\]" "$CHANGELOG_FILE"; then
+  echo "Version v$VERSION is already in the changelog."
+  exit 0
+fi
+
 # The new content to insert
 NEW_SECTION="## [UNRELEASED]\n\n### Added\n\n### Fixed\n\n### Changed\n\n"
 RELEASE_SECTION="## [v$VERSION] - $DATE"
