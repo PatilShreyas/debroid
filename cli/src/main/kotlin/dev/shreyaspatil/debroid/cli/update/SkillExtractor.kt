@@ -34,6 +34,8 @@ class SkillExtractor(
             inputStream.use { input ->
                 Files.copy(input, targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
+        } else {
+            System.err.println("Warning: Embedded resource $resourcePath was not found in JAR.")
         }
     }
 }

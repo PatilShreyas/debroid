@@ -54,9 +54,17 @@ class UpdateCache(private val cacheFile: File = defaultCacheFile()) {
 
     private fun writeCacheData(data: CacheData) {
         try {
-            val parent = cacheFile.parentFile
-            if (parent != null && !parent.exists()) parent.mkdirs()
-            cacheFile.writeText(json.encodeToString(data))
+            val parent = cacheFile.parentFile ?: return
+            if (!parent.exists()) parent.mkdirs()
+
+            val tempFile = File(parent, "${cacheFile.name}.tmp")
+            tempFile.writeText(json.encodeToString(data))
+            java.nio.file.Files.move(
+                tempFile.toPath(),
+                cacheFile.toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING
+            )
         } catch (_: Throwable) {
             // Ignore write failures
         }
