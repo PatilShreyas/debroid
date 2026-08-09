@@ -116,7 +116,13 @@ mkdir -p ~/.config/opencode/skills/debroid && ln -s ~/.debroid/skills/debroid-cl
 ```
 </details>
 
-> **Note on `debroid skill` removal:** Older versions of this tool provided a `debroid skill` command that printed instructions to standard output. This has been removed to prevent LLM context bloat. The installation script now automatically extracts the `SKILL.md` file to your disk during setup, so you only need to symlink it once!
+<details>
+<summary><b>💻 Codex</b></summary>
+
+```bash
+mkdir -p ~/.codex/skills/debroid && ln -s ~/.debroid/skills/debroid-cli/SKILL.md ~/.codex/skills/debroid/SKILL.md
+```
+</details>
 
 ## 🔌 How it Works
 
