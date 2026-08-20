@@ -163,7 +163,7 @@ object DaemonServer {
                 }
                 is DaemonRequest.Threads -> {
                     val session = sessionManager.getSession(request.sessionId)
-                    serializer.encodeToString(session.listThreads())
+                    serializer.encodeToString(session.listThreads().map { it.toCli() })
                 }
                 is DaemonRequest.Locals -> {
                     val session = sessionManager.getSession(request.sessionId)

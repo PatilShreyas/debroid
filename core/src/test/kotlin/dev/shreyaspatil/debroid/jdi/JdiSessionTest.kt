@@ -15,6 +15,7 @@ import com.sun.jdi.StringReference
 import com.sun.jdi.ThreadReference
 import com.sun.jdi.VMDisconnectedException
 import com.sun.jdi.VirtualMachine
+import com.sun.jdi.event.EventQueue
 import com.sun.jdi.request.AccessWatchpointRequest
 import com.sun.jdi.request.BreakpointRequest
 import com.sun.jdi.request.ClassPrepareRequest
@@ -30,6 +31,8 @@ import dev.shreyaspatil.debroid.models.ErrorCode
 import dev.shreyaspatil.debroid.models.EventType
 import dev.shreyaspatil.debroid.models.StackFrameInfo
 import dev.shreyaspatil.debroid.models.StepAction
+import dev.shreyaspatil.debroid.models.ThreadInfo
+import dev.shreyaspatil.debroid.models.ThreadStatus
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -60,6 +63,16 @@ class JdiSessionTest {
         adbManager = mockk(relaxed = true)
         vm = mockk(relaxed = true)
         erm = mockk(relaxed = true)
+        val eventQueue = mockk<EventQueue>(relaxed = true)
+        every { vm.eventQueue() } returns eventQueue
+        every { eventQueue.remove(any()) } answers {
+            try {
+                Thread.sleep(1000)
+            } catch (_: InterruptedException) {
+                // Thread interrupted on detach
+            }
+            null
+        }
         every { vm.eventRequestManager() } returns erm
         session = JdiSession(
             sessionId = "sess_1",
@@ -720,14 +733,65 @@ class JdiSessionTest {
         every { thread1.status() } returns ThreadReference.THREAD_STATUS_RUNNING
         every { thread1.isSuspended } returns false
 
-        every { vm.allThreads() } returns listOf(thread1)
+        val thread2 = mockk<ThreadReference>(relaxed = true)
+        every { thread2.uniqueID() } returns 2L
+        every { thread2.name() } returns "worker"
+        every { thread2.status() } returns ThreadReference.THREAD_STATUS_WAIT
+        every { thread2.isSuspended } returns true
+
+        every { vm.allThreads() } returns listOf(thread1, thread2)
 
         val threads = session.listThreads()
-        assertEquals(1, threads.size)
-        assertEquals("1", threads[0]["thread_id"])
-        assertEquals("main", threads[0]["thread_name"])
-        assertEquals(ThreadReference.THREAD_STATUS_RUNNING.toString(), threads[0]["status"])
-        assertEquals("false", threads[0]["is_suspended"])
+        assertEquals(2, threads.size)
+        assertEquals(
+            ThreadInfo(
+                threadId = "1",
+                threadName = "main",
+                status = ThreadStatus.RUNNING,
+                isSuspended = false
+            ),
+            threads[0]
+        )
+        assertEquals(
+            ThreadInfo(
+                threadId = "2",
+                threadName = "worker",
+                status = ThreadStatus.WAIT,
+                isSuspended = true
+            ),
+            threads[1]
+        )
+    }
+
+    @Test
+    fun `listThreads maps all thread status codes correctly`() {
+        val statuses = listOf(
+            ThreadReference.THREAD_STATUS_RUNNING to ThreadStatus.RUNNING,
+            ThreadReference.THREAD_STATUS_SLEEPING to ThreadStatus.SLEEPING,
+            ThreadReference.THREAD_STATUS_WAIT to ThreadStatus.WAIT,
+            ThreadReference.THREAD_STATUS_MONITOR to ThreadStatus.MONITOR,
+            ThreadReference.THREAD_STATUS_NOT_STARTED to ThreadStatus.NOT_STARTED,
+            ThreadReference.THREAD_STATUS_ZOMBIE to ThreadStatus.ZOMBIE,
+            ThreadReference.THREAD_STATUS_UNKNOWN to ThreadStatus.UNKNOWN,
+            999 to ThreadStatus.UNKNOWN
+        )
+
+        val mockThreads = statuses.mapIndexed { index, (statusCode, _) ->
+            val t = mockk<ThreadReference>(relaxed = true)
+            every { t.uniqueID() } returns (index + 1).toLong()
+            every { t.name() } returns "thread-$index"
+            every { t.status() } returns statusCode
+            every { t.isSuspended } returns false
+            t
+        }
+
+        every { vm.allThreads() } returns mockThreads
+
+        val threads = session.listThreads()
+        assertEquals(statuses.size, threads.size)
+        statuses.forEachIndexed { index, (_, expectedStatus) ->
+            assertEquals(expectedStatus, threads[index].status)
+        }
     }
 
     @Test

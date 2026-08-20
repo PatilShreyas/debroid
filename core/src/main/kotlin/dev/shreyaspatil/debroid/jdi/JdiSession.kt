@@ -42,6 +42,8 @@ import dev.shreyaspatil.debroid.models.PointsResult
 import dev.shreyaspatil.debroid.models.SessionStatus
 import dev.shreyaspatil.debroid.models.StackFrameInfo
 import dev.shreyaspatil.debroid.models.StepAction
+import dev.shreyaspatil.debroid.models.ThreadInfo
+import dev.shreyaspatil.debroid.models.ThreadStatus
 import dev.shreyaspatil.debroid.models.VariableInfo
 import dev.shreyaspatil.debroid.models.VariableScope
 import dev.shreyaspatil.debroid.models.WatchpointInfo
@@ -493,15 +495,26 @@ class JdiSession(
 
     // --- Execution Control ---
 
-    fun listThreads(): List<Map<String, String>> {
+    fun listThreads(): List<ThreadInfo> {
         return vm.allThreads().map { thread ->
-            mapOf(
-                "thread_id" to thread.uniqueID().toString(),
-                "thread_name" to thread.name(),
-                "status" to thread.status().toString(),
-                "is_suspended" to thread.isSuspended.toString()
+            ThreadInfo(
+                threadId = thread.uniqueID().toString(),
+                threadName = thread.name(),
+                status = mapThreadStatus(thread.status()),
+                isSuspended = thread.isSuspended
             )
         }
+    }
+
+    private fun mapThreadStatus(status: Int): ThreadStatus = when (status) {
+        ThreadReference.THREAD_STATUS_RUNNING -> ThreadStatus.RUNNING
+        ThreadReference.THREAD_STATUS_SLEEPING -> ThreadStatus.SLEEPING
+        ThreadReference.THREAD_STATUS_WAIT -> ThreadStatus.WAIT
+        ThreadReference.THREAD_STATUS_MONITOR -> ThreadStatus.MONITOR
+        ThreadReference.THREAD_STATUS_NOT_STARTED -> ThreadStatus.NOT_STARTED
+        ThreadReference.THREAD_STATUS_ZOMBIE -> ThreadStatus.ZOMBIE
+        ThreadReference.THREAD_STATUS_UNKNOWN -> ThreadStatus.UNKNOWN
+        else -> ThreadStatus.UNKNOWN
     }
 
     fun stepExecution(threadId: String, action: StepAction) {

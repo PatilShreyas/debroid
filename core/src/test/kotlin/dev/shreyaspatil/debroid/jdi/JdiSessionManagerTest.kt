@@ -1,5 +1,8 @@
 package dev.shreyaspatil.debroid.jdi
 
+import com.sun.jdi.VMDisconnectedException
+import com.sun.jdi.VirtualMachine
+import com.sun.jdi.event.EventQueue
 import dev.shreyaspatil.debroid.adb.AdbManager
 import dev.shreyaspatil.debroid.adb.DebugException
 import io.mockk.every
@@ -25,11 +28,24 @@ class JdiSessionManagerTest {
     fun setup() {
         adbManager = mockk(relaxed = true)
         jdiConnector = mockk(relaxed = true)
+        val mockVm = mockk<VirtualMachine>(relaxed = true)
+        val mockEventQueue = mockk<EventQueue>(relaxed = true)
+        every { mockVm.eventQueue() } returns mockEventQueue
+        every { mockEventQueue.remove(any()) } answers {
+            try {
+                Thread.sleep(1000)
+            } catch (_: InterruptedException) {
+                // Thread interrupted on detach
+            }
+            null
+        }
+        every { jdiConnector.attach(any(), any()) } returns mockVm
         sessionManager = JdiSessionManager(adbManager, jdiConnector)
     }
 
     @AfterEach
     fun teardown() {
+        sessionManager.detachAllSessions()
         unmockkAll()
     }
 

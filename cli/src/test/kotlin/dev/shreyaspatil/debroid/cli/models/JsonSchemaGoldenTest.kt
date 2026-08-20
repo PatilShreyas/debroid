@@ -92,6 +92,11 @@ class JsonSchemaGoldenTest {
         assertGoldenSchema("version-result.schema.json", CliVersionResult.serializer())
     }
 
+    @Test
+    fun `verify golden schema for CliThreadInfo list`() {
+        assertGoldenSchema("thread-info-list.schema.json", ListSerializer(CliThreadInfo.serializer()))
+    }
+
     private fun assertGoldenSchema(goldenFileName: String, serializer: KSerializer<*>) {
         val generatedElement = JsonSchemaGenerator.generate(serializer.descriptor)
         val generatedJsonStr = prettyJson.encodeToString(JsonElement.serializer(), generatedElement)

@@ -1,0 +1,25 @@
+{
+    "type": "array",
+    "items": {
+        "description": "Information about a thread in the target application",
+        "type": "object",
+        "properties": {
+            "threadId": {
+                "type": "string",
+                "description": "Unique thread ID"
+            },
+            "threadName": {
+                "type": "string",
+                "description": "Name of the thread"
+            },
+            "status": {
+                "type": "string",
+                "description": "Thread execution status (RUNNING, SLEEPING, WAIT, MONITOR, ZOMBIE, NOT_STARTED, UNKNOWN)"
+            },
+            "isSuspended": {
+                "type": "boolean",
+                "description": "Whether the thread is currently suspended"
+            }
+        }
+    }
+}
