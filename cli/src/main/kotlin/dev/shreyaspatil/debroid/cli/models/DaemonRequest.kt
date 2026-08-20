@@ -11,9 +11,9 @@ data class DaemonIpcRequest(
 
 @Serializable
 sealed class DaemonRequest {
-    @Serializable data class Launch(val appId: String) : DaemonRequest()
+    @Serializable data class Launch(val appId: String, val suspend: Boolean = true) : DaemonRequest()
 
-    @Serializable data class Attach(val appId: String) : DaemonRequest()
+    @Serializable data class Attach(val appId: String, val suspend: Boolean = false) : DaemonRequest()
 
     @Serializable data class Detach(val sessionId: String) : DaemonRequest()
 

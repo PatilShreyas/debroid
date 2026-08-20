@@ -16,7 +16,7 @@ open class JdiSessionManager(
     private val sessions = ConcurrentHashMap<String, JdiSession>()
     private val sessionCounter = AtomicInteger(100)
 
-    fun launchAndAttach(appId: String): JdiSession {
+    fun launchAndAttach(appId: String, suspend: Boolean = true): JdiSession {
         sweepDeadSessions()
         // 1. Check debuggability
         val debuggableRes = adbManager.isAppDebuggable(appId)
@@ -35,10 +35,10 @@ open class JdiSessionManager(
         val pid = pidRes.getOrThrow()
 
         // 3. Attach JDI
-        return attachToPid(appId, pid, clearDebugAppOnDetach = true)
+        return attachToPid(appId, pid, clearDebugAppOnDetach = true, initialSuspend = suspend)
     }
 
-    fun attachToRunningApp(appId: String): JdiSession {
+    fun attachToRunningApp(appId: String, suspend: Boolean = false): JdiSession {
         sweepDeadSessions()
         // 1. Check debuggability
         val debuggableRes = adbManager.isAppDebuggable(appId)
@@ -53,10 +53,15 @@ open class JdiSessionManager(
         val pid = adbManager.findPid(appId).getOrThrow()
 
         // 3. Attach JDI
-        return attachToPid(appId, pid, clearDebugAppOnDetach = false)
+        return attachToPid(appId, pid, clearDebugAppOnDetach = false, initialSuspend = suspend)
     }
 
-    private fun attachToPid(appId: String, pid: Int, clearDebugAppOnDetach: Boolean): JdiSession {
+    private fun attachToPid(
+        appId: String,
+        pid: Int,
+        clearDebugAppOnDetach: Boolean,
+        initialSuspend: Boolean = false
+    ): JdiSession {
         // Ensure only one active debug session per app: detach any existing
         val existingSessionIds = sessions.values.filter { it.appId == appId }.map { it.sessionId }
         for (id in existingSessionIds) {
@@ -89,6 +94,18 @@ open class JdiSessionManager(
                 ErrorCode.ADB_ERROR,
                 "Failed to attach JDI to localhost:$port for $appId (pid $pid): ${lastException?.message}"
             )
+        }
+
+        if (initialSuspend) {
+            try {
+                vm.suspend()
+            } catch (e: Exception) {
+                adbManager.removePortForward(port)
+                throw DebugException(
+                    ErrorCode.INTERNAL_ERROR,
+                    "Failed to suspend VM for $appId: ${e.message}"
+                )
+            }
         }
 
         val session =

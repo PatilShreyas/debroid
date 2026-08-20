@@ -8,10 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [UNRELEASED]
 
 ### Added
+- **VM Suspend Controls for Launch and Attach:** Added `--no-suspend` option to `debroid launch` and `--suspend` flag to `debroid attach` allowing explicit control over whether the VM should be suspended immediately upon connection (#43).
 
 ### Fixed
-
-### Changed
+- **App Startup Breakpoint Catching:** Fixed an issue where `debroid launch` returned before the VM was actually suspended (`suspendedThreadsCount: 0`), causing Android to finish startup execution before breakpoints could be set. The VM is now suspended immediately upon connection by default (#43).
 
 ## [v0.1.0] - 2026-08-09
 
