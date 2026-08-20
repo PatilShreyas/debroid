@@ -6,10 +6,6 @@ Issues tracked across the `debroid` codebase, verified against the current state
 
 ## 🔴 High-impact (Won't crash release, but will degrade AI-agent reliability or contract adherence)
 
-### H1. Daemon output is discarded — agents can't debug failures
-`CliRunner.ensureDaemonAndSend` (`CliRunner.kt:105-106`) configures `redirectError(DISCARD)` and `redirectOutput(DISCARD)` on the auto-spawned daemon process. If daemon startup fails (port in use, missing JDK flags, JDI initialization error), agents receive only a generic `"Failed to start background daemon"` with zero diagnostic detail.
-**Fix:** Redirect output/stderr to `~/.debroid/daemon.log` (rotating per startup) and include trailing log lines in `CliDebugError` on startup failure.
-
 ### H3. CLI tests incomplete — daemon/serialization still partially unverified
 `cli` has tests for `JsonSchemaGeneratorTest`, `JsonSchemaGoldenTest`, and the `update` package. However, critical gaps remain:
 - No polymorphic round-trip test verifies all `DaemonRequest` subtypes across JSON serialization.
@@ -29,14 +25,6 @@ An agent parsing CLI standard output with `json.loads` will fail on these paths.
 The daemon listens on `127.0.0.1:9876` (`DaemonServer.kt:54`) over an unauthenticated TCP socket. It exposes `eval`, variable inspection, and thread manipulation to any local process running on the host machine.
 **Fix:** Migrate to a Unix Domain Socket at `$XDG_RUNTIME_DIR/debroid.sock` with `0600` permissions and local session token validation.
 
-### H13. `findPid` ps fallback is loose
-In `AdbManager.kt:118`, `psOutput.lines().firstOrNull { it.contains(appId) }` matches processes containing `appId` as a substring (e.g. `com.foo` will match `com.foo.service` or `com.foosync` if it appears earlier in `ps -A`).
-**Fix:** Match exact process name on the process command column of `ps -A`.
-
-### H15. `formatValue` marks `StringReference` as `isPrimitive = true`
-In `JdiSession.kt:905-911`, `StringReference` is populated with `isPrimitive = true` despite also assigning an `objectId`. Strings are heap references in the JVM. Marking them as primitives causes contradictory schema semantics and misguides agents deciding whether to inspect object references. (Also reflected in `CliModels.kt:211`).
-**Fix:** Set `isPrimitive = false` for `StringReference`.
-
 ### H16. Event buffering has no "stale cursor" signal
 When `cursor < eventQueueOffset` (the requested cursor has aged out of the 1000-slot buffer), `JdiSession.pollEvents` (`JdiSession.kt:1017`) silently clamps start index to 0 and replays surviving events. The agent has no signal that it missed intermediate events.
 **Fix:** Add `droppedEventsSinceLastPoll: Long` to `EventPollResult`.
@@ -44,26 +32,6 @@ When `cursor < eventQueueOffset` (the requested cursor has aged out of the 1000-
 ### H20. `SemanticVersion.parse` rejects pre-release tags
 `SemanticVersion.kt:26` uses `stableVersionRegex = Regex("""^v?(\d+)\.(\d+)\.(\d+)$""")`. While `version.txt` was updated to stable `0.1.0`, any pre-release release tag (e.g., `0.2.0-rc01`) causes `SemanticVersion.parse` to return `null`, breaking `checkOrUpdate`.
 **Fix:** Support SemVer 2.0 pre-release identifiers in `SemanticVersion.kt`.
-
-### H21. Dead-code `DebroidCommand` — `--port` option is non-functional
-`DebroidCommand` (`CliRunner.kt:189-201`) contains `--port`/`-p` options but is never registered in `createCli()`. `createCli()` instantiates `DebroidCli()` (`CliRunner.kt:545-551`) which lacks `--port`.
-**Fix:** Consolidate `DebroidCommand` into `DebroidCli` so `--port` is functional on the root CLI.
-
-### H22. `ThreadsCommand` `--schema` prints wrong type; thread output bypasses CLI models
-`ThreadsCommand` (`CliRunner.kt:389-398`) declares `serializer = ListSerializer(CliStatusResult.serializer())`, but `DaemonServer` (`DaemonServer.kt:166`) encodes `session.listThreads()` which returns `List<Map<String, String>>`.
-- `debroid threads --schema` outputs `{status: string}` instead of thread attributes.
-- No `CliThreadInfo` model exists in `CliModels.kt`.
-- `thread.status().toString()` returns raw integer strings (`"1"`) instead of human-readable states (`RUNNING`, `SLEEPING`, etc.).
-- No golden schema test guards thread output.
-**Fix:** Create `@Serializable data class CliThreadInfo(...)` in `CliModels.kt`, map status integers to enum strings in `listThreads()`, update `ThreadsCommand.serializer`, and add a golden schema test.
-
-### H23. No daemon JVM shutdown hook — ADB port forwards leak on SIGTERM
-`DaemonServer.startDaemon` (`DaemonServer.kt:47-67`) lacks a `Runtime.getRuntime().addShutdownHook`. If the daemon is terminated via SIGTERM, Ctrl+C, or process kill, JDI sessions and ADB port forwards (`adb forward tcp:...`) leak indefinitely on the host.
-**Fix:** Register a JVM shutdown hook in `DaemonServer.startDaemon` that calls `sessionManager.detachAllSessions()`.
-
-### H24. `DefaultCommandRunner.runCommand` can hang indefinitely on `readText()`
-In `AdbManager.kt:19-20`, `process.inputStream.bufferedReader().readText()` runs synchronously before `process.waitFor(timeout)`. If an `adb` command hangs without closing its stream, the CLI process hangs indefinitely.
-**Fix:** Consume process streams asynchronously or bound stream reading by timeout.
 
 ---
 
@@ -117,9 +85,6 @@ Add a CI verification check ensuring `DaemonRequest` commands match the tools an
 ### M17. Explicit task dependency for `generateVersionInfo`
 Ensure `compileKotlin.dependsOn(generateVersionInfo)` is explicitly registered in `cli/build.gradle.kts`.
 
-### M18. String return values in `evaluateExpression` marked as primitive
-Synthesized string evaluation results in `evaluateExpression` inherit `formatValue`'s `isPrimitive = true` (same root cause as H15).
-
 ### M19. Clikt built-in version option outputs plain text
 `versionOption(VERSION)` prints plain text string `debroid 0.1.0`. Wrap or document for AI agent consumers.
 
@@ -141,9 +106,6 @@ Synthesized string evaluation results in `evaluateExpression` inherit `formatVal
 ### M25. `BinaryUpdater.downloadAndReplaceBinary` creates temp file in `/tmp`
 `BinaryUpdater.kt:51` creates temporary files via `File.createTempFile` in the system temp directory. `File.renameTo` across filesystem boundaries is not atomic and will fail if `/tmp` is a separate mount from `~/.local/bin`. Create temp files in `targetBinary.parentFile`.
 
-### M26. `CliRunner.execute` exits with code 1 for `--help` and `--schema`
-`CliRunner.kt:636` calls `exitProcess(1)` unconditionally for all `CliktError` exceptions, including `PrintHelpMessage` and `PrintMessage` (`--schema`, `--help`). They should exit with code 0.
-
 ### M27. `DaemonRequest.Shutdown.force` field is unused
 `DaemonRequest.Shutdown` (`DaemonRequest.kt:20`) defines `force: Boolean = false`, but `DaemonServer.kt:106-114` ignores it.
 
@@ -152,9 +114,6 @@ Synthesized string evaluation results in `evaluateExpression` inherit `formatVal
 
 ### M29. `setWatchpoint` and `setExceptionBreakpoint` only bind to first `ReferenceType`
 `JdiSession.kt:278, 324` only binds to `refTypes.first()`. If classes are loaded across multiple ClassLoaders, only the first instance receives debug requests. Bind across all matching `ReferenceType` instances.
-
-### M30. `listThreads` returns raw integer status codes
-`JdiSession.kt:501` returns `thread.status().toString()` (e.g. `"1"` for running). Map to human-readable strings (`RUNNING`, `SLEEPING`, `MONITOR`, `WAIT`, `NOT_STARTED`, `ZOMBIE`, `UNKNOWN`).
 
 ### M32. `extractFrames` calls `thread.frames()` unguarded
 `JdiSession.kt:732` calls `thread.frames()` without catching `IncompatibleThreadStateException`. If the thread resumes concurrently, it escapes as an untyped internal error.
@@ -214,15 +173,3 @@ Synthesized string evaluation results in `evaluateExpression` inherit `formatVal
 - **L8.** `CHANGELOG.md` created in root directory following Keep-a-Changelog conventions.
 - **#43.** App startup breakpoint catching: `launch` suspends by default with `--no-suspend` option, and `attach` supports `--suspend`.
 
----
-
-## 📋 Recommended Pre-Release Priority Order
-
-1. **H22 + M30 (`ThreadsCommand` schema & typed output):** Fix `CliThreadInfo` schema mismatch, map status strings, and add golden schema test.
-2. **H24 (`DefaultCommandRunner` deadlock risk):** Prevent unbounded `readText()` before `waitFor`.
-3. **H23 (Daemon JVM shutdown hook):** Prevent orphaned ADB port forwards on daemon process termination.
-4. **H1 (Daemon startup log diagnostics):** Redirect stderr/stdout to `~/.debroid/daemon.log` and return diagnostics on failure.
-5. **H15 / M18 (`StringReference` `isPrimitive = false`):** Correct String classification in JDI formatter and CLI schema.
-6. **H13 (`findPid` exact match):** Prevent false-positive substring matching in `ps -A`.
-7. **M26 (Exit code 0 on `--help`, `--schema`, `--version`):** Fix process exit code for informational commands.
-8. **H21 (Wire `--port` and clean up `DebroidCommand`):** Unify CLI root command options.
