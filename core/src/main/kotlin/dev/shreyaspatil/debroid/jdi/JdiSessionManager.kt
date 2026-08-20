@@ -90,6 +90,9 @@ open class JdiSessionManager(
 
         if (vm == null) {
             adbManager.removePortForward(port)
+            if (clearDebugAppOnDetach) {
+                runCatching { adbManager.clearDebugApp() }
+            }
             throw DebugException(
                 ErrorCode.ADB_ERROR,
                 "Failed to attach JDI to localhost:$port for $appId (pid $pid): ${lastException?.message}"
@@ -100,7 +103,11 @@ open class JdiSessionManager(
             try {
                 vm.suspend()
             } catch (e: Exception) {
+                runCatching { vm.dispose() }
                 adbManager.removePortForward(port)
+                if (clearDebugAppOnDetach) {
+                    runCatching { adbManager.clearDebugApp() }
+                }
                 throw DebugException(
                     ErrorCode.INTERNAL_ERROR,
                     "Failed to suspend VM for $appId: ${e.message}"
