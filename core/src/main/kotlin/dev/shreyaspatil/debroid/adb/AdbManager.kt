@@ -3,37 +3,6 @@ package dev.shreyaspatil.debroid.adb
 import dev.shreyaspatil.debroid.models.DebugError
 import dev.shreyaspatil.debroid.models.ErrorCode
 import java.io.File
-import java.util.concurrent.TimeUnit
-
-interface CommandRunner {
-    fun runCommand(command: List<String>, timeoutSeconds: Long = 10): Result<String>
-}
-
-class DefaultCommandRunner : CommandRunner {
-    override fun runCommand(command: List<String>, timeoutSeconds: Long): Result<String> {
-        return try {
-            val process = ProcessBuilder(command)
-                .redirectErrorStream(true)
-                .start()
-
-            val output = process.inputStream.bufferedReader().readText()
-            val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-
-            if (!completed) {
-                process.destroyForcibly()
-                Result.failure(
-                    Exception("Command timed out after $timeoutSeconds seconds: ${command.joinToString(" ")}")
-                )
-            } else if (process.exitValue() != 0) {
-                Result.failure(Exception("Command exited with code ${process.exitValue()}: $output"))
-            } else {
-                Result.success(output.trim())
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-}
 
 class AdbManager(
     private val adbPath: String = findAdbExecutable(),
