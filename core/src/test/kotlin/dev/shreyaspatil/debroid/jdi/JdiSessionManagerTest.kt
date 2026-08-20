@@ -71,7 +71,7 @@ class JdiSessionManagerTest {
     }
 
     @Test
-    fun `launchAndAttach successfully attaches`() {
+    fun `launchAndAttach successfully attaches and suspends VM by default`() {
         val vm = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
         every { jdiConnector.attach(any(), any()) } returns vm
 
@@ -83,10 +83,98 @@ class JdiSessionManagerTest {
         assertNotNull(session)
         assertEquals("com.test.app", session.appId)
 
+        // Verify VM is suspended by default
+        verify(exactly = 1) { vm.suspend() }
+
         // Test getSession
         every { vm.process() } returns mockk(relaxed = true)
         val retrieved = sessionManager.getSession(session.sessionId)
         assertEquals(session, retrieved)
+    }
+
+    @Test
+    fun `launchAndAttach with suspend false does not suspend VM`() {
+        val vm = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm
+
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.launchAppSuspended(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        val session = sessionManager.launchAndAttach("com.test.app", suspend = false)
+        assertNotNull(session)
+        verify(exactly = 0) { vm.suspend() }
+    }
+
+    @Test
+    fun `attachToRunningApp with suspend true suspends VM`() {
+        val vm = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm
+
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.findPid(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        val session = sessionManager.attachToRunningApp("com.test.app", suspend = true)
+        assertNotNull(session)
+        verify(exactly = 1) { vm.suspend() }
+    }
+
+    @Test
+    fun `launchAndAttach cleans up port forward, disposes vm, and clears debug app if vm suspend fails`() {
+        val vm = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm
+        every { vm.suspend() } throws com.sun.jdi.InternalException("Suspend failed")
+
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.launchAppSuspended(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        val exception = assertThrows<DebugException> {
+            sessionManager.launchAndAttach("com.test.app")
+        }
+
+        assertEquals("INTERNAL_ERROR", exception.code.name)
+        verify { vm.dispose() }
+        verify { adbManager.removePortForward(any()) }
+        verify { adbManager.clearDebugApp() }
+    }
+
+    @Test
+    fun `attachToRunningApp cleans up port forward and disposes vm but does not clear debug app if vm suspend fails`() {
+        val vm = mockk<com.sun.jdi.VirtualMachine>(relaxed = true)
+        every { jdiConnector.attach(any(), any()) } returns vm
+        every { vm.suspend() } throws com.sun.jdi.InternalException("Suspend failed")
+
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.findPid(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        val exception = assertThrows<DebugException> {
+            sessionManager.attachToRunningApp("com.test.app", suspend = true)
+        }
+
+        assertEquals("INTERNAL_ERROR", exception.code.name)
+        verify { vm.dispose() }
+        verify { adbManager.removePortForward(any()) }
+        verify(exactly = 0) { adbManager.clearDebugApp() }
+    }
+
+    @Test
+    fun `launchAndAttach cleans up port forward and clears debug app if attach fails`() {
+        every { jdiConnector.attach(any(), any()) } throws RuntimeException("Attach failed")
+
+        every { adbManager.isAppDebuggable(any()) } returns Result.success(true)
+        every { adbManager.launchAppSuspended(any()) } returns Result.success(1234)
+        every { adbManager.forwardJdwpPort(any(), any()) } returns Result.success(Unit)
+
+        val exception = assertThrows<DebugException> {
+            sessionManager.launchAndAttach("com.test.app")
+        }
+
+        assertEquals("ADB_ERROR", exception.code.name)
+        verify { adbManager.removePortForward(any()) }
+        verify { adbManager.clearDebugApp() }
     }
 
     @Test

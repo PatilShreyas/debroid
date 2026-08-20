@@ -96,11 +96,11 @@ object DaemonServer {
         return try {
             when (request) {
                 is DaemonRequest.Launch -> {
-                    val session = sessionManager.launchAndAttach(request.appId)
+                    val session = sessionManager.launchAndAttach(request.appId, request.suspend)
                     serializer.encodeToString(session.getStatus().toCli())
                 }
                 is DaemonRequest.Attach -> {
-                    val session = sessionManager.attachToRunningApp(request.appId)
+                    val session = sessionManager.attachToRunningApp(request.appId, request.suspend)
                     serializer.encodeToString(session.getStatus().toCli())
                 }
                 is DaemonRequest.Detach -> {

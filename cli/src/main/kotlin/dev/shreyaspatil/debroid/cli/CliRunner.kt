@@ -234,7 +234,12 @@ object CliRunner {
         serializer = CliSessionStatus.serializer()
     ) {
         private val appId by argument("app_id", help = "The Android Application ID (e.g., com.example.app) to launch.")
-        override fun run() = ensureDaemonAndSend(DaemonRequest.Launch(appId))
+        private val suspend by option(
+            "--suspend",
+            help = "Suspend all threads immediately upon launch (default: true). Use --no-suspend to disable."
+        ).flag("--no-suspend", default = true)
+
+        override fun run() = ensureDaemonAndSend(DaemonRequest.Launch(appId = appId, suspend = suspend))
     }
 
     class AttachCommand : BaseJsonCommand(
@@ -243,7 +248,12 @@ object CliRunner {
         serializer = CliSessionStatus.serializer()
     ) {
         private val appId by argument("app_id", help = "The Android Application ID of the running app.")
-        override fun run() = ensureDaemonAndSend(DaemonRequest.Attach(appId))
+        private val suspend by option(
+            "--suspend",
+            help = "Suspend all threads immediately upon attaching (default: false)."
+        ).flag(default = false)
+
+        override fun run() = ensureDaemonAndSend(DaemonRequest.Attach(appId = appId, suspend = suspend))
     }
 
     class DetachCommand : BaseJsonCommand(

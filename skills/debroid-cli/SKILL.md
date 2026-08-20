@@ -42,14 +42,16 @@ You must attach the debugger to obtain a `sessionId`.
 - **If the user wants to debug app startup:**
   ```bash
   debroid launch <app_id>
+  debroid break <session_id> <FileName.kt> <line_number> --package <pkg>
   debroid resume <session_id>
   ```
-  > ⚠️ `launch` starts the app suspended via `am set-debug-app -w`. **Always call `debroid resume <session_id>` right after `launch`** so the VM completes startup and loads application classes.
+  > ⚠️ `launch` starts the app suspended via `am set-debug-app -w` and halts the VM with all threads suspended (`suspendedThreadsCount > 0`). Set your startup breakpoints or watchpoints immediately after `launch`, and then call `debroid resume <session_id>` so the VM proceeds with startup and hits your breakpoints. (Pass `--no-suspend` if you want the app to start executing immediately upon launch without waiting).
   > ⚠️ `launch` uses `am set-debug-app -w`. Debroid **automatically** clears this flag when you call `detach`, so the next normal (non-debug) launch of the app will not hang. Do not call `am clear-debug-app` yourself.
 - **If the app is already running:**
   ```bash
   debroid attach <app_id>
   ```
+  *(Pass `--suspend` if you want to suspend all threads immediately upon attaching).*
 **Action:** Extract the `sessionId` from the JSON response.
 
 > ⚠️ **Session Lifecycle & Breakpoints (Crucial!)**: 
@@ -172,8 +174,8 @@ Here is the full list of commands and their signatures (note: all JSON commands 
 | :--- | :--- | :--- |
 | `daemon` | `debroid daemon` | Starts the persistent background daemon |
 | `stop` | `debroid stop [--pretty]` | Shuts down background daemon and detaches all active sessions |
-| `launch` | `debroid launch <app_id> [--pretty]` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
-| `attach` | `debroid attach <app_id> [--pretty]` | Attaches to a running app |
+| `launch` | `debroid launch <app_id> [--suspend/--no-suspend] [--pretty]` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
+| `attach` | `debroid attach <app_id> [--suspend] [--pretty]` | Attaches to a running app |
 | `detach` | `debroid detach <session_id> [--pretty]` | Safely detaches debugger; for `launch` sessions also clears `am set-debug-app` |
 | `break` | `debroid break <session_id> <file> <line> [-p/--package=<pkg>] [--pretty]` | Sets a line breakpoint (always pass `--package` for fast targeted lookup; auto-defers if class isn't loaded yet) |
 | `remove-break` | `debroid remove-break <session_id> <breakpoint_id> [--pretty]` | Removes a previously set line breakpoint |

@@ -146,8 +146,8 @@ Here is the full list of commands and their signatures (note: all JSON commands 
 | :--- | :--- | :--- |
 | `daemon` | `debroid daemon` | Starts the persistent background daemon |
 | `stop` | `debroid stop [--pretty]` | Shuts down background daemon and detaches all active sessions |
-| `launch` | `debroid launch <app_id> [--pretty]` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
-| `attach` | `debroid attach <app_id> [--pretty]` | Attaches to a running app |
+| `launch` | `debroid launch <app_id> [--suspend/--no-suspend] [--pretty]` | Launches app suspended and attaches (auto-clears set-debug-app on detach) |
+| `attach` | `debroid attach <app_id> [--suspend] [--pretty]` | Attaches to a running app |
 | `detach` | `debroid detach <session_id> [--pretty]` | Safely detaches debugger; for `launch` sessions also clears `am set-debug-app` |
 | `break` | `debroid break <session_id> <file> <line> [-p/--package=<pkg>] [--pretty]` | Sets a line breakpoint (auto-defers if class isn't loaded yet) |
 | `remove-break` | `debroid remove-break <session_id> <breakpoint_id> [--pretty]` | Removes a line breakpoint |
