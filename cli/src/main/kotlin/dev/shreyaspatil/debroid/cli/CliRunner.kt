@@ -30,6 +30,7 @@ import dev.shreyaspatil.debroid.cli.models.CliSessionStatus
 import dev.shreyaspatil.debroid.cli.models.CliShutdownResult
 import dev.shreyaspatil.debroid.cli.models.CliStackFrameInfo
 import dev.shreyaspatil.debroid.cli.models.CliStatusResult
+import dev.shreyaspatil.debroid.cli.models.CliThreadInfo
 import dev.shreyaspatil.debroid.cli.models.CliUpdateResult
 import dev.shreyaspatil.debroid.cli.models.CliVariableInfo
 import dev.shreyaspatil.debroid.cli.models.CliWatchpointResult
@@ -390,7 +391,7 @@ object CliRunner {
         name = "threads",
         help = "Lists all active threads in the target application.",
         epilog = "Useful for finding the thread ID (e.g., '1' for main thread) to inspect locals or pause state.",
-        serializer = ListSerializer(CliStatusResult.serializer())
+        serializer = ListSerializer(CliThreadInfo.serializer())
     ) {
         private val sessionId by argument("session_id", help = "The active debug session ID.")
         override fun run() = ensureDaemonAndSend(DaemonRequest.Threads(sessionId))

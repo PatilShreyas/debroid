@@ -8,6 +8,8 @@ import dev.shreyaspatil.debroid.models.ObjectInspectionResult
 import dev.shreyaspatil.debroid.models.PauseStateResult
 import dev.shreyaspatil.debroid.models.SessionStatus
 import dev.shreyaspatil.debroid.models.StackFrameInfo
+import dev.shreyaspatil.debroid.models.ThreadInfo
+import dev.shreyaspatil.debroid.models.ThreadStatus
 import dev.shreyaspatil.debroid.models.VariableInfo
 import kotlinx.serialization.Serializable
 
@@ -340,4 +342,45 @@ data class CliUpdateResult(
 data class CliVersionResult(
     @SerialDescription("The CLI version of the running daemon")
     val version: String
+)
+
+@Serializable
+enum class CliThreadStatus {
+    RUNNING,
+    SLEEPING,
+    WAIT,
+    MONITOR,
+    NOT_STARTED,
+    ZOMBIE,
+    UNKNOWN
+}
+
+fun ThreadStatus.toCli() = when (this) {
+    ThreadStatus.RUNNING -> CliThreadStatus.RUNNING
+    ThreadStatus.SLEEPING -> CliThreadStatus.SLEEPING
+    ThreadStatus.WAIT -> CliThreadStatus.WAIT
+    ThreadStatus.MONITOR -> CliThreadStatus.MONITOR
+    ThreadStatus.NOT_STARTED -> CliThreadStatus.NOT_STARTED
+    ThreadStatus.ZOMBIE -> CliThreadStatus.ZOMBIE
+    ThreadStatus.UNKNOWN -> CliThreadStatus.UNKNOWN
+}
+
+@Serializable
+@SerialDescription("Information about a thread in the target application")
+data class CliThreadInfo(
+    @SerialDescription("Unique thread ID")
+    val threadId: String,
+    @SerialDescription("Name of the thread")
+    val threadName: String,
+    @SerialDescription("Thread execution status (RUNNING, SLEEPING, WAIT, MONITOR, ZOMBIE, NOT_STARTED, UNKNOWN)")
+    val status: CliThreadStatus,
+    @SerialDescription("Whether the thread is currently suspended")
+    val isSuspended: Boolean
+)
+
+fun ThreadInfo.toCli() = CliThreadInfo(
+    threadId = threadId,
+    threadName = threadName,
+    status = status.toCli(),
+    isSuspended = isSuspended
 )

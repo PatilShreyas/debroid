@@ -129,3 +129,20 @@ data class PointsResult(
     val exceptionBreakpoints: List<ExceptionBreakpointInfo>,
     val watchpoints: List<WatchpointInfo>
 )
+
+enum class ThreadStatus {
+    RUNNING,
+    SLEEPING,
+    WAIT,
+    MONITOR,
+    NOT_STARTED,
+    ZOMBIE,
+    UNKNOWN
+}
+
+data class ThreadInfo(
+    val threadId: String,
+    val threadName: String,
+    val status: ThreadStatus,
+    val isSuspended: Boolean
+)
