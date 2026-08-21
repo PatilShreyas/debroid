@@ -191,21 +191,6 @@ object CliRunner {
         return false
     }
 
-    @Suppress("MagicNumber")
-    class DebroidCommand : CliktCommand(
-        name = "debroid",
-        help = "🤖 Debroid - Autonomous Debugger for Android"
-    ) {
-        init {
-            versionOption(VERSION)
-        }
-        private val port by option("--port", "-p", help = "Daemon server port").int().default(DaemonConfig.PORT)
-
-        override fun run() {
-            DaemonConfig.PORT = port
-        }
-    }
-
     class DaemonCommand : CliktCommand(
         name = "daemon",
         help = "Starts the Debroid persistent background daemon",
@@ -547,11 +532,24 @@ object CliRunner {
         override fun run() = ensureDaemonAndSend(DaemonRequest.Step(sessionId, threadId, action))
     }
 
-    class DebroidCli : CliktCommand(name = "debroid") {
-        override fun run() = Unit
+    @Suppress("MagicNumber")
+    class DebroidCli : CliktCommand(
+        name = "debroid",
+        help = "🤖 Debroid - Autonomous Debugger for Android"
+    ) {
+        private val port by option(
+            "--port",
+            "-p",
+            envvar = "DEBROID_PORT",
+            help = "Daemon server port (can also be set via DEBROID_PORT env var)"
+        ).int().default(DaemonConfig.PORT)
+
+        override fun run() {
+            DaemonConfig.PORT = port
+        }
     }
 
-    private fun createCli(): CliktCommand {
+    internal fun createCli(): CliktCommand {
         return DebroidCli()
             .versionOption(VERSION)
             .subcommands(

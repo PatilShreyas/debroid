@@ -141,7 +141,7 @@ flowchart LR
 
 ## 📖 Command Reference
 
-Here is the full list of commands and their signatures (note: all JSON commands accept an optional `--pretty` flag to format response JSON, and an eager `--schema` flag to inspect output types):
+Here is the full list of commands and their signatures (note: all commands support global options `-p, --port <int>` / `DEBROID_PORT` environment variable, `--version`, and `-h, --help`; all JSON commands accept an optional `--pretty` flag to format response JSON, and an eager `--schema` flag to inspect output types):
 | Command | Signature | Description |
 | :--- | :--- | :--- |
 | `daemon` | `debroid daemon` | Starts the persistent background daemon |

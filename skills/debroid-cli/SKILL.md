@@ -168,7 +168,7 @@ To keep context windows clean and minimize token consumption during debugging se
    - To query a single calculated primitive value or method result (e.g. `order.getAmount()` or `list.size()`), call `debroid eval <session_id> <thread_id> "<expr>"`. This evaluates the expression directly in the Dalvik/ART VM and returns a tiny single-value payload (< 20 tokens).
 
 ## 📖 Complete CLI Command Reference
-Here is the full list of commands and their signatures (note: all JSON commands accept an optional `--pretty` flag to format response JSON, and an eager `--schema` flag to inspect output types):
+Here is the full list of commands and their signatures (note: all commands support global options `-p, --port <int>` / `DEBROID_PORT` environment variable, `--version`, and `-h, --help`; all JSON commands accept an optional `--pretty` flag to format response JSON, and an eager `--schema` flag to inspect output types):
 
 | Command | Signature | Description |
 | :--- | :--- | :--- |
