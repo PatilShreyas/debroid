@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [UNRELEASED]
 
 ### Added
+
+### Fixed
+
+### Changed
+
+## [v0.2.0] - 2026-08-21
+
+### Added
 - **VM Suspend Controls for Launch and Attach:** Added `--no-suspend` option to `debroid launch` and `--suspend` flag to `debroid attach` allowing explicit control over whether the VM should be suspended immediately upon connection (#43).
 
 ### Fixed
