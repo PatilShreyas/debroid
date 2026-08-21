@@ -169,7 +169,9 @@ interface JdiConnector {
     fun attach(host: String, port: Int): VirtualMachine
 }
 
-class DefaultJdiConnector : JdiConnector {
+class DefaultJdiConnector(
+    private val timeoutMs: Long = DEFAULT_ATTACH_TIMEOUT_MS
+) : JdiConnector {
     override fun attach(host: String, port: Int): VirtualMachine {
         val vmm = Bootstrap.virtualMachineManager()
         val socketConnector = vmm.attachingConnectors()
@@ -182,7 +184,12 @@ class DefaultJdiConnector : JdiConnector {
         val arguments = socketConnector.defaultArguments()
         arguments["hostname"]?.setValue(host)
         arguments["port"]?.setValue(port.toString())
+        arguments["timeout"]?.setValue(timeoutMs.toString())
 
         return socketConnector.attach(arguments)
+    }
+
+    companion object {
+        const val DEFAULT_ATTACH_TIMEOUT_MS = 15_000L
     }
 }
