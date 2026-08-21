@@ -51,6 +51,11 @@ object DaemonServer {
             return
         }
 
+        registerShutdownHook(
+            runtime = Runtime.getRuntime(),
+            onShutdown = { sessionManager.detachAllSessions() }
+        )
+
         val serverSocket = ServerSocket(
             DaemonConfig.PORT,
             DaemonConfig.BACKLOG,
@@ -64,6 +69,18 @@ object DaemonServer {
             val socket = serverSocket.accept()
             executor.submit { handleClient(socket) }
         }
+    }
+
+    internal fun registerShutdownHook(
+        runtime: Runtime,
+        onShutdown: () -> Unit
+    ): Thread {
+        val hook = Thread(
+            { onShutdown() },
+            "debroid-shutdown-hook"
+        )
+        runtime.addShutdownHook(hook)
+        return hook
     }
 
     @Suppress("TooGenericExceptionCaught", "SwallowedException")
