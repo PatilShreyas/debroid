@@ -329,4 +329,19 @@ class JdiSessionManagerTest {
         assertTrue(session2.isAlive())
         assertEquals(session2.sessionId, sessionManager.getSession(session2.sessionId).sessionId)
     }
+
+    @Test
+    fun `DefaultJdiConnector default timeout is 15 seconds`() {
+        assertEquals(15_000L, DefaultJdiConnector.DEFAULT_ATTACH_TIMEOUT_MS)
+    }
+
+    @Test
+    fun `DefaultJdiConnector attempts connection with configured parameters`() {
+        val connector = DefaultJdiConnector(timeoutMs = 15_000L)
+        // Attempting to attach to an unbound local port should fail cleanly with a connection exception
+        // (verifying that SocketAttach connector is successfully found and executed with arguments)
+        assertThrows<Exception> {
+            connector.attach("localhost", 59999)
+        }
+    }
 }

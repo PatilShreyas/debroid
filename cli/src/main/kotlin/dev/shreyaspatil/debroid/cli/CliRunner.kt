@@ -56,6 +56,9 @@ import kotlin.system.exitProcess
 
 object CliRunner {
 
+    private const val DAEMON_SOCKET_TIMEOUT_MS = 30_000
+    private const val VERSION_CHECK_TIMEOUT_MS = 5_000
+
     private val json = Json { encodeDefaults = true }
 
     abstract class BaseJsonCommand(
@@ -132,6 +135,7 @@ object CliRunner {
 
         try {
             Socket(DaemonConfig.HOST, DaemonConfig.PORT).use { socket ->
+                socket.soTimeout = DAEMON_SOCKET_TIMEOUT_MS
                 val writer = PrintWriter(socket.getOutputStream(), true)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
 
@@ -156,6 +160,7 @@ object CliRunner {
 
         try {
             Socket(DaemonConfig.HOST, DaemonConfig.PORT).use { socket ->
+                socket.soTimeout = VERSION_CHECK_TIMEOUT_MS
                 val writer = PrintWriter(socket.getOutputStream(), true)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val ipcRequest = DaemonIpcRequest(pretty = false, request = DaemonRequest.GetVersion)

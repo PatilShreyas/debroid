@@ -1,6 +1,5 @@
 package dev.shreyaspatil.debroid.jdi
 
-import com.sun.jdi.AbsentInformationException
 import com.sun.jdi.ArrayReference
 import com.sun.jdi.Location
 import com.sun.jdi.ObjectReference
@@ -527,24 +526,27 @@ class JdiSession(
         when (action) {
             StepAction.STEP_OVER -> {
                 val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
+                // Use SUSPEND_ALL and resumeAll() to keep thread state consistent with breakpoints.
+                // If only the stepping thread is resumed while others stay suspended, Android ART
+                // can deadlock or freeze in JDWP event processing.
+                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
                 stepReq.addCountFilter(1)
                 stepReq.enable()
-                thread.resume()
+                resumeAll()
             }
             StepAction.STEP_INTO -> {
                 val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_INTO)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
+                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
                 stepReq.addCountFilter(1)
                 stepReq.enable()
-                thread.resume()
+                resumeAll()
             }
             StepAction.STEP_OUT -> {
                 val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
+                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
                 stepReq.addCountFilter(1)
                 stepReq.enable()
-                thread.resume()
+                resumeAll()
             }
             StepAction.RESUME_THREAD -> {
                 while (thread.suspendCount() > 0) {
@@ -558,10 +560,19 @@ class JdiSession(
         }
     }
 
+    /**
+     * Resumes all threads across the entire VirtualMachine.
+     *
+     * JDI tracks suspension counters on both VM and thread levels. Repeated `vm.resume()`
+     * calls ensure that nested suspend counts (e.g. multiple breakpoints hit) are fully cleared.
+     */
     fun resumeAll() {
         objectReferenceCache.clear()
-        repeat(vm.allThreads().maxOfOrNull { it.suspendCount() } ?: 1) {
-            vm.resume()
+        val repeatCount = runCatching {
+            (vm.allThreads().maxOfOrNull { it.suspendCount() } ?: 1).coerceAtLeast(1)
+        }.getOrDefault(1)
+        repeat(repeatCount) {
+            runCatching { vm.resume() }
         }
         rearmRequestsIfFirstResume()
     }
@@ -1277,51 +1288,64 @@ class JdiSession(
         )
     }
 
+    /**
+     * Clears all in-memory event tracking structures without sending JDWP clear commands.
+     *
+     * Why not call `erm.deleteEventRequest(...)` over JDWP here?
+     * On Android ART, sending `JDWP.EventRequest.Clear` packets during session teardown
+     * (especially after stepping or while threads are running) causes JDI's `TargetVM.waitForReply()`
+     * to block indefinitely waiting for an ART response packet that may never arrive (Issue #65).
+     *
+     * Instead, we clear local tracking state and rely on `vm.dispose()`, which is specified by JDI
+     * to automatically invalidate all remote event requests and release VM resources in a single step.
+     */
     private fun deleteAllEventRequests() {
-        try {
-            activeBreakpoints.clear()
-            jdiBreakpointRequests.values.flatten().forEach { req ->
-                try {
-                    vm.eventRequestManager().deleteEventRequest(req)
-                } catch (_: Exception) {}
-            }
-            jdiBreakpointRequests.clear()
-            deferredBreakpoints.clear()
-            deferredWatchpoints.clear()
-            deferredExceptionBreakpoints.clear()
-            exceptionRequests.values.forEach { req ->
-                try {
-                    vm.eventRequestManager().deleteEventRequest(req)
-                } catch (_: Exception) {}
-            }
-            exceptionRequests.clear()
-            watchpointRequests.values.flatten().forEach { req ->
-                try {
-                    vm.eventRequestManager().deleteEventRequest(req)
-                } catch (_: Exception) {}
-            }
-            watchpointRequests.clear()
-            classPrepareRequest.get()?.let { req ->
-                try {
-                    vm.eventRequestManager().deleteEventRequest(req)
-                } catch (_: Exception) {}
-            }
-            classPrepareRequest.set(null)
+        activeBreakpoints.clear()
+        jdiBreakpointRequests.clear()
+        deferredBreakpoints.clear()
+        deferredWatchpoints.clear()
+        deferredExceptionBreakpoints.clear()
+        exceptionRequests.clear()
+        watchpointRequests.clear()
+        classPrepareRequest.set(null)
+    }
 
-            val erm = vm.eventRequestManager()
-            erm.breakpointRequests().toList().forEach { erm.deleteEventRequest(it) }
-            erm.stepRequests().toList().forEach { erm.deleteEventRequest(it) }
-            erm.accessWatchpointRequests().toList().forEach { erm.deleteEventRequest(it) }
-            erm.modificationWatchpointRequests().toList().forEach { erm.deleteEventRequest(it) }
-            erm.exceptionRequests().toList().forEach { erm.deleteEventRequest(it) }
-            erm.classPrepareRequests().toList().forEach { erm.deleteEventRequest(it) }
-        } catch (_: Exception) {}
+    /**
+     * Resumes all suspended threads and the target VirtualMachine prior to debugger detachment.
+     *
+     * 1. Individual threads: We decrement individual thread suspend counts so threads aren't left frozen.
+     *    A stall limit (`MAX_STALLED_RESUME_ATTEMPTS`) prevents infinite loops if ART fails to decrement.
+     * 2. VM-level resume: Because breakpoints, watchpoints, and stepping use `SUSPEND_ALL`, the VM mirror
+     *    holds a VM-level suspension. Calling `vm.resume()` releases this lock so the app remains interactive.
+     */
+    private fun resumeAllSuspendedThreads() {
+        runCatching {
+            vm.allThreads().forEach { thread ->
+                var suspendCount = thread.suspendCount()
+                var stalledAttempts = 0
+                while (suspendCount > 0 && stalledAttempts < MAX_STALLED_RESUME_ATTEMPTS) {
+                    thread.resume()
+                    val next = thread.suspendCount()
+                    stalledAttempts = if (next < suspendCount) 0 else stalledAttempts + 1
+                    suspendCount = next
+                }
+            }
+            vm.resume()
+        }
     }
 
     private fun markDisconnected(): Boolean {
         return !isConnected.getAndSet(false)
     }
 
+    /**
+     * Performs graceful session teardown in a fail-safe order:
+     * 1. Interrupt and join the event listening thread with a 500ms timeout safeguard.
+     * 2. Clear local event tracking and cached object references without sending blocking wire packets.
+     * 3. Explicitly resume all suspended threads and the target VM so the Android app does not stay frozen.
+     * 4. Call `vm.dispose()` to close JDWP connection and release debugger resources.
+     * 5. Remove ADB JDWP port forwarding and clear debug app flags if configured.
+     */
     private fun shutdown(isExpected: Boolean) {
         if (markDisconnected()) return
 
@@ -1335,12 +1359,13 @@ class JdiSession(
         deleteAllEventRequests()
         objectReferenceCache.clear()
 
-        try { vm.dispose() } catch (_: Exception) {}
+        resumeAllSuspendedThreads()
+        runCatching { vm.dispose() }
 
         adbManager.removePortForward(localPort)
 
         if (clearDebugAppOnDetach) {
-            try { adbManager.clearDebugApp() } catch (_: Exception) {}
+            runCatching { adbManager.clearDebugApp() }
         }
 
         if (!isExpected) {
@@ -1361,6 +1386,7 @@ class JdiSession(
 
     companion object {
         private const val MAX_EVENT_BUFFER_SIZE = 1000
+        private const val MAX_STALLED_RESUME_ATTEMPTS = 5
 
         @Suppress("ObjectPropertyNaming")
         private val TERMINAL_TYPES = setOf(

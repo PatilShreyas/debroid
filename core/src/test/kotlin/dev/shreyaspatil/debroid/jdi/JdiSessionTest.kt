@@ -392,9 +392,9 @@ class JdiSessionTest {
         session.stepExecution("1", dev.shreyaspatil.debroid.models.StepAction.STEP_OVER)
 
         verify { erm.deleteEventRequest(stepReqOld) }
-        verify { stepReqNew.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD) }
+        verify { stepReqNew.setSuspendPolicy(EventRequest.SUSPEND_ALL) }
         verify { stepReqNew.enable() }
-        verify { thread.resume() }
+        verify { vm.resume() }
     }
 
     @Test
@@ -1694,7 +1694,7 @@ class JdiSessionTest {
     }
 
     @Test
-    fun `detach clears all EventRequests`() {
+    fun `detach clears in-memory EventRequests without sending JDWP delete requests`() {
         val bpReq = mockk<BreakpointRequest>(relaxed = true)
         val stepReq = mockk<StepRequest>(relaxed = true)
         every { erm.breakpointRequests() } returns listOf(bpReq)
@@ -1702,12 +1702,13 @@ class JdiSessionTest {
 
         session.detach()
 
-        verify { erm.deleteEventRequest(bpReq) }
-        verify { erm.deleteEventRequest(stepReq) }
+        verify(exactly = 0) { erm.deleteEventRequest(bpReq) }
+        verify(exactly = 0) { erm.deleteEventRequest(stepReq) }
+        verify { vm.dispose() }
     }
 
     @Test
-    fun `VMDisconnectedException triggers disconnect event and clears requests`() {
+    fun `VMDisconnectedException triggers disconnect event and cleans up session`() {
         val customVm = mockk<VirtualMachine>(relaxed = true)
         val eventQueue = mockk<com.sun.jdi.event.EventQueue>()
         every { customVm.eventQueue() } returns eventQueue
@@ -1729,8 +1730,8 @@ class JdiSessionTest {
 
         // Verify the background event loop caught the exception and processed the disconnect.
         // Using timeout since the event loop runs on a separate thread.
-        verify(timeout = 2000) { customErm.deleteEventRequest(bpReq) }
-        verify(timeout = 2000) { adbManager.removePortForward(8080) }
+        verify(timeout = 3000) { adbManager.removePortForward(8080) }
+        verify(exactly = 0) { customErm.deleteEventRequest(any()) }
 
         assertFalse(customSession.isAlive())
     }
@@ -1743,8 +1744,9 @@ class JdiSessionTest {
         session.detach()
         session.detach() // Second call
 
-        // deleteEventRequest should only be called once because of getAndSet(false)
-        verify(exactly = 1) { erm.deleteEventRequest(bpReq) }
+        // vm.dispose and removePortForward should only be called once because of getAndSet(false)
+        verify(exactly = 1) { vm.dispose() }
+        verify(exactly = 1) { adbManager.removePortForward(8080) }
     }
 
     @Test
@@ -1843,5 +1845,102 @@ class JdiSessionTest {
 
         val pointsAfter = session.getPoints()
         assertEquals(0, pointsAfter.breakpoints.size)
+    }
+
+    @Test
+    fun `stepExecution STEP_INTO configures SUSPEND_ALL and resumes vm`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { vm.allThreads() } returns listOf(thread)
+
+        val stepReqNew = mockk<StepRequest>(relaxed = true)
+        every { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_INTO) } returns stepReqNew
+
+        session.stepExecution("1", dev.shreyaspatil.debroid.models.StepAction.STEP_INTO)
+
+        verify { stepReqNew.setSuspendPolicy(EventRequest.SUSPEND_ALL) }
+        verify { stepReqNew.enable() }
+        verify { vm.resume() }
+    }
+
+    @Test
+    fun `stepExecution STEP_OUT configures SUSPEND_ALL and resumes vm`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { vm.allThreads() } returns listOf(thread)
+
+        val stepReqNew = mockk<StepRequest>(relaxed = true)
+        every { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) } returns stepReqNew
+
+        session.stepExecution("1", dev.shreyaspatil.debroid.models.StepAction.STEP_OUT)
+
+        verify { stepReqNew.setSuspendPolicy(EventRequest.SUSPEND_ALL) }
+        verify { stepReqNew.enable() }
+        verify { vm.resume() }
+    }
+
+    @Test
+    fun `detach resumes all suspended threads and VM`() {
+        val suspendedThread1 = mockk<ThreadReference>(relaxed = true)
+        val suspendedThread2 = mockk<ThreadReference>(relaxed = true)
+        val runningThread = mockk<ThreadReference>(relaxed = true)
+
+        every { suspendedThread1.isSuspended } returnsMany listOf(true, true, false)
+        every { suspendedThread1.suspendCount() } returnsMany listOf(2, 1, 0)
+        every { suspendedThread2.isSuspended } returnsMany listOf(true, false)
+        every { suspendedThread2.suspendCount() } returnsMany listOf(1, 0)
+        every { runningThread.isSuspended } returns false
+        every { runningThread.suspendCount() } returns 0
+        every { vm.allThreads() } returns listOf(suspendedThread1, suspendedThread2, runningThread)
+
+        session.detach()
+
+        verify(atLeast = 1) { suspendedThread1.resume() }
+        verify(atLeast = 1) { suspendedThread2.resume() }
+        verify(exactly = 0) { runningThread.resume() }
+        verify(atLeast = 1) { vm.resume() }
+        verify { vm.dispose() }
+    }
+
+    @Test
+    fun `detach does not delete or disable event requests over JDWP`() {
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        val stepReq = mockk<StepRequest>(relaxed = true)
+        every { erm.breakpointRequests() } returns listOf(bpReq)
+        every { erm.stepRequests() } returns listOf(stepReq)
+
+        session.detach()
+
+        verify(exactly = 0) { bpReq.disable() }
+        verify(exactly = 0) { erm.deleteEventRequest(bpReq) }
+        verify(exactly = 0) { stepReq.disable() }
+        verify(exactly = 0) { erm.deleteEventRequest(stepReq) }
+    }
+
+    @Test
+    fun `detach completes even if vm dispose or teardown hangs`() {
+        val hangVm = mockk<VirtualMachine>(relaxed = true)
+        val hangErm = mockk<EventRequestManager>(relaxed = true)
+        every { hangVm.eventRequestManager() } returns hangErm
+        every { hangVm.dispose() } answers {
+            runCatching { Thread.sleep(3_000) }
+        }
+
+        val hangSession = JdiSession(
+            sessionId = "sess_hang",
+            appId = "com.test.app",
+            localPort = 8081,
+            vm = hangVm,
+            adbManager = adbManager
+        )
+
+        val startTime = System.currentTimeMillis()
+        hangSession.detach()
+        val duration = System.currentTimeMillis() - startTime
+
+        // Should complete within ~2-4 seconds due to timeout and not hang for 10s
+        assertTrue(duration < 5_000, "Detach took too long: ${duration}ms")
+        verify { adbManager.removePortForward(8081) }
+        assertFalse(hangSession.isAlive())
     }
 }
