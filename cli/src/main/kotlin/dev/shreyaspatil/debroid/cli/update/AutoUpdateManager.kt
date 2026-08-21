@@ -14,7 +14,11 @@ class AutoUpdateManager(
     private val skillExtractor: SkillExtractor = SkillExtractor()
 ) {
 
-    private val backgroundExecutor by lazy { Executors.newSingleThreadExecutor() }
+    private val backgroundExecutor by lazy {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable).apply { isDaemon = true }
+        }
+    }
 
     /**
      * Non-blocking, silent background check and update to stable releases.

@@ -117,4 +117,124 @@ class CliRunnerTest {
             serverSocket.close()
         }
     }
+
+    @Test
+    fun `execute with empty args does not invoke exit and prints formatted help`() {
+        var exitCode: Int? = null
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            CliRunner.execute(emptyArray(), exit = { exitCode = it })
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        assertEquals(null, exitCode)
+        assertTrue(outContent.toString().contains("🤖 Debroid - Autonomous Debugger for Android"))
+    }
+
+    @Test
+    fun `execute with --help flag exits with status code 0`() {
+        var exitCode: Int? = null
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            CliRunner.execute(arrayOf("--help"), exit = { exitCode = it })
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        assertEquals(0, exitCode)
+        assertTrue(outContent.toString().contains("🤖 Debroid - Autonomous Debugger for Android"))
+    }
+
+    @Test
+    fun `execute with subcommand --help flag exits with status code 0`() {
+        var exitCode: Int? = null
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            CliRunner.execute(arrayOf("attach", "--help"), exit = { exitCode = it })
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        assertEquals(0, exitCode)
+        assertTrue(outContent.toString().contains("Attaches the debugger to an already running application process"))
+    }
+
+    @Test
+    fun `execute with --version flag exits with status code 0`() {
+        var exitCode: Int? = null
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            CliRunner.execute(arrayOf("--version"), exit = { exitCode = it })
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        assertEquals(0, exitCode)
+        assertTrue(outContent.toString().contains(VERSION))
+    }
+
+    @Test
+    fun `execute with subcommand --schema flag exits with status code 0`() {
+        var exitCode: Int? = null
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            CliRunner.execute(arrayOf("attach", "--schema"), exit = { exitCode = it })
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        assertEquals(0, exitCode)
+        assertTrue(outContent.toString().contains("sessionId"))
+        assertTrue(outContent.toString().contains("properties"))
+    }
+
+    @Test
+    fun `execute with invalid option exits with status code 1`() {
+        var exitCode: Int? = null
+        val originalErr = System.err
+        val errContent = java.io.ByteArrayOutputStream()
+        System.setErr(java.io.PrintStream(errContent))
+
+        try {
+            CliRunner.execute(arrayOf("--non-existent-option"), exit = { exitCode = it })
+        } finally {
+            System.setErr(originalErr)
+        }
+
+        assertEquals(1, exitCode)
+        assertTrue(errContent.toString().contains("no such option"))
+    }
+
+    @Test
+    fun `execute with unknown command exits with status code 1`() {
+        var exitCode: Int? = null
+        val originalErr = System.err
+        val errContent = java.io.ByteArrayOutputStream()
+        System.setErr(java.io.PrintStream(errContent))
+
+        try {
+            CliRunner.execute(arrayOf("unknown-cmd"), exit = { exitCode = it })
+        } finally {
+            System.setErr(originalErr)
+        }
+
+        assertEquals(1, exitCode)
+        assertTrue(errContent.toString().contains("no such subcommand"))
+    }
 }

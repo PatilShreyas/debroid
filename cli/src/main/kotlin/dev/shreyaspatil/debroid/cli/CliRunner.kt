@@ -77,8 +77,7 @@ object CliRunner {
                 eagerOption("--schema", help = "Print the JSON response schema for this command") {
                     val schemaElement = JsonSchemaGenerator.generate(serializer.descriptor)
                     val json = Json { encodeDefaults = true }
-                    println(json.encodeToString(JsonElement.serializer(), schemaElement))
-                    throw PrintMessage("")
+                    throw PrintMessage(json.encodeToString(JsonElement.serializer(), schemaElement))
                 }
             }
         }
@@ -606,7 +605,7 @@ object CliRunner {
         }
     }
 
-    fun execute(args: Array<String>) {
+    fun execute(args: Array<String>, exit: (Int) -> Unit = { exitProcess(it) }) {
         val isUpdated = AutoUpdateManager.DEFAULT.checkAndPerformSilentAutoUpdateAsync()
 
         if (isUpdated) {
@@ -627,22 +626,44 @@ object CliRunner {
             cli.parse(args.toList())
         } catch (e: CliktError) {
             when (e) {
-                is PrintHelpMessage -> println(e.context?.command?.getFormattedHelp() ?: e.message)
-                is PrintMessage -> println(e.message)
-                is UsageError -> {
-                    println(e.message)
-                    e.context?.command?.getFormattedHelp()?.let { println(it) }
+                is PrintHelpMessage -> {
+                    println(e.context?.command?.getFormattedHelp() ?: e.message)
+                    exit(e.statusCode)
                 }
-                else -> println(
-                    json.encodeToString(CliDebugError(CliErrorCode.CLI_ERROR.name, e.message ?: "Unknown error", false))
-                )
+                is PrintMessage -> {
+                    if (e.message?.isNotEmpty() == true) {
+                        println(e.message)
+                    }
+                    exit(e.statusCode)
+                }
+                is UsageError -> {
+                    cli.echoFormattedHelp(e)
+                    exit(e.statusCode)
+                }
+                else -> {
+                    println(
+                        json.encodeToString(
+                            CliDebugError(
+                                errorCode = CliErrorCode.CLI_ERROR.name,
+                                message = e.message ?: "Unknown error",
+                                retryable = false,
+                            ),
+                        ),
+                    )
+                    exit(e.statusCode)
+                }
             }
-            exitProcess(1)
         } catch (e: Exception) {
             println(
-                json.encodeToString(CliDebugError(CliErrorCode.CLI_ERROR.name, e.message ?: "Unknown error", false))
+                json.encodeToString(
+                    CliDebugError(
+                        errorCode = CliErrorCode.CLI_ERROR.name,
+                        message = e.message ?: "Unknown error",
+                        retryable = false,
+                    ),
+                ),
             )
-            exitProcess(1)
+            exit(1)
         }
     }
 }
