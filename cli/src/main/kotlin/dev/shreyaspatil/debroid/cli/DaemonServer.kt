@@ -51,7 +51,10 @@ object DaemonServer {
             return
         }
 
-        registerShutdownHook()
+        registerShutdownHook(
+            runtime = Runtime.getRuntime(),
+            onShutdown = { sessionManager.detachAllSessions() }
+        )
 
         val serverSocket = ServerSocket(
             DaemonConfig.PORT,
@@ -69,8 +72,8 @@ object DaemonServer {
     }
 
     internal fun registerShutdownHook(
-        runtime: Runtime = Runtime.getRuntime(),
-        onShutdown: () -> Unit = { sessionManager.detachAllSessions() }
+        runtime: Runtime,
+        onShutdown: () -> Unit
     ): Thread {
         val hook = Thread(
             { onShutdown() },
