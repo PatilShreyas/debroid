@@ -16,10 +16,10 @@ class OrderPricingPipeline(
         val memberDiscount = tierDiscountEngine.computeDiscount(tier, grossSubtotal)
         val netSubtotal = grossSubtotal - memberDiscount
 
-        val promoDiscount = promoCouponEngine.evaluatePromo(coupon, netSubtotal, items)
+        val promoDiscount = promoCouponEngine.evaluatePromo(coupon, grossSubtotal, items)
         val taxableAmount = Math.max(0.0, netSubtotal - promoDiscount)
         val taxAmount = taxCalculationService.computeTax(taxableAmount)
-        val shippingFee = shippingRateProvider.calculateShipping(netSubtotal, expressShipping)
+        val shippingFee = shippingRateProvider.calculateShipping(grossSubtotal, expressShipping)
 
         val finalTotal = Math.round((taxableAmount + taxAmount + shippingFee) * 100.0) / 100.0
 
