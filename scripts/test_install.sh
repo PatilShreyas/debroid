@@ -60,17 +60,14 @@ BASE_TEST_PATH="$(sanitize_path)"
 # Cleanup & Lifecycle Management
 # ==============================================================================
 
-# Global cleanup handler executed on normal exit or interrupt
 cleanup_suite() {
     if [ -d "$TEST_WORK_DIR" ]; then
         rm -rf "$TEST_WORK_DIR"
     fi
 }
 
-# Register trap for clean exit on completion, failure, or cancellation
 trap cleanup_suite EXIT INT TERM
 
-# Create an isolated temporary test home directory
 setup_test_env() {
     mkdir -p "$TEST_WORK_DIR"
     mktemp -d "${TEST_WORK_DIR}/env.XXXXXX"
@@ -115,42 +112,36 @@ test_bash_installation() {
     local test_home
     test_home="$(setup_test_env)"
 
-    (
-        export HOME="$test_home"
-        export SHELL="/bin/bash"
-        export PATH="$BASE_TEST_PATH"
+    HOME="$test_home" SHELL="/bin/bash" PATH="$BASE_TEST_PATH" "${REPO_ROOT}/install.sh" --local >/dev/null
 
-        "${REPO_ROOT}/install.sh" --local >/dev/null
+    verify_installation_invariants "$test_home"
 
-        verify_installation_invariants "$test_home"
+    # Verify .bashrc content
+    local bashrc="${test_home}/.bashrc"
+    if [ -f "$bashrc" ] && grep -q "debroid installer" "$bashrc"; then
+        log_success ".bashrc configured with installer block"
+    else
+        log_fail ".bashrc was not configured"
+    fi
 
-        # Verify .bashrc content
-        local bashrc="${test_home}/.bashrc"
-        if [ -f "$bashrc" ] && grep -q "debroid installer" "$bashrc"; then
-            log_success ".bashrc configured with installer block"
-        else
-            log_fail ".bashrc was not configured"
-        fi
+    # Verify direct invocation of debroid --version via bash subshell
+    local version_output
+    version_output="$(HOME="$test_home" PATH="$BASE_TEST_PATH" bash -c "source \"${bashrc}\" && debroid --version" 2>&1)"
+    if [[ "$version_output" == *"debroid version ${VERSION}"* ]]; then
+        log_success "Direct execution 'debroid --version' succeeded via configured bash (${version_output})"
+    else
+        log_fail "Direct execution failed or returned unexpected output: '${version_output}'"
+    fi
 
-        # Verify direct invocation of debroid --version via bash subshell
-        local version_output
-        version_output="$(bash -c "source \"${bashrc}\" && debroid --version" 2>&1)"
-        if [[ "$version_output" == *"debroid version ${VERSION}"* ]]; then
-            log_success "Direct execution 'debroid --version' succeeded via configured bash (${version_output})"
-        else
-            log_fail "Direct execution failed or returned unexpected output: '${version_output}'"
-        fi
-
-        # Test Idempotency: Re-running install.sh should not duplicate blocks
-        "${REPO_ROOT}/install.sh" --local >/dev/null
-        local block_markers
-        block_markers="$(grep -c "debroid installer" "$bashrc" || true)"
-        if [ "$block_markers" -eq 2 ]; then
-            log_success "Idempotency verified: exactly 1 installer block present after re-install"
-        else
-            log_fail "Idempotency failed: found ${block_markers} marker lines in ${bashrc}"
-        fi
-    )
+    # Test Idempotency: Re-running install.sh should not duplicate blocks
+    HOME="$test_home" SHELL="/bin/bash" PATH="$BASE_TEST_PATH" "${REPO_ROOT}/install.sh" --local >/dev/null
+    local block_markers
+    block_markers="$(grep -c "debroid installer" "$bashrc" || true)"
+    if [ "$block_markers" -eq 2 ]; then
+        log_success "Idempotency verified: exactly 1 installer block present after re-install"
+    else
+        log_fail "Idempotency failed: found ${block_markers} marker lines in ${bashrc}"
+    fi
 
     teardown_test_env "$test_home"
 }
@@ -171,32 +162,26 @@ test_zsh_installation() {
     local test_home
     test_home="$(setup_test_env)"
 
-    (
-        export HOME="$test_home"
-        export SHELL="$zsh_bin"
-        export PATH="$BASE_TEST_PATH"
+    HOME="$test_home" SHELL="$zsh_bin" PATH="$BASE_TEST_PATH" "${REPO_ROOT}/install.sh" --local >/dev/null
 
-        "${REPO_ROOT}/install.sh" --local >/dev/null
+    verify_installation_invariants "$test_home"
 
-        verify_installation_invariants "$test_home"
+    # Verify .zshrc content
+    local zshrc="${test_home}/.zshrc"
+    if [ -f "$zshrc" ] && grep -q "debroid installer" "$zshrc"; then
+        log_success ".zshrc configured with installer block"
+    else
+        log_fail ".zshrc was not configured"
+    fi
 
-        # Verify .zshrc content
-        local zshrc="${test_home}/.zshrc"
-        if [ -f "$zshrc" ] && grep -q "debroid installer" "$zshrc"; then
-            log_success ".zshrc configured with installer block"
-        else
-            log_fail ".zshrc was not configured"
-        fi
-
-        # Verify direct invocation of debroid --version via zsh subshell
-        local version_output
-        version_output="$(zsh -c "source \"${zshrc}\" && debroid --version" 2>&1)"
-        if [[ "$version_output" == *"debroid version ${VERSION}"* ]]; then
-            log_success "Direct execution 'debroid --version' succeeded via configured zsh (${version_output})"
-        else
-            log_fail "Direct execution failed or returned unexpected output: '${version_output}'"
-        fi
-    )
+    # Verify direct invocation of debroid --version via zsh subshell
+    local version_output
+    version_output="$(HOME="$test_home" PATH="$BASE_TEST_PATH" zsh -c "source \"${zshrc}\" && debroid --version" 2>&1)"
+    if [[ "$version_output" == *"debroid version ${VERSION}"* ]]; then
+        log_success "Direct execution 'debroid --version' succeeded via configured zsh (${version_output})"
+    else
+        log_fail "Direct execution failed or returned unexpected output: '${version_output}'"
+    fi
 
     teardown_test_env "$test_home"
 }
@@ -217,32 +202,26 @@ test_fish_installation() {
     local test_home
     test_home="$(setup_test_env)"
 
-    (
-        export HOME="$test_home"
-        export SHELL="$fish_bin"
-        export PATH="$BASE_TEST_PATH"
+    HOME="$test_home" SHELL="$fish_bin" PATH="$BASE_TEST_PATH" "${REPO_ROOT}/install.sh" --local >/dev/null
 
-        "${REPO_ROOT}/install.sh" --local >/dev/null
+    verify_installation_invariants "$test_home"
 
-        verify_installation_invariants "$test_home"
+    # Verify config.fish content
+    local config_fish="${test_home}/.config/fish/config.fish"
+    if [ -f "$config_fish" ] && grep -q "fish_add_path" "$config_fish"; then
+        log_success "config.fish configured with fish_add_path"
+    else
+        log_fail "config.fish was not configured with fish_add_path"
+    fi
 
-        # Verify config.fish content
-        local config_fish="${test_home}/.config/fish/config.fish"
-        if [ -f "$config_fish" ] && grep -q "fish_add_path" "$config_fish"; then
-            log_success "config.fish configured with fish_add_path"
-        else
-            log_fail "config.fish was not configured with fish_add_path"
-        fi
-
-        # Verify direct invocation of debroid --version via fish subshell
-        local version_output
-        version_output="$(fish -c "source \"${config_fish}\" && debroid --version" 2>&1)"
-        if [[ "$version_output" == *"debroid version ${VERSION}"* ]]; then
-            log_success "Direct execution 'debroid --version' succeeded via configured fish (${version_output})"
-        else
-            log_fail "Direct execution failed or returned unexpected output: '${version_output}'"
-        fi
-    )
+    # Verify direct invocation of debroid --version via fish subshell
+    local version_output
+    version_output="$(HOME="$test_home" PATH="$BASE_TEST_PATH" fish -c "source \"${config_fish}\" && debroid --version" 2>&1)"
+    if [[ "$version_output" == *"debroid version ${VERSION}"* ]]; then
+        log_success "Direct execution 'debroid --version' succeeded via configured fish (${version_output})"
+    else
+        log_fail "Direct execution failed or returned unexpected output: '${version_output}'"
+    fi
 
     teardown_test_env "$test_home"
 }
@@ -255,33 +234,27 @@ test_symlinked_dotfiles() {
     local test_home
     test_home="$(setup_test_env)"
 
-    (
-        export HOME="$test_home"
-        export SHELL="/bin/bash"
-        export PATH="$BASE_TEST_PATH"
+    # Create external dotfiles repo and symlink ~/.bashrc to it
+    local dotfiles_dir="${test_home}/dotfiles"
+    mkdir -p "$dotfiles_dir"
+    echo "# Custom dotfile" > "${dotfiles_dir}/bashrc"
+    ln -s "${dotfiles_dir}/bashrc" "${test_home}/.bashrc"
 
-        # Create external dotfiles repo and symlink ~/.bashrc to it
-        local dotfiles_dir="${test_home}/dotfiles"
-        mkdir -p "$dotfiles_dir"
-        echo "# Custom dotfile" > "${dotfiles_dir}/bashrc"
-        ln -s "${dotfiles_dir}/bashrc" "${test_home}/.bashrc"
+    HOME="$test_home" SHELL="/bin/bash" PATH="$BASE_TEST_PATH" "${REPO_ROOT}/install.sh" --local >/dev/null
 
-        "${REPO_ROOT}/install.sh" --local >/dev/null
+    # Assert ~/.bashrc is still a symbolic link
+    if [ -L "${test_home}/.bashrc" ]; then
+        log_success "~/.bashrc remained a valid symbolic link"
+    else
+        log_fail "~/.bashrc was replaced with a regular file"
+    fi
 
-        # Assert ~/.bashrc is still a symbolic link
-        if [ -L "${test_home}/.bashrc" ]; then
-            log_success "~/.bashrc remained a valid symbolic link"
-        else
-            log_fail "~/.bashrc was replaced with a regular file"
-        fi
-
-        # Assert the target dotfile was modified
-        if grep -q "debroid installer" "${dotfiles_dir}/bashrc"; then
-            log_success "Underlying target dotfile was updated with installer block"
-        else
-            log_fail "Underlying target dotfile was not updated"
-        fi
-    )
+    # Assert the target dotfile was modified
+    if grep -q "debroid installer" "${dotfiles_dir}/bashrc"; then
+        log_success "Underlying target dotfile was updated with installer block"
+    else
+        log_fail "Underlying target dotfile was not updated"
+    fi
 
     teardown_test_env "$test_home"
 }
@@ -294,25 +267,19 @@ test_preconfigured_shell_config() {
     local test_home
     test_home="$(setup_test_env)"
 
-    (
-        export HOME="$test_home"
-        export SHELL="/bin/bash"
-        export PATH="$BASE_TEST_PATH"
+    # Pre-populate .bashrc with custom .local/bin PATH export
+    echo 'export PATH="$HOME/.local/bin:$PATH"' > "${test_home}/.bashrc"
 
-        # Pre-populate .bashrc with custom .local/bin PATH export
-        echo 'export PATH="$HOME/.local/bin:$PATH"' > "${test_home}/.bashrc"
+    HOME="$test_home" SHELL="/bin/bash" PATH="$BASE_TEST_PATH" "${REPO_ROOT}/install.sh" --local >/dev/null
 
-        "${REPO_ROOT}/install.sh" --local >/dev/null
+    verify_installation_invariants "$test_home"
 
-        verify_installation_invariants "$test_home"
-
-        # Should NOT have injected an extra # >>> debroid installer >>> block
-        if ! grep -q "debroid installer" "${test_home}/.bashrc"; then
-            log_success "Did not append duplicate block when .local/bin was already configured in .bashrc"
-        else
-            log_fail "Unexpected installer block appended to already-configured .bashrc"
-        fi
-    )
+    # Should NOT have injected an extra # >>> debroid installer >>> block
+    if ! grep -q "debroid installer" "${test_home}/.bashrc"; then
+        log_success "Did not append duplicate block when .local/bin was already configured in .bashrc"
+    else
+        log_fail "Unexpected installer block appended to already-configured .bashrc"
+    fi
 
     teardown_test_env "$test_home"
 }
@@ -325,22 +292,16 @@ test_unsupported_shell_fallback() {
     local test_home
     test_home="$(setup_test_env)"
 
-    (
-        export HOME="$test_home"
-        export SHELL="/bin/customsh"
-        export PATH="$BASE_TEST_PATH"
+    local output
+    output="$(HOME="$test_home" SHELL="/bin/customsh" PATH="$BASE_TEST_PATH" "${REPO_ROOT}/install.sh" --local 2>&1)"
 
-        local output
-        output="$("${REPO_ROOT}/install.sh" --local 2>&1)"
+    verify_installation_invariants "$test_home"
 
-        verify_installation_invariants "$test_home"
-
-        if [[ "$output" == *"Could not automatically detect a supported shell profile"* ]]; then
-            log_success "Handled unsupported shell gracefully with manual instructions"
-        else
-            log_fail "Did not print unsupported shell fallback message"
-        fi
-    )
+    if [[ "$output" == *"Could not automatically detect a supported shell profile"* ]]; then
+        log_success "Handled unsupported shell gracefully with manual instructions"
+    else
+        log_fail "Did not print unsupported shell fallback message"
+    fi
 
     teardown_test_env "$test_home"
 }

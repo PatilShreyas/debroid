@@ -114,7 +114,8 @@ else
     # Create the bash launcher stub that executes the Fat JAR with JDI module flags
     cat << 'EOF' > stub.sh
 #!/usr/bin/env bash
-exec java --enable-native-access=ALL-UNNAMED --add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED -jar "$0" "$@"
+USER_HOME="${HOME:-$(eval echo ~)}"
+exec java --enable-native-access=ALL-UNNAMED --add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED -Duser.home="$USER_HOME" -jar "$0" "$@"
 EOF
 
     # Concatenate launcher stub + Fat JAR into a single self-contained executable

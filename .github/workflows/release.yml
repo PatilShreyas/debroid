@@ -63,7 +63,7 @@ jobs:
       - name: Create standalone executable and checksums
         run: |
           mv cli/build/libs/debroid-${{ env.VERSION }}.jar debroid.jar
-          printf '#!/usr/bin/env bash\nexec java --enable-native-access=ALL-UNNAMED --add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED -jar "$0" "$@"\n' > stub.sh
+          printf '#!/usr/bin/env bash\nUSER_HOME="${HOME:-$(eval echo ~)}"\nexec java --enable-native-access=ALL-UNNAMED --add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED -Duser.home="$USER_HOME" -jar "$0" "$@"\n' > stub.sh
           cat stub.sh debroid.jar > debroid
           chmod +x debroid
           rm stub.sh
