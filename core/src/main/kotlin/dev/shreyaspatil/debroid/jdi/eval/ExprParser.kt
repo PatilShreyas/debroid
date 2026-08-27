@@ -18,8 +18,9 @@ import dev.shreyaspatil.debroid.models.ErrorCode
  * 9. Bit shifts (`<<`, `>>`, `>>>`)
  * 10. Additive (`+`, `-`)
  * 11. Multiplicative (`*`, `/`, `%`)
- * 12. Unary prefix (`!`, `-`, `+`, `~`)
- * 13. Postfix / Primary (member access `.` / `?.`, indexing `[]`, method invocation `()`, literals, identifiers)
+ * 12. Type Cast (`as`, `as?`)
+ * 13. Unary prefix (`!`, `-`, `+`, `~`)
+ * 14. Postfix / Primary (member access `.` / `?.`, indexing `[]`, method invocation `()`, literals, identifiers)
  */
 class ExprParser(private val tokens: List<TokenPos>) {
     private var current = 0
@@ -153,15 +154,73 @@ class ExprParser(private val tokens: List<TokenPos>) {
         return left
     }
 
-    private fun parseTypeName(): ExprNode {
+    /**
+     * Parses a type name string including package qualifiers, generic type parameters,
+     * array dimensions, and nullable markers (e.g. `java.util.Map<String, List<Int>>[]?`).
+     */
+    private fun parseTypeNameString(): String {
         val sb = StringBuilder()
-        val first = consumeIdent("Expected type name after type-check operator")
+        val first = consumeIdent("Expected type name after type operator")
         sb.append(first)
+        // 1. Fully-qualified package / outer class names
         while (match(Token.Dot)) {
             sb.append(".")
             sb.append(consumeIdent("Expected identifier after '.' in type name"))
         }
-        return IdentifierNode(sb.toString())
+        // 2. Generic type arguments (handles nested brackets like Map<String, List<Int>>)
+        if (match(Token.Lt)) {
+            sb.append("<")
+            var depth = 1
+            while (depth > 0 && !isAtEnd()) {
+                val tokenPos = advance()
+                when (tokenPos.token) {
+                    is Token.Lt -> {
+                        depth++
+                        sb.append("<")
+                    }
+                    is Token.Gt -> {
+                        depth--
+                        sb.append(">")
+                    }
+                    // Lexer recognizes '>>' and '>>>' as shift operators; decrement depth accordingly
+                    is Token.GtGt -> {
+                        depth -= 2
+                        sb.append(">>")
+                    }
+                    is Token.GtGtGt -> {
+                        depth -= 3
+                        sb.append(">>>")
+                    }
+                    is Token.Ident -> sb.append(tokenPos.token.name)
+                    is Token.Dot -> sb.append(".")
+                    is Token.Comma -> sb.append(", ")
+                    is Token.Question -> sb.append("?")
+                    is Token.Star -> sb.append("*")
+                    else -> throw DebugException(
+                        ErrorCode.EVALUATION_FAILED,
+                        "Unexpected token '${tokenPos.token}' in generic type arguments at " +
+                            "position ${tokenPos.position}"
+                    )
+                }
+            }
+            if (depth > 0) {
+                throw DebugException(ErrorCode.EVALUATION_FAILED, "Unclosed '<' in type name")
+            }
+        }
+        // 3. Array dimensions (e.g. String[] or Int[][])
+        while (match(Token.LBracket)) {
+            consume(Token.RBracket, "Expected ']' after '[' in array type name")
+            sb.append("[]")
+        }
+        // 4. Nullable type marker (e.g. String?)
+        if (match(Token.Question)) {
+            sb.append("?")
+        }
+        return sb.toString()
+    }
+
+    private fun parseTypeName(): ExprNode {
+        return IdentifierNode(parseTypeNameString())
     }
 
     private fun parseShift(): ExprNode {
@@ -194,7 +253,7 @@ class ExprParser(private val tokens: List<TokenPos>) {
     }
 
     private fun parseMultiplicative(): ExprNode {
-        var left = parseUnary()
+        var left = parseTypeCast()
         while (true) {
             val op = when {
                 match(Token.Star) -> BinaryOp.MULTIPLY
@@ -202,10 +261,28 @@ class ExprParser(private val tokens: List<TokenPos>) {
                 match(Token.Percent) -> BinaryOp.MODULO
                 else -> break
             }
-            val right = parseUnary()
+            val right = parseTypeCast()
             left = BinaryOpNode(op, left, right)
         }
         return left
+    }
+
+    /**
+     * Parses explicit casting (`as` and `as?`).
+     * Precedence: Binds tighter than arithmetic/multiplication, looser than unary/postfix calls.
+     */
+    private fun parseTypeCast(): ExprNode {
+        var expr = parseUnary()
+        while (true) {
+            val isSafe = when {
+                match(Token.AsSafe) -> true
+                match(Token.As) -> false
+                else -> break
+            }
+            val targetType = parseTypeNameString()
+            expr = TypeCastNode(expr = expr, targetType = targetType, isSafe = isSafe)
+        }
+        return expr
     }
 
     private fun parseUnary(): ExprNode {

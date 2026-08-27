@@ -2,6 +2,7 @@ package dev.shreyaspatil.debroid.jdi.eval
 
 import com.sun.jdi.AbsentInformationException
 import com.sun.jdi.ArrayReference
+import com.sun.jdi.ArrayType
 import com.sun.jdi.BooleanValue
 import com.sun.jdi.ClassType
 import com.sun.jdi.DoubleValue
@@ -97,8 +98,14 @@ class JdiAstEvaluatorTest {
         }
         every { vm.mirrorOf(any<String>()) } answers {
             val v = firstArg<String>()
+            val stringType = mockk<ClassType> {
+                every { name() } returns "java.lang.String"
+                every { superclass() } returns null
+                every { allInterfaces() } returns emptyList()
+            }
             mockk<StringReference> {
                 every { value() } returns v
+                every { referenceType() } returns stringType
             }
         }
     }
@@ -289,6 +296,14 @@ class JdiAstEvaluatorTest {
         val plusResult = JdiExpressionEvaluator.evaluate("+50", vm, frame)
         assertTrue(plusResult is IntegerValue)
         assertEquals(50, (plusResult as IntegerValue).value())
+
+        val castNegResult = JdiExpressionEvaluator.evaluate("-42 as Double", vm, frame)
+        assertTrue(castNegResult is DoubleValue)
+        assertEquals(-42.0, (castNegResult as DoubleValue).value())
+
+        val castNotResult = JdiExpressionEvaluator.evaluate("!isValid as Boolean", vm, frame)
+        assertTrue(castNotResult is BooleanValue)
+        assertFalse((castNotResult as BooleanValue).value())
     }
 
     @Test
@@ -554,5 +569,334 @@ class JdiAstEvaluatorTest {
         assertThrows(DebugException::class.java) {
             JdiExpressionEvaluator.evaluate("~\"hello\"", vm, frame)
         }
+    }
+
+    @Test
+    fun `evaluates successful unsafe and safe type casts on object reference`() {
+        val userVar = mockk<LocalVariable> { every { name() } returns "user" }
+        val userObj = mockk<ObjectReference>()
+        val adminType = mockk<ClassType>()
+        val accountInterface = mockk<InterfaceType>()
+
+        every { userObj.referenceType() } returns adminType
+        every { adminType.name() } returns "com.example.AdminAccount"
+        every { adminType.superclass() } returns null
+        every { adminType.allInterfaces() } returns listOf(accountInterface)
+        every { accountInterface.name() } returns "com.example.Account"
+
+        every { frame.visibleVariables() } returns listOf(userVar)
+        every { frame.getValue(userVar) } returns userObj
+
+        // Cast to exact class
+        val castAdmin = JdiExpressionEvaluator.evaluate("user as com.example.AdminAccount", vm, frame)
+        assertEquals(userObj, castAdmin)
+
+        // Cast to simple class name
+        val castSimpleAdmin = JdiExpressionEvaluator.evaluate("user as AdminAccount", vm, frame)
+        assertEquals(userObj, castSimpleAdmin)
+
+        // Safe cast to implemented interface
+        val castAccount = JdiExpressionEvaluator.evaluate("user as? com.example.Account", vm, frame)
+        assertEquals(userObj, castAccount)
+
+        // Safe cast to simple interface name
+        val castSimpleAccount = JdiExpressionEvaluator.evaluate("user as? Account", vm, frame)
+        assertEquals(userObj, castSimpleAccount)
+
+        // Cast to Any
+        val castAny = JdiExpressionEvaluator.evaluate("user as Any", vm, frame)
+        assertEquals(userObj, castAny)
+    }
+
+    @Test
+    fun `evaluates member access on cast object`() {
+        val userVar = mockk<LocalVariable> { every { name() } returns "user" }
+        val userObj = mockk<ObjectReference>()
+        val adminType = mockk<ClassType>()
+        val permsField = mockk<Field>()
+        val permsVal = mockk<StringReference> { every { value() } returns "ALL" }
+
+        every { userObj.referenceType() } returns adminType
+        every { adminType.name() } returns "com.example.Admin"
+        every { adminType.superclass() } returns null
+        every { adminType.allInterfaces() } returns emptyList()
+        every { adminType.fieldByName("permissions") } returns permsField
+        every { userObj.getValue(permsField) } returns permsVal
+
+        every { frame.visibleVariables() } returns listOf(userVar)
+        every { frame.getValue(userVar) } returns userObj
+
+        val result = JdiExpressionEvaluator.evaluate("(user as Admin).permissions", vm, frame)
+        assertEquals(permsVal, result)
+    }
+
+    @Test
+    fun `evaluates failed unsafe cast throws ClassCastException`() {
+        val userVar = mockk<LocalVariable> { every { name() } returns "user" }
+        val userObj = mockk<ObjectReference>()
+        val guestType = mockk<ClassType>()
+
+        every { userObj.referenceType() } returns guestType
+        every { guestType.name() } returns "com.example.GuestAccount"
+        every { guestType.superclass() } returns null
+        every { guestType.allInterfaces() } returns emptyList()
+
+        every { frame.visibleVariables() } returns listOf(userVar)
+        every { frame.getValue(userVar) } returns userObj
+
+        val ex = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("user as AdminAccount", vm, frame)
+        }
+        assertTrue(ex.message?.contains("ClassCastException") == true)
+        assertTrue(ex.message?.contains("com.example.GuestAccount cannot be cast to AdminAccount") == true)
+    }
+
+    @Test
+    fun `evaluates failed safe cast returns null and works with elvis`() {
+        val userVar = mockk<LocalVariable> { every { name() } returns "user" }
+        val userObj = mockk<ObjectReference>()
+        val guestType = mockk<ClassType>()
+
+        every { userObj.referenceType() } returns guestType
+        every { guestType.name() } returns "com.example.GuestAccount"
+        every { guestType.superclass() } returns null
+        every { guestType.allInterfaces() } returns emptyList()
+
+        every { frame.visibleVariables() } returns listOf(userVar)
+        every { frame.getValue(userVar) } returns userObj
+
+        val safeResult = JdiExpressionEvaluator.evaluate("user as? AdminAccount", vm, frame)
+        assertNull(safeResult)
+
+        val elvisResult = JdiExpressionEvaluator.evaluate("(user as? AdminAccount) ?: \"fallback\"", vm, frame)
+        assertTrue(elvisResult is StringReference)
+        assertEquals("fallback", (elvisResult as StringReference).value())
+    }
+
+    @Test
+    fun `evaluates null casting rules`() {
+        // Safe cast of null returns null
+        val safeNull = JdiExpressionEvaluator.evaluate("null as? String", vm, frame)
+        assertNull(safeNull)
+
+        // Nullable type cast of null returns null
+        val nullableCast = JdiExpressionEvaluator.evaluate("null as String?", vm, frame)
+        assertNull(nullableCast)
+
+        // Unsafe cast of null to non-null type throws NullPointerException
+        val ex = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("null as String", vm, frame)
+        }
+        assertTrue(ex.message?.contains("NullPointerException") == true)
+    }
+
+    @Test
+    fun `evaluates primitive numeric and string type casting`() {
+        val intResult = JdiExpressionEvaluator.evaluate("100L as Int", vm, frame)
+        assertTrue(intResult is IntegerValue)
+        assertEquals(100, (intResult as IntegerValue).value())
+
+        val longResult = JdiExpressionEvaluator.evaluate("42 as Long", vm, frame)
+        assertTrue(longResult is LongValue)
+        assertEquals(42L, (longResult as LongValue).value())
+
+        val doubleResult = JdiExpressionEvaluator.evaluate("50 as Double", vm, frame)
+        assertTrue(doubleResult is DoubleValue)
+        assertEquals(50.0, (doubleResult as DoubleValue).value())
+
+        val floatResult = JdiExpressionEvaluator.evaluate("25.5 as Float", vm, frame)
+        assertTrue(floatResult is FloatValue)
+        assertEquals(25.5f, (floatResult as FloatValue).value())
+
+        val stringResult = JdiExpressionEvaluator.evaluate("123 as String", vm, frame)
+        assertTrue(stringResult is StringReference)
+        assertEquals("123", (stringResult as StringReference).value())
+    }
+
+    @Test
+    fun `evaluates cast on boxed primitive object reference`() {
+        val numVar = mockk<LocalVariable> { every { name() } returns "num" }
+        val boxedIntObj = mockk<ObjectReference>()
+        val integerType = mockk<ClassType>()
+
+        every { boxedIntObj.referenceType() } returns integerType
+        every { integerType.name() } returns "java.lang.Integer"
+        every { integerType.superclass() } returns null
+        every { integerType.allInterfaces() } returns emptyList()
+
+        every { frame.visibleVariables() } returns listOf(numVar)
+        every { frame.getValue(numVar) } returns boxedIntObj
+
+        val castInt = JdiExpressionEvaluator.evaluate("num as Int", vm, frame)
+        assertEquals(boxedIntObj, castInt)
+
+        val castBoxedInteger = JdiExpressionEvaluator.evaluate("num as java.lang.Integer", vm, frame)
+        assertEquals(boxedIntObj, castBoxedInteger)
+
+        val castAny = JdiExpressionEvaluator.evaluate("num as Any", vm, frame)
+        assertEquals(boxedIntObj, castAny)
+    }
+
+    @Test
+    fun `evaluates primitive array type casting`() {
+        val arrVar = mockk<LocalVariable> { every { name() } returns "arr" }
+        val arrayObj = mockk<ArrayReference>()
+        val arrayType = mockk<ArrayType>()
+
+        every { arrayObj.referenceType() } returns arrayType
+        every { arrayType.name() } returns "int[]"
+        every { arrayType.componentTypeName() } returns "int"
+
+        every { frame.visibleVariables() } returns listOf(arrVar)
+        every { frame.getValue(arrVar) } returns arrayObj
+
+        val castIntArray = JdiExpressionEvaluator.evaluate("arr as IntArray", vm, frame)
+        assertEquals(arrayObj, castIntArray)
+
+        val castIntBracket = JdiExpressionEvaluator.evaluate("arr as Int[]", vm, frame)
+        assertEquals(arrayObj, castIntBracket)
+
+        val castPrimitiveBracket = JdiExpressionEvaluator.evaluate("arr as int[]", vm, frame)
+        assertEquals(arrayObj, castPrimitiveBracket)
+    }
+
+    @Test
+    fun `evaluates void and nothing null type casting`() {
+        val voidResult = JdiExpressionEvaluator.evaluate("null as Void", vm, frame)
+        assertNull(voidResult)
+
+        val nothingResult = JdiExpressionEvaluator.evaluate("null as Nothing", vm, frame)
+        assertNull(nothingResult)
+
+        val unitResult = JdiExpressionEvaluator.evaluate("null as kotlin.Unit", vm, frame)
+        assertNull(unitResult)
+    }
+
+    @Test
+    fun `evaluates multi-level class and interface hierarchy casting`() {
+        val devVar = mockk<LocalVariable> { every { name() } returns "dev" }
+        val devObj = mockk<ObjectReference>()
+        val leadDeveloperType = mockk<ClassType>()
+        val developerSuperType = mockk<ClassType>()
+        val employeeInterface = mockk<InterfaceType>()
+
+        every { devObj.referenceType() } returns leadDeveloperType
+        every { leadDeveloperType.name() } returns "com.example.LeadDeveloper"
+        every { leadDeveloperType.superclass() } returns developerSuperType
+        every { leadDeveloperType.allInterfaces() } returns emptyList()
+
+        every { developerSuperType.name() } returns "com.example.Developer"
+        every { developerSuperType.superclass() } returns null
+        every { developerSuperType.allInterfaces() } returns listOf(employeeInterface)
+
+        every { employeeInterface.name() } returns "com.example.Employee"
+
+        every { frame.visibleVariables() } returns listOf(devVar)
+        every { frame.getValue(devVar) } returns devObj
+
+        // Cast to superclass
+        val superCast = JdiExpressionEvaluator.evaluate("dev as Developer", vm, frame)
+        assertEquals(devObj, superCast)
+
+        // Cast to interface from superclass
+        val ifaceCast = JdiExpressionEvaluator.evaluate("dev as? Employee", vm, frame)
+        assertEquals(devObj, ifaceCast)
+    }
+
+    @Test
+    fun `evaluates incompatible primitive type cast error handling`() {
+        val ex = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("\"hello\" as Int", vm, frame)
+        }
+        assertTrue(ex.message?.contains("ClassCastException") == true)
+
+        val safeResult = JdiExpressionEvaluator.evaluate("\"hello\" as? Int", vm, frame)
+        assertNull(safeResult)
+
+        val boolEx = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("123 as Boolean", vm, frame)
+        }
+        assertTrue(boolEx.message?.contains("ClassCastException") == true)
+
+        val safeBool = JdiExpressionEvaluator.evaluate("123 as? Boolean", vm, frame)
+        assertNull(safeBool)
+    }
+
+    @Test
+    fun `evaluates null type check with nullable types`() {
+        // null is String? should be true in Kotlin
+        val nullSafeCheck = JdiExpressionEvaluator.evaluate("null is String?", vm, frame)
+        assertTrue((nullSafeCheck as BooleanValue).value())
+
+        // null is String should be false
+        val nullUnsafeCheck = JdiExpressionEvaluator.evaluate("null is String", vm, frame)
+        assertFalse((nullUnsafeCheck as BooleanValue).value())
+
+        // null !is String should be true
+        val nullNotIsCheck = JdiExpressionEvaluator.evaluate("null !is String", vm, frame)
+        assertTrue((nullNotIsCheck as BooleanValue).value())
+
+        // null is Any? should be true
+        val nullAnySafeCheck = JdiExpressionEvaluator.evaluate("null is Any?", vm, frame)
+        assertTrue((nullAnySafeCheck as BooleanValue).value())
+    }
+
+    @Test
+    fun `evaluates primitive casting and checking with fully-qualified package names`() {
+        val intVal = JdiExpressionEvaluator.evaluate("42 as java.lang.Integer", vm, frame)
+        assertTrue(intVal is IntegerValue)
+        assertEquals(42, (intVal as IntegerValue).value())
+
+        val longVal = JdiExpressionEvaluator.evaluate("42 as kotlin.Long", vm, frame)
+        assertTrue(longVal is LongValue)
+        assertEquals(42L, (longVal as LongValue).value())
+
+        val isKotlinInt = JdiExpressionEvaluator.evaluate("42 is kotlin.Int", vm, frame)
+        assertTrue((isKotlinInt as BooleanValue).value())
+
+        val isJavaNumber = JdiExpressionEvaluator.evaluate("42 is java.lang.Number", vm, frame)
+        assertTrue((isJavaNumber as BooleanValue).value())
+
+        // Custom wrapper types should not be treated as built-in primitives
+        val isCustomInt = JdiExpressionEvaluator.evaluate("42 is dev.shreyaspatil.number.Int", vm, frame)
+        assertFalse((isCustomInt as BooleanValue).value())
+
+        val customCastEx = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("42 as dev.shreyaspatil.number.Int", vm, frame)
+        }
+        assertTrue(customCastEx.message?.contains("ClassCastException") == true)
+
+        val safeCustomCast = JdiExpressionEvaluator.evaluate("42 as? dev.shreyaspatil.number.Int", vm, frame)
+        assertNull(safeCustomCast)
+    }
+
+    @Test
+    fun `evaluates void and nothing supertypes casting and checking`() {
+        assertNull(JdiExpressionEvaluator.evaluate("null as Void", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as java.lang.Void", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as void", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as Nothing", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as kotlin.Unit", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as Unit", vm, frame))
+
+        val isVoid = JdiExpressionEvaluator.evaluate("null is Void", vm, frame)
+        assertTrue((isVoid as BooleanValue).value())
+
+        val isNothing = JdiExpressionEvaluator.evaluate("null is Nothing", vm, frame)
+        assertTrue((isNothing as BooleanValue).value())
+
+        val isUnit = JdiExpressionEvaluator.evaluate("null is Unit", vm, frame)
+        assertTrue((isUnit as BooleanValue).value())
+
+        val primCastEx = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("42 as Void", vm, frame)
+        }
+        assertTrue(primCastEx.message?.contains("ClassCastException") == true)
+
+        val safePrimCast = JdiExpressionEvaluator.evaluate("42 as? Void", vm, frame)
+        assertNull(safePrimCast)
+
+        val isPrimVoid = JdiExpressionEvaluator.evaluate("42 is Void", vm, frame)
+        assertFalse((isPrimVoid as BooleanValue).value())
     }
 }

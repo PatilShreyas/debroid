@@ -30,6 +30,12 @@ class OrderProcessor {
     }
 }
 
+sealed interface Account {
+    val id: String
+}
+data class AdminAccount(override val id: String, val permissions: String, val level: Int) : Account
+data class GuestAccount(override val id: String, val sessionDuration: Long) : Account
+
 interface DataRepository {
     val data: Flow<List<String>>
     val lastOrderResult: Flow<String>
@@ -58,6 +64,10 @@ class DefaultDataRepository : DataRepository {
         val complexOrder = ComplexOrder("ORD-101", 650.0, "GOLD", isExpress, user, listOf("Laptop", "Mouse"))
         val nullUser: User? = null
         val nullAddressUser = User("Bob", null)
+
+        val account: Account = AdminAccount("ADM-99", "ALL_ACCESS", 10)
+        val guestAccount: Account = GuestAccount("GST-01", 3600L)
+        val rawObject: Any = AdminAccount("ADM-77", "READ_ONLY", 2)
 
         val total = processor.calculateTotal(order)
         _lastOrderResult.value = "Order $orderId ($customerType): $$total"
