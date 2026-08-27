@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Automated Shell PATH Configuration:** Enhanced `install.sh` to automatically detect the user's active shell (`bash`, `zsh`, `fish`) and register `~/.local/bin` in the corresponding profile (`.bashrc`, `.zshrc`, `config.fish`). Includes recursive symlink resolution to preserve GNU Stow / Chezmoi dotfile setups, idempotent delimiter replacement (`# >>> debroid installer >>>`), and automatic skip when already on PATH (#75).
 - **Installer Integration Test Suite:** Added a hermetic multi-shell integration test suite (`scripts/test_install.sh`) executed on every CI PR run, validating binary installation, shell PATH exports, subshell CLI version invocation, AI skill extraction, and dotfile symlink safety across environments (#75).
+- **Rich Kotlin & Compound Expression Evaluation:** The `debroid eval` command now natively supports evaluating complex runtime expressions directly in your paused stack frame, including compound boolean logic, short-circuiting, Kotlin properties, safe calls, and default fallbacks (#72):
+  - **Compound Boolean Logic:** `debroid eval <session_id> <thread_id> "amount >= 600.0 && isExpress"`
+  - **Kotlin Property Access:** `debroid eval <session_id> <thread_id> "user.address.city"` (automatically resolves backing fields or getters like `getName()` / `isExpress()`)
+  - **Safe Calls & Elvis Fallbacks:** `debroid eval <session_id> <thread_id> "user?.address?.city ?: \"Unknown\""`
+  - **Runtime Type Checks:** `debroid eval <session_id> <thread_id> "order is Order && order !is String"`
+  - **Mixed Arithmetic & String Formatting:** `debroid eval <session_id> <thread_id> "\"Total: $\" + (amount * (1.0 - discount))"`
 
 ### Fixed
 - **Breakpoint ID in Poll Breakpoint Hit Event:** Fixed an issue where polling for `BREAKPOINT_HIT` events returned `breakpointId` as `null`. Registered breakpoint request IDs (`bp_*`) are now attached to JDI breakpoint requests and propagated into the poll event payload (#73).

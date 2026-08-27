@@ -115,7 +115,7 @@ else
     cat << 'EOF' > stub.sh
 #!/usr/bin/env bash
 USER_HOME="${HOME:-$(eval echo ~)}"
-exec java --enable-native-access=ALL-UNNAMED --add-exports=jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED -Duser.home="$USER_HOME" -jar "$0" "$@"
+exec java --enable-native-access=ALL-UNNAMED -Duser.home="$USER_HOME" -jar "$0" "$@"
 EOF
 
     # Concatenate launcher stub + Fat JAR into a single self-contained executable

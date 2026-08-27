@@ -565,6 +565,7 @@ class JdiSessionTest {
         every { frame.thisObject() } returns null
         every { frame.visibleVariables() } returns emptyList()
 
+        mockkStatic(JdiExpressionEvaluator::class)
         every {
             JdiExpressionEvaluator.evaluate("unknownExpr", vm, frame)
         } throws RuntimeException("Unknown identifier")
@@ -894,7 +895,7 @@ class JdiSessionTest {
     }
 
     @Test
-    fun `setVariable throws INTERNAL_ERROR when primitive coercion is not possible due to incompatibility`() {
+    fun `setVariable throws EVALUATION_FAILED when primitive coercion is not possible due to incompatibility`() {
         val thread = mockk<ThreadReference>(relaxed = true)
         every { thread.uniqueID() } returns 1L
         every { thread.isSuspended } returns true
@@ -922,7 +923,7 @@ class JdiSessionTest {
             session.setVariable(threadId = "1", varName = "myString", newValueStr = "88.88")
         }
 
-        assertEquals(ErrorCode.INTERNAL_ERROR, exception.code)
+        assertEquals(ErrorCode.EVALUATION_FAILED, exception.code)
         assertTrue(exception.message!!.contains("Type mismatch"))
         unmockkStatic(JdiExpressionEvaluator::class)
     }

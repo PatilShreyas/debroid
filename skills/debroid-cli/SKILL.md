@@ -103,12 +103,13 @@ debroid pause-state <session_id> <thread_id>
 - Mutate memory: `debroid set-var <session_id> <thread_id> <variableName> <newValue>`
   - **Important:** `newValue` is parsed as a Java expression! To set a String literal, you must wrap the value in escaped quotes (e.g., `\"my string\"`). To set it to the result of an expression, provide the expression (e.g., `5`, `true`, `varName + 1`, Int/Long: `10`, `100L`, Float/Double: `10.5f`, `20.5d`).
 - Evaluate expressions: `debroid eval <session_id> <thread_id> "<expression>"`
-  - **Expression Engine**: Evaluates full expressions using standard Java syntax.
-  - **Evaluating Kotlin Code using Java Syntax**:
-    - **Properties & Getters**: Access Kotlin properties via their generated Java getter methods (e.g., `order.getAmount()` or `user.getName()` instead of synthetic property syntax `order.amount` or `user.name`).
-    - **Method Calls & Arithmetic**: Supports method invocations, parameter passing, and math operators (e.g., `order.getAmount() * 0.15`, `Math.max(x, y)`).
-    - **String Operations & Logic**: Supports boolean logic and string method invocations (e.g., `order.getCustomerType().equals("GOLD")`).
-    - **Field Inspection**: To view an object's instance fields without getter methods, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
+  - **Expression Engine**: Supports compound boolean/logical operators (`&&`, `||`, `!`), relational comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`), arithmetic, and idiomatic Kotlin/Java expressions.
+  - **Evaluating Expressions**:
+    - **Compound Logic & Relational**: Evaluate expressions directly (e.g., `amount >= 600.0 && isExpress`, `(x > 5 || y == 0) && !flag`).
+    - **Kotlin Properties & Getters**: Access Kotlin properties directly (e.g., `order.amount` or `user.name`) — automatically resolves backing fields or getter methods (`getAmount()`, `isExpress()`).
+    - **Safe Calls & Elvis**: Supports safe navigation and fallback defaults (e.g., `user?.address?.city`, `user?.name ?: "Unknown"`).
+    - **Method Calls & Arithmetic**: Supports method invocations, parameter passing, and math operators (e.g., `order.getAmount() * 0.15`, `processor.calculateTotal(order)`).
+    - **Field Inspection**: To view an object's instance fields in detail, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
 - Step execution: `debroid step <session_id> <thread_id> <ACTION>` (Actions: `STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`)
 - Resume all threads: `debroid resume <session_id>`
   > Note: `resume` resumes **all** threads in the VM. For per-thread resume, use `step <session_id> <thread_id> RESUME_THREAD`.
@@ -124,7 +125,7 @@ debroid detach <session_id>
 - **Error: "Failed to communicate with daemon"**: The daemon isn't running. Run `debroid daemon &`.
 - **Error: "AbsentInformationException"**: The app is not debuggable or was obfuscated by ProGuard. Ensure `android:debuggable="true"` in the Manifest.
 - **Missing Local Variables**: If locals are empty, you might be at a method entry point. Run a `STEP_OVER` and check again.
-- **Error: "EVALUATION_FAILED" on Kotlin properties**: The `eval` engine evaluates Java syntax. Kotlin properties with backing getters must be called as Java methods (e.g., `user.getName()` instead of `user.name`). Alternatively, retrieve the `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
+- **Inspecting Complex Objects**: If an object does not expose public properties or methods, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>` to view all private fields recursively.
 - **`break` returns `verified=false`**: NOT a failure — the class will be loaded later and the breakpoint will be bound automatically. Keep your `bp` id and proceed.
 - **A trap no longer needed**: Remove it. Lingering exception traps in particular can fire on every exception the app throws, flooding your poll results.
 - **Jetpack Compose Breakpoints**: Place line breakpoints on executable statements inside `@Composable` function bodies (e.g. `val x = ...`), not on the `@Composable fun Name(...)` signature header line where no bytecode is generated.

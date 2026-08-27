@@ -11,12 +11,6 @@ dependencies {
     testImplementation(libs.kotlin.test)
 }
 
-tasks.withType<JavaCompile> {
-    options.compilerArgs.addAll(listOf(
-        "--add-exports", "jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED"
-    ))
-}
-
 tasks.test {
     useJUnitPlatform()
     jvmArgs(
@@ -24,8 +18,7 @@ tasks.test {
         "--add-opens", "jdk.jdi/com.sun.jdi.connect=ALL-UNNAMED",
         "--add-opens", "jdk.jdi/com.sun.jdi.event=ALL-UNNAMED",
         "--add-opens", "jdk.jdi/com.sun.jdi.request=ALL-UNNAMED",
-        "--add-opens", "jdk.jdi/com.sun.tools.jdi=ALL-UNNAMED",
-        "--add-exports", "jdk.jdi/com.sun.tools.example.debug.expr=ALL-UNNAMED"
+        "--add-opens", "jdk.jdi/com.sun.tools.jdi=ALL-UNNAMED"
     )
     finalizedBy(tasks.jacocoTestReport)
 }
