@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Installer Integration Test Suite:** Added a hermetic multi-shell integration test suite (`scripts/test_install.sh`) executed on every CI PR run, validating binary installation, shell PATH exports, subshell CLI version invocation, AI skill extraction, and dotfile symlink safety across environments (#75).
 
 ### Fixed
+- **Breakpoint ID in Poll Breakpoint Hit Event:** Fixed an issue where polling for `BREAKPOINT_HIT` events returned `breakpointId` as `null`. Registered breakpoint request IDs (`bp_*`) are now attached to JDI breakpoint requests and propagated into the poll event payload (#73).
 - **JVM User Home Resolution in Launcher Stub:** Updated the standalone binary launcher stub in `install.sh` and release workflow to pass `-Duser.home="$USER_HOME"` to the Java runtime, and added `$HOME` environment variable fallbacks in `SkillExtractor`, `UpdateCache`, and `BinaryUpdater` to ensure proper path resolution under custom `$HOME` configurations and Linux environments (#75).
 
 ### Changed

@@ -36,6 +36,11 @@
                         "nullable": true,
                         "description": "Fully qualified class name where event occurred"
                     },
+                    "breakpointId": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "ID of the breakpoint that was hit, if event is BREAKPOINT_HIT"
+                    },
                     "exceptionMessage": {
                         "type": "string",
                         "nullable": true,

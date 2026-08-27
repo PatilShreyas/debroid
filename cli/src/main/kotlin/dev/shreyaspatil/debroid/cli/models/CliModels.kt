@@ -285,6 +285,8 @@ data class CliDebugEventPayload(
     val location: String?,
     @SerialDescription("Fully qualified class name where event occurred")
     val className: String?,
+    @SerialDescription("ID of the breakpoint that was hit, if event is BREAKPOINT_HIT")
+    val breakpointId: String? = null,
     @SerialDescription("Message string if event is EXCEPTION_HIT")
     val exceptionMessage: String? = null,
     @SerialDescription("Stack trace frames if requested during poll")
@@ -300,6 +302,7 @@ fun DebugEventPayload.toCli() = CliDebugEventPayload(
     threadName,
     location,
     className,
+    breakpointId,
     exceptionMessage,
     stacktrace?.map { it.toCli() },
     timestamp
