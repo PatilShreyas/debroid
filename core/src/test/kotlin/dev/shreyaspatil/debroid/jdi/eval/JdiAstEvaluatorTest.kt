@@ -296,6 +296,14 @@ class JdiAstEvaluatorTest {
         val plusResult = JdiExpressionEvaluator.evaluate("+50", vm, frame)
         assertTrue(plusResult is IntegerValue)
         assertEquals(50, (plusResult as IntegerValue).value())
+
+        val castNegResult = JdiExpressionEvaluator.evaluate("-42 as Double", vm, frame)
+        assertTrue(castNegResult is DoubleValue)
+        assertEquals(-42.0, (castNegResult as DoubleValue).value())
+
+        val castNotResult = JdiExpressionEvaluator.evaluate("!isValid as Boolean", vm, frame)
+        assertTrue(castNotResult is BooleanValue)
+        assertFalse((castNotResult as BooleanValue).value())
     }
 
     @Test

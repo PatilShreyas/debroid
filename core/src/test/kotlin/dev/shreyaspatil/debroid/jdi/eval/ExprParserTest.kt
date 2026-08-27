@@ -298,4 +298,21 @@ class ExprParserTest {
             ExprParser.parse("1 + 2 3")
         }
     }
+
+    @Test
+    fun `parse unary operations combined with type casting and arithmetic`() {
+        val castNeg = ExprParser.parse("-x as Double") as TypeCastNode
+        assertEquals("Double", castNeg.targetType)
+        assertTrue(castNeg.expr is UnaryOpNode)
+        assertEquals(UnaryOp.NEGATE, (castNeg.expr as UnaryOpNode).op)
+
+        val castNot = ExprParser.parse("!flag as Boolean") as TypeCastNode
+        assertEquals("Boolean", castNot.targetType)
+        assertTrue(castNot.expr is UnaryOpNode)
+        assertEquals(UnaryOp.NOT, (castNot.expr as UnaryOpNode).op)
+
+        val multNeg = ExprParser.parse("-x * 2") as BinaryOpNode
+        assertEquals(BinaryOp.MULTIPLY, multNeg.op)
+        assertTrue(multNeg.left is UnaryOpNode)
+    }
 }
