@@ -36,6 +36,12 @@ sealed interface Token {
     data object InstanceOf : Token {
         override fun toString(): String = "InstanceOf"
     }
+    data object As : Token {
+        override fun toString(): String = "as"
+    }
+    data object AsSafe : Token {
+        override fun toString(): String = "as?"
+    }
 
     // Operators
     data object AndAnd : Token { override fun toString(): String = "&&" }
@@ -343,6 +349,15 @@ class ExprLexer(private val input: String) {
             "super" -> Token.Super
             "is" -> Token.Is
             "instanceof" -> Token.InstanceOf
+            "as" -> {
+                // If followed immediately by '?', consume it as a single safe-cast token (as?)
+                if (index < length && input[index] == '?') {
+                    index++
+                    Token.AsSafe
+                } else {
+                    Token.As
+                }
+            }
             else -> Token.Ident(text)
         }
     }

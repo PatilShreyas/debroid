@@ -108,6 +108,7 @@ debroid pause-state <session_id> <thread_id>
     - **Compound Logic & Relational**: Evaluate expressions directly (e.g., `amount >= 600.0 && isExpress`, `(x > 5 || y == 0) && !flag`).
     - **Kotlin Properties & Getters**: Access Kotlin properties directly (e.g., `order.amount` or `user.name`) — automatically resolves backing fields or getter methods (`getAmount()`, `isExpress()`).
     - **Safe Calls & Elvis**: Supports safe navigation and fallback defaults (e.g., `user?.address?.city`, `user?.name ?: "Unknown"`).
+    - **Type Casting & Checks**: Supports safe and unsafe type casts and type checks (e.g., `(user as Admin).permissions`, `user as? Admin ?: defaultAdmin`, `order is Order`, `42 as Long`).
     - **Method Calls & Arithmetic**: Supports method invocations, parameter passing, and math operators (e.g., `order.getAmount() * 0.15`, `processor.calculateTotal(order)`).
     - **Field Inspection**: To view an object's instance fields in detail, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
 - Step execution: `debroid step <session_id> <thread_id> <ACTION>` (Actions: `STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`)

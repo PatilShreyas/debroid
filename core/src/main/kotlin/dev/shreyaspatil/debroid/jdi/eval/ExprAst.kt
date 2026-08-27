@@ -127,3 +127,16 @@ data class TernaryOpNode(
     val thenExpr: ExprNode,
     val elseExpr: ExprNode
 ) : ExprNode
+
+/**
+ * Type cast AST node (e.g. `obj as Type` or `obj as? Type`).
+ *
+ * @property expr The expression to cast.
+ * @property targetType The target type name to cast to.
+ * @property isSafe Whether safe casting (`as?`) is used, returning null on cast failure instead of throwing.
+ */
+data class TypeCastNode(
+    val expr: ExprNode,
+    val targetType: String,
+    val isSafe: Boolean = false
+) : ExprNode

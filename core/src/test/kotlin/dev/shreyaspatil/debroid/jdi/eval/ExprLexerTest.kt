@@ -222,4 +222,48 @@ class ExprLexerTest {
             ExprLexer("@").tokenize()
         }
     }
+
+    @Test
+    fun `tokenize typecast operators as and as safe`() {
+        val tokens = ExprLexer("user as Admin , user as? Admin , asSafe as?").tokenize().map { it.token }
+        assertEquals(
+            listOf(
+                Token.Ident("user"),
+                Token.As,
+                Token.Ident("Admin"),
+                Token.Comma,
+                Token.Ident("user"),
+                Token.AsSafe,
+                Token.Ident("Admin"),
+                Token.Comma,
+                Token.Ident("asSafe"),
+                Token.AsSafe,
+                Token.Eof
+            ),
+            tokens
+        )
+
+        val prefixTokens = ExprLexer("assertion async ask as").tokenize().map { it.token }
+        assertEquals(
+            listOf(
+                Token.Ident("assertion"),
+                Token.Ident("async"),
+                Token.Ident("ask"),
+                Token.As,
+                Token.Eof
+            ),
+            prefixTokens
+        )
+
+        val doubleQuestionTokens = ExprLexer("x as??").tokenize().map { it.token }
+        assertEquals(
+            listOf(
+                Token.Ident("x"),
+                Token.AsSafe,
+                Token.Question,
+                Token.Eof
+            ),
+            doubleQuestionTokens
+        )
+    }
 }

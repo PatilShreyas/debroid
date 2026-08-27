@@ -203,6 +203,78 @@ class ExprParserTest {
     }
 
     @Test
+    fun `parse typecast expressions`() {
+        val unsafeCast = ExprParser.parse("user as Admin") as TypeCastNode
+        assertEquals(IdentifierNode("user"), unsafeCast.expr)
+        assertEquals("Admin", unsafeCast.targetType)
+        assertFalse(unsafeCast.isSafe)
+
+        val safeCast = ExprParser.parse("user as? com.example.Admin") as TypeCastNode
+        assertEquals(IdentifierNode("user"), safeCast.expr)
+        assertEquals("com.example.Admin", safeCast.targetType)
+        assertTrue(safeCast.isSafe)
+
+        val memberAccessCast = ExprParser.parse("(user as Admin).permissions") as MemberAccessNode
+        val innerCast = memberAccessCast.target as TypeCastNode
+        assertEquals("Admin", innerCast.targetType)
+        assertFalse(innerCast.isSafe)
+        assertEquals("permissions", memberAccessCast.memberName)
+
+        val safeMemberAccessCast = ExprParser.parse("(user as? Admin)?.permissions") as MemberAccessNode
+        val safeInnerCast = safeMemberAccessCast.target as TypeCastNode
+        assertTrue(safeInnerCast.isSafe)
+        assertTrue(safeMemberAccessCast.isSafe)
+        assertEquals("permissions", safeMemberAccessCast.memberName)
+
+        val genericCast = ExprParser.parse("items as List<String>") as TypeCastNode
+        assertEquals("List<String>", genericCast.targetType)
+
+        val arrayCast = ExprParser.parse("data as String[]") as TypeCastNode
+        assertEquals("String[]", arrayCast.targetType)
+
+        val elvisCast = ExprParser.parse("user as? Admin ?: defaultUser") as BinaryOpNode
+        assertEquals(BinaryOp.ELVIS, elvisCast.op)
+        val leftCast = elvisCast.left as TypeCastNode
+        assertEquals("Admin", leftCast.targetType)
+        assertTrue(leftCast.isSafe)
+
+        val chainedCast = ExprParser.parse("x as Any as String") as TypeCastNode
+        assertEquals("String", chainedCast.targetType)
+        val innerAnyCast = chainedCast.expr as TypeCastNode
+        assertEquals("Any", innerAnyCast.targetType)
+
+        val nestedGenericCast = ExprParser.parse("map as Map<String, List<Int>>") as TypeCastNode
+        assertEquals("Map<String, List<Int>>", nestedGenericCast.targetType)
+
+        val multiDimArrayCast = ExprParser.parse("grid as Int[][]") as TypeCastNode
+        assertEquals("Int[][]", multiDimArrayCast.targetType)
+
+        val nullableTypeCast = ExprParser.parse("obj as String?") as TypeCastNode
+        assertEquals("String?", nullableTypeCast.targetType)
+        assertFalse(nullableTypeCast.isSafe)
+
+        val safeNullableTypeCast = ExprParser.parse("obj as? String?") as TypeCastNode
+        assertEquals("String?", safeNullableTypeCast.targetType)
+        assertTrue(safeNullableTypeCast.isSafe)
+    }
+
+    @Test
+    fun `parse typecast syntax errors throw DebugException`() {
+        assertThrows(DebugException::class.java) {
+            ExprParser.parse("user as")
+        }
+        assertThrows(DebugException::class.java) {
+            ExprParser.parse("user as?")
+        }
+        assertThrows(DebugException::class.java) {
+            ExprParser.parse("user as List<String")
+        }
+        assertThrows(DebugException::class.java) {
+            ExprParser.parse("user as Int[")
+        }
+    }
+
+    @Test
     fun `parse syntax error throws DebugException`() {
         assertThrows(DebugException::class.java) {
             ExprParser.parse("amount >=")
