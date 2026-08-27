@@ -17,6 +17,7 @@ class ExprParserTest {
         assertEquals(IntLiteralNode(5), ExprParser.parse("0b101"))
         assertEquals(LongLiteralNode(100L), ExprParser.parse("100L"))
         assertEquals(FloatLiteralNode(3.14f), ExprParser.parse("3.14f"))
+        assertEquals(FloatLiteralNode(0.5f), ExprParser.parse(".5f"))
         assertEquals(DoubleLiteralNode(600.0), ExprParser.parse("600.0"))
         assertEquals(DoubleLiteralNode(1e5), ExprParser.parse("1e5"))
     }
@@ -68,6 +69,38 @@ class ExprParserTest {
     }
 
     @Test
+    fun `parse full precedence hierarchy across bitwise, shifts, relational, and arithmetic`() {
+        // 1 << 2 + 3 -> 1 << (2 + 3)
+        val shiftAst = ExprParser.parse("1 << 2 + 3") as BinaryOpNode
+        assertEquals(BinaryOp.SHL, shiftAst.op)
+        assertEquals(IntLiteralNode(1), shiftAst.left)
+        val shiftRight = shiftAst.right as BinaryOpNode
+        assertEquals(BinaryOp.ADD, shiftRight.op)
+        assertEquals(IntLiteralNode(2), shiftRight.left)
+        assertEquals(IntLiteralNode(3), shiftRight.right)
+
+        // a | b ^ c & d -> a | (b ^ (c & d))
+        val bitAst = ExprParser.parse("a | b ^ c & d") as BinaryOpNode
+        assertEquals(BinaryOp.BITWISE_OR, bitAst.op)
+        assertEquals(IdentifierNode("a"), bitAst.left)
+        val xorNode = bitAst.right as BinaryOpNode
+        assertEquals(BinaryOp.BITWISE_XOR, xorNode.op)
+        assertEquals(IdentifierNode("b"), xorNode.left)
+        val andNode = xorNode.right as BinaryOpNode
+        assertEquals(BinaryOp.BITWISE_AND, andNode.op)
+        assertEquals(IdentifierNode("c"), andNode.left)
+        assertEquals(IdentifierNode("d"), andNode.right)
+
+        // a < b == c > d -> (a < b) == (c > d)
+        val eqAst = ExprParser.parse("a < b == c > d") as BinaryOpNode
+        assertEquals(BinaryOp.EQUALS, eqAst.op)
+        val eqLeft = eqAst.left as BinaryOpNode
+        assertEquals(BinaryOp.LESS_THAN, eqLeft.op)
+        val eqRight = eqAst.right as BinaryOpNode
+        assertEquals(BinaryOp.GREATER_THAN, eqRight.op)
+    }
+
+    @Test
     fun `parse unary operations`() {
         val notNode = ExprParser.parse("!isValid") as UnaryOpNode
         assertEquals(UnaryOp.NOT, notNode.op)
@@ -76,6 +109,14 @@ class ExprParserTest {
         val negNode = ExprParser.parse("-42") as UnaryOpNode
         assertEquals(UnaryOp.NEGATE, negNode.op)
         assertEquals(IntLiteralNode(42), negNode.expr)
+
+        val bitNotNode = ExprParser.parse("~mask") as UnaryOpNode
+        assertEquals(UnaryOp.BITWISE_NOT, bitNotNode.op)
+        assertEquals(IdentifierNode("mask"), bitNotNode.expr)
+
+        val plusNode = ExprParser.parse("+5") as UnaryOpNode
+        assertEquals(UnaryOp.PLUS, plusNode.op)
+        assertEquals(IntLiteralNode(5), plusNode.expr)
     }
 
     @Test
@@ -110,6 +151,21 @@ class ExprParserTest {
         assertEquals(IdentifierNode("user"), safeMemberCall.target)
         assertEquals("getName", safeMemberCall.methodName)
         assertTrue(safeMemberCall.isSafe)
+    }
+
+    @Test
+    fun `parse nested method calls and chained array access`() {
+        val nestedCall = ExprParser.parse("foo(bar(1), baz(2, 3))") as MethodCallNode
+        assertEquals("foo", nestedCall.methodName)
+        assertEquals(2, nestedCall.args.size)
+        assertEquals("bar", (nestedCall.args[0] as MethodCallNode).methodName)
+        assertEquals("baz", (nestedCall.args[1] as MethodCallNode).methodName)
+
+        val matrixAccess = ExprParser.parse("matrix[0][1]") as ArrayAccessNode
+        val outerTarget = matrixAccess.target as ArrayAccessNode
+        assertEquals(IdentifierNode("matrix"), outerTarget.target)
+        assertEquals(IntLiteralNode(0), outerTarget.index)
+        assertEquals(IntLiteralNode(1), matrixAccess.index)
     }
 
     @Test
@@ -156,6 +212,18 @@ class ExprParserTest {
         }
         assertThrows(DebugException::class.java) {
             ExprParser.parse("a + ")
+        }
+        assertThrows(DebugException::class.java) {
+            ExprParser.parse("(1 + 2")
+        }
+        assertThrows(DebugException::class.java) {
+            ExprParser.parse("items[0")
+        }
+        assertThrows(DebugException::class.java) {
+            ExprParser.parse("a ? b")
+        }
+        assertThrows(DebugException::class.java) {
+            ExprParser.parse("1 + 2 3")
         }
     }
 }

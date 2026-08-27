@@ -1,9 +1,11 @@
 package dev.shreyaspatil.debroid.jdi.eval
 
+import com.sun.jdi.AbsentInformationException
 import com.sun.jdi.ArrayReference
 import com.sun.jdi.BooleanValue
 import com.sun.jdi.ClassType
 import com.sun.jdi.DoubleValue
+import com.sun.jdi.Field
 import com.sun.jdi.FloatValue
 import com.sun.jdi.IntegerValue
 import com.sun.jdi.InterfaceType
@@ -28,7 +30,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
-@Suppress("LargeClass")
+@Suppress("LargeClass", "LongMethod")
 class JdiAstEvaluatorTest {
 
     private lateinit var vm: VirtualMachine
@@ -203,6 +205,23 @@ class JdiAstEvaluatorTest {
         val shrResult = JdiExpressionEvaluator.evaluate("16 >> 2", vm, frame)
         assertTrue(shrResult is IntegerValue)
         assertEquals(4, (shrResult as IntegerValue).value())
+
+        val ushrResult = JdiExpressionEvaluator.evaluate("16 >>> 2", vm, frame)
+        assertTrue(ushrResult is IntegerValue)
+        assertEquals(4, (ushrResult as IntegerValue).value())
+
+        // Bitwise operations on booleans
+        val boolAnd = JdiExpressionEvaluator.evaluate("true & false", vm, frame)
+        assertTrue(boolAnd is BooleanValue)
+        assertFalse((boolAnd as BooleanValue).value())
+
+        val boolOr = JdiExpressionEvaluator.evaluate("true | false", vm, frame)
+        assertTrue(boolOr is BooleanValue)
+        assertTrue((boolOr as BooleanValue).value())
+
+        val boolXor = JdiExpressionEvaluator.evaluate("true ^ false", vm, frame)
+        assertTrue(boolXor is BooleanValue)
+        assertTrue((boolXor as BooleanValue).value())
     }
 
     @Test
@@ -232,10 +251,20 @@ class JdiAstEvaluatorTest {
         val notIsString = JdiExpressionEvaluator.evaluate("obj !is String", vm, frame)
         assertTrue(notIsString is BooleanValue)
         assertTrue((notIsString as BooleanValue).value())
+
+        // null is Type should evaluate to false
+        val nullIsString = JdiExpressionEvaluator.evaluate("null is String", vm, frame)
+        assertTrue(nullIsString is BooleanValue)
+        assertFalse((nullIsString as BooleanValue).value())
+
+        // null !is Type should evaluate to true
+        val nullNotIsString = JdiExpressionEvaluator.evaluate("null !is String", vm, frame)
+        assertTrue(nullNotIsString is BooleanValue)
+        assertTrue((nullNotIsString as BooleanValue).value())
     }
 
     @Test
-    fun `evaluates unary logical NOT`() {
+    fun `evaluates unary operations`() {
         val isValidVar = mockk<LocalVariable> { every { name() } returns "isValid" }
         val isValidVal = mockk<BooleanValue> {
             every { value() } returns true
@@ -245,9 +274,21 @@ class JdiAstEvaluatorTest {
         every { frame.visibleVariables() } returns listOf(isValidVar)
         every { frame.getValue(isValidVar) } returns isValidVal
 
-        val result = JdiExpressionEvaluator.evaluate("!isValid", vm, frame)
-        assertTrue(result is BooleanValue)
-        assertEquals(false, (result as BooleanValue).value())
+        val notResult = JdiExpressionEvaluator.evaluate("!isValid", vm, frame)
+        assertTrue(notResult is BooleanValue)
+        assertFalse((notResult as BooleanValue).value())
+
+        val negResult = JdiExpressionEvaluator.evaluate("-42", vm, frame)
+        assertTrue(negResult is IntegerValue)
+        assertEquals(-42, (negResult as IntegerValue).value())
+
+        val bitNotResult = JdiExpressionEvaluator.evaluate("~1", vm, frame)
+        assertTrue(bitNotResult is IntegerValue)
+        assertEquals(-2, (bitNotResult as IntegerValue).value())
+
+        val plusResult = JdiExpressionEvaluator.evaluate("+50", vm, frame)
+        assertTrue(plusResult is IntegerValue)
+        assertEquals(50, (plusResult as IntegerValue).value())
     }
 
     @Test
@@ -278,6 +319,82 @@ class JdiAstEvaluatorTest {
     }
 
     @Test
+    fun `evaluates Kotlin boolean property getter using is prefix`() {
+        val userVar = mockk<LocalVariable> { every { name() } returns "user" }
+        val userObj = mockk<ObjectReference>()
+        val refType = mockk<ReferenceType>()
+        val isActiveMethod = mockk<Method> {
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val activeVal = mockk<BooleanValue> {
+            every { value() } returns true
+            every { booleanValue() } returns true
+        }
+
+        every { userObj.referenceType() } returns refType
+        every { refType.fieldByName("active") } returns null
+        every { refType.methodsByName("getActive") } returns emptyList()
+        every { refType.methodsByName("isActive") } returns listOf(isActiveMethod)
+        every {
+            userObj.invokeMethod(thread, isActiveMethod, emptyList(), ObjectReference.INVOKE_SINGLE_THREADED)
+        } returns activeVal
+
+        every { frame.visibleVariables() } returns listOf(userVar)
+        every { frame.getValue(userVar) } returns userObj
+
+        val result = JdiExpressionEvaluator.evaluate("user.active", vm, frame)
+        assertTrue(result is BooleanValue)
+        assertTrue((result as BooleanValue).value())
+    }
+
+    @Test
+    fun `evaluates this and implicit this scopes`() {
+        val thisObj = mockk<ObjectReference>()
+        val refType = mockk<ReferenceType>()
+        val field = mockk<Field>()
+        val countVal = mockk<IntegerValue> {
+            every { value() } returns 42
+            every { intValue() } returns 42
+        }
+
+        every { frame.thisObject() } returns thisObj
+        every { thisObj.referenceType() } returns refType
+        every { refType.fieldByName("count") } returns field
+        every { thisObj.getValue(field) } returns countVal
+
+        // Explicit `this.count`
+        val thisResult = JdiExpressionEvaluator.evaluate("this.count", vm, frame)
+        assertTrue(thisResult is IntegerValue)
+        assertEquals(42, (thisResult as IntegerValue).value())
+
+        // Implicit `count` resolution on `this` when absent in local variables
+        val implicitResult = JdiExpressionEvaluator.evaluate("count", vm, frame)
+        assertTrue(implicitResult is IntegerValue)
+        assertEquals(42, (implicitResult as IntegerValue).value())
+    }
+
+    @Test
+    fun `handles AbsentInformationException when looking up local variables`() {
+        val thisObj = mockk<ObjectReference>()
+        val refType = mockk<ReferenceType>()
+        val field = mockk<Field>()
+        val countVal = mockk<IntegerValue> {
+            every { value() } returns 99
+            every { intValue() } returns 99
+        }
+
+        every { frame.visibleVariables() } throws AbsentInformationException()
+        every { frame.thisObject() } returns thisObj
+        every { thisObj.referenceType() } returns refType
+        every { refType.fieldByName("count") } returns field
+        every { thisObj.getValue(field) } returns countVal
+
+        val result = JdiExpressionEvaluator.evaluate("count", vm, frame)
+        assertTrue(result is IntegerValue)
+        assertEquals(99, (result as IntegerValue).value())
+    }
+
+    @Test
     fun `evaluates Kotlin safe navigation operator on null object`() {
         val userVar = mockk<LocalVariable> { every { name() } returns "user" }
         every { frame.visibleVariables() } returns listOf(userVar)
@@ -285,6 +402,17 @@ class JdiAstEvaluatorTest {
 
         val result = JdiExpressionEvaluator.evaluate("user?.name", vm, frame)
         assertNull(result)
+    }
+
+    @Test
+    fun `throws NullPointerException when accessing property on null without safe navigation`() {
+        val userVar = mockk<LocalVariable> { every { name() } returns "user" }
+        every { frame.visibleVariables() } returns listOf(userVar)
+        every { frame.getValue(userVar) } returns null
+
+        assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("user.name", vm, frame)
+        }
     }
 
     @Test
@@ -303,6 +431,34 @@ class JdiAstEvaluatorTest {
         val result = JdiExpressionEvaluator.evaluate("\"Total: \" + (10 + 20)", vm, frame)
         assertTrue(result is StringReference)
         assertEquals("Total: 30", (result as StringReference).value())
+
+        val nullConcat = JdiExpressionEvaluator.evaluate("\"Val: \" + null", vm, frame)
+        assertTrue(nullConcat is StringReference)
+        assertEquals("Val: null", (nullConcat as StringReference).value())
+    }
+
+    @Test
+    fun `evaluates array and string length properties`() {
+        val arrayRef = mockk<ArrayReference>()
+        every { arrayRef.length() } returns 5
+
+        val strRef = mockk<StringReference>()
+        every { strRef.value() } returns "Hello"
+
+        val arrVar = mockk<LocalVariable> { every { name() } returns "arr" }
+        val strVar = mockk<LocalVariable> { every { name() } returns "str" }
+
+        every { frame.visibleVariables() } returns listOf(arrVar, strVar)
+        every { frame.getValue(arrVar) } returns arrayRef
+        every { frame.getValue(strVar) } returns strRef
+
+        val arrLen = JdiExpressionEvaluator.evaluate("arr.length", vm, frame)
+        assertTrue(arrLen is IntegerValue)
+        assertEquals(5, (arrLen as IntegerValue).value())
+
+        val strLen = JdiExpressionEvaluator.evaluate("str.length", vm, frame)
+        assertTrue(strLen is IntegerValue)
+        assertEquals(5, (strLen as IntegerValue).value())
     }
 
     @Test
@@ -322,7 +478,7 @@ class JdiAstEvaluatorTest {
     }
 
     @Test
-    fun `throws DebugException when indexing out of bounds`() {
+    fun `throws DebugException when indexing out of bounds or invalid array index`() {
         val itemsVar = mockk<LocalVariable> { every { name() } returns "items" }
         val arrayRef = mockk<ArrayReference>()
 
@@ -333,19 +489,70 @@ class JdiAstEvaluatorTest {
         assertThrows(DebugException::class.java) {
             JdiExpressionEvaluator.evaluate("items[5]", vm, frame)
         }
+
+        assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("items[-1]", vm, frame)
+        }
+    }
+
+    @Test
+    fun `evaluates method invocation on object`() {
+        val calcObj = mockk<ObjectReference>()
+        val refType = mockk<ReferenceType>()
+        val method = mockk<Method> {
+            every { argumentTypeNames() } returns listOf("int", "int")
+        }
+        val returnVal = mockk<IntegerValue> {
+            every { value() } returns 15
+            every { intValue() } returns 15
+        }
+
+        every { calcObj.referenceType() } returns refType
+        every { refType.methodsByName("add") } returns listOf(method)
+        every {
+            calcObj.invokeMethod(thread, method, any(), ObjectReference.INVOKE_SINGLE_THREADED)
+        } returns returnVal
+
+        val calcVar = mockk<LocalVariable> { every { name() } returns "calc" }
+        every { frame.visibleVariables() } returns listOf(calcVar)
+        every { frame.getValue(calcVar) } returns calcObj
+
+        val result = JdiExpressionEvaluator.evaluate("calc.add(5, 10)", vm, frame)
+        assertTrue(result is IntegerValue)
+        assertEquals(15, (result as IntegerValue).value())
     }
 
     @Test
     fun `evaluates ternary operator`() {
-        val result = JdiExpressionEvaluator.evaluate("true ? 100 : 200", vm, frame)
-        assertTrue(result is IntegerValue)
-        assertEquals(100, (result as IntegerValue).value())
+        val trueResult = JdiExpressionEvaluator.evaluate("true ? 100 : 200", vm, frame)
+        assertTrue(trueResult is IntegerValue)
+        assertEquals(100, (trueResult as IntegerValue).value())
+
+        val falseResult = JdiExpressionEvaluator.evaluate("false ? 100 : 200", vm, frame)
+        assertTrue(falseResult is IntegerValue)
+        assertEquals(200, (falseResult as IntegerValue).value())
     }
 
     @Test
     fun `throws on division by zero`() {
         assertThrows(DebugException::class.java) {
             JdiExpressionEvaluator.evaluate("10 / 0", vm, frame)
+        }
+        assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("10L % 0L", vm, frame)
+        }
+    }
+
+    @Test
+    fun `throws on unresolved identifier or invalid operation`() {
+        assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("unknownVariable", vm, frame)
+        }
+        assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("!123", vm, frame)
+        }
+        assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("~\"hello\"", vm, frame)
         }
     }
 }
