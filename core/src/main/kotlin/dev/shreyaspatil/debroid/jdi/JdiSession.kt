@@ -710,7 +710,7 @@ class JdiSession(
         val visVar = frame.visibleVariables().find { it.name() == varName }
             ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "Variable $varName not found in current local scope.")
 
-        val newJdiVal: Value = try {
+        val newJdiVal: Value? = try {
             JdiExpressionEvaluator.evaluate(newValueStr, vm, frame)
         } catch (e: Exception) {
             throw DebugException(
@@ -721,7 +721,15 @@ class JdiSession(
 
         // Type checking and assignment
         val targetType = visVar.type()
-        val finalJdiVal = if (newJdiVal.type() != targetType) {
+        val finalJdiVal = if (newJdiVal == null) {
+            if (targetType is PrimitiveType) {
+                throw DebugException(
+                    ErrorCode.EVALUATION_FAILED,
+                    "Type mismatch: Cannot assign null to primitive ${targetType.name()}"
+                )
+            }
+            null
+        } else if (newJdiVal.type() != targetType) {
             // Attempt primitive coercion (e.g., float evaluated from '88.88' to target double)
             if (newJdiVal is PrimitiveValue && targetType is PrimitiveType) {
                 when (targetType.name()) {
@@ -737,7 +745,7 @@ class JdiSession(
                 }
             } else {
                 throw DebugException(
-                    ErrorCode.INTERNAL_ERROR,
+                    ErrorCode.EVALUATION_FAILED,
                     "Type mismatch: Cannot assign ${newJdiVal.type().name()} to ${targetType.name()}"
                 )
             }

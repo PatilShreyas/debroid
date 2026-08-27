@@ -5,6 +5,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 data class Order(val id: String, val amount: Double, val customerType: String)
+data class Address(val city: String, val zipCode: String)
+data class User(val name: String, val address: Address?)
+data class ComplexOrder(
+    val id: String,
+    val amount: Double,
+    val customerType: String,
+    val isExpress: Boolean,
+    val user: User?,
+    val items: List<String>
+)
 
 class OrderProcessor {
     fun calculateTotal(order: Order): Double {
@@ -41,6 +51,14 @@ class DefaultDataRepository : DataRepository {
         totalOrdersProcessed++
         val orderId = "ORD-${System.currentTimeMillis() % 10000}"
         val order = Order(orderId, amount, customerType)
+        val isExpress = true
+        val discount = 0.15
+        val isCancelled = false
+        val user = User("Alice", Address("New York", "10001"))
+        val complexOrder = ComplexOrder("ORD-101", 650.0, "GOLD", isExpress, user, listOf("Laptop", "Mouse"))
+        val nullUser: User? = null
+        val nullAddressUser = User("Bob", null)
+
         val total = processor.calculateTotal(order)
         _lastOrderResult.value = "Order $orderId ($customerType): $$total"
     }
