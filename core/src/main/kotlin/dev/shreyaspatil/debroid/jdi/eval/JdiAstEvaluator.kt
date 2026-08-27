@@ -40,7 +40,7 @@ class JdiAstEvaluator(
     private val frame: StackFrame
 ) {
     companion object {
-        private val universalSupertypes = PrimitiveKind.UNIVERSAL.typeNames
+        private val universalSupertypes = PrimitiveKind.UNIVERSAL.allTypeNames
         private val voidSupertypes = setOf("Void", "Nothing", "kotlin.Unit", "void")
         private val arraySupertypes = setOf(
             "Array",
@@ -49,19 +49,6 @@ class JdiAstEvaluator(
             "java.lang.Cloneable",
             "Serializable",
             "java.io.Serializable"
-        )
-
-        // Maps Kotlin primitive type names to their boxed JVM class equivalents in JDI metadata.
-        // E.g., 'Int' in Kotlin bytecode is represented as 'java.lang.Integer' when boxed in Object.
-        private val kotlinPrimitiveWrapperMap = mapOf(
-            "Int" to "java.lang.Integer",
-            "Char" to "java.lang.Character",
-            "Boolean" to "java.lang.Boolean",
-            "Byte" to "java.lang.Byte",
-            "Short" to "java.lang.Short",
-            "Long" to "java.lang.Long",
-            "Float" to "java.lang.Float",
-            "Double" to "java.lang.Double"
         )
 
         // Maps Kotlin primitive array type names to their underlying JVM array signatures.
@@ -85,24 +72,73 @@ class JdiAstEvaluator(
     }
 
     /**
-     * Canonical primitive and common supertype categories mapped to their exact supported type names.
+     * Canonical primitive and common supertype categories with segregated Kotlin, Java,
+     * and JVM wrapper class names.
      */
-    private enum class PrimitiveKind(val typeNames: Set<String>) {
-        INT(setOf("Int", "kotlin.Int", "int", "Integer", "java.lang.Integer")),
-        LONG(setOf("Long", "kotlin.Long", "long", "java.lang.Long")),
-        FLOAT(setOf("Float", "kotlin.Float", "float", "java.lang.Float")),
-        DOUBLE(setOf("Double", "kotlin.Double", "double", "java.lang.Double")),
-        BYTE(setOf("Byte", "kotlin.Byte", "byte", "java.lang.Byte")),
-        SHORT(setOf("Short", "kotlin.Short", "short", "java.lang.Short")),
-        CHAR(setOf("Char", "kotlin.Char", "char", "Character", "java.lang.Character")),
-        BOOLEAN(setOf("Boolean", "kotlin.Boolean", "boolean", "java.lang.Boolean")),
-        STRING(setOf("String", "kotlin.String", "java.lang.String")),
-        NUMBER(setOf("Number", "kotlin.Number", "java.lang.Number")),
-        UNIVERSAL(setOf("Any", "kotlin.Any", "Object", "java.lang.Object"));
+    private enum class PrimitiveKind(
+        val kotlinTypeNames: Set<String>,
+        val javaTypeNames: Set<String> = emptySet(),
+        val wrapperClassName: String
+    ) {
+        INT(
+            kotlinTypeNames = setOf("Int", "kotlin.Int"),
+            javaTypeNames = setOf("int", "Integer"),
+            wrapperClassName = "java.lang.Integer"
+        ),
+        LONG(
+            kotlinTypeNames = setOf("Long", "kotlin.Long"),
+            javaTypeNames = setOf("long"),
+            wrapperClassName = "java.lang.Long"
+        ),
+        FLOAT(
+            kotlinTypeNames = setOf("Float", "kotlin.Float"),
+            javaTypeNames = setOf("float"),
+            wrapperClassName = "java.lang.Float"
+        ),
+        DOUBLE(
+            kotlinTypeNames = setOf("Double", "kotlin.Double"),
+            javaTypeNames = setOf("double"),
+            wrapperClassName = "java.lang.Double"
+        ),
+        BYTE(
+            kotlinTypeNames = setOf("Byte", "kotlin.Byte"),
+            javaTypeNames = setOf("byte"),
+            wrapperClassName = "java.lang.Byte"
+        ),
+        SHORT(
+            kotlinTypeNames = setOf("Short", "kotlin.Short"),
+            javaTypeNames = setOf("short"),
+            wrapperClassName = "java.lang.Short"
+        ),
+        CHAR(
+            kotlinTypeNames = setOf("Char", "kotlin.Char"),
+            javaTypeNames = setOf("char", "Character"),
+            wrapperClassName = "java.lang.Character"
+        ),
+        BOOLEAN(
+            kotlinTypeNames = setOf("Boolean", "kotlin.Boolean"),
+            javaTypeNames = setOf("boolean"),
+            wrapperClassName = "java.lang.Boolean"
+        ),
+        STRING(
+            kotlinTypeNames = setOf("String", "kotlin.String"),
+            wrapperClassName = "java.lang.String"
+        ),
+        NUMBER(
+            kotlinTypeNames = setOf("Number", "kotlin.Number"),
+            wrapperClassName = "java.lang.Number"
+        ),
+        UNIVERSAL(
+            kotlinTypeNames = setOf("Any", "kotlin.Any"),
+            javaTypeNames = setOf("Object"),
+            wrapperClassName = "java.lang.Object"
+        );
+
+        val allTypeNames: Set<String> = kotlinTypeNames + javaTypeNames + wrapperClassName
 
         companion object {
             private val typeNameToKind: Map<String, PrimitiveKind> = entries
-                .flatMap { kind -> kind.typeNames.map { name -> name to kind } }
+                .flatMap { kind -> kind.allTypeNames.map { name -> name to kind } }
                 .toMap()
 
             fun fromTypeName(name: String): PrimitiveKind? = typeNameToKind[name]
@@ -483,44 +519,50 @@ class JdiAstEvaluator(
      * 2. Primitive conversion: Coerces numeric/character values across primitive widths and string representations.
      * 3. Reference subtyping: Traverses class hierarchies and interface implementations via JDI metadata.
      */
-    @Suppress("ReturnCount", "ThrowsCount")
+    /**
+     * Evaluates explicit type casting expressions (`as` and `as?`).
+     *
+     * Evaluation flow:
+     * 1. Null handling: Safe casts (`as?`) and nullable target types return null; unsafe casts throw NPE.
+     * 2. Primitive conversion: Coerces numeric/character values across primitive widths and string representations.
+     * 3. Reference subtyping: Traverses class hierarchies and interface implementations via JDI metadata.
+     */
     private fun evaluateTypeCast(node: TypeCastNode): Value? {
         val value = evaluateNode(node.expr)
         val baseType = extractBaseTypeName(node.targetType)
 
-        // 1. Handle null values
-        if (value == null) {
-            if (node.isSafe || node.targetType.endsWith("?") || baseType in voidSupertypes) {
-                return null
-            }
-            throw DebugException(
-                ErrorCode.EVALUATION_FAILED,
-                "NullPointerException: null cannot be cast to non-null type ${node.targetType}"
-            )
+        return when {
+            value == null -> castNullValue(node, baseType)
+            isNumeric(value) || value is BooleanValue || value is CharValue -> castPrimitiveValue(value, baseType, node)
+            value is ObjectReference -> castObjectReference(value, baseType, node)
+            else -> fallbackCast(value, node)
         }
+    }
 
-        // 2. Handle primitive values and numeric conversions
-        if (isNumeric(value) || value is BooleanValue || value is CharValue) {
-            return castPrimitiveValue(value, baseType, node)
+    private fun castNullValue(node: TypeCastNode, baseType: String): Value? {
+        if (node.isSafe || node.targetType.endsWith("?") || baseType in voidSupertypes) {
+            return null
         }
+        throw DebugException(
+            ErrorCode.EVALUATION_FAILED,
+            "NullPointerException: null cannot be cast to non-null type ${node.targetType}"
+        )
+    }
 
-        // 3. Handle object reference casts
-        if (value is ObjectReference) {
-            val isInstance = isSubtypeOf(value.referenceType(), baseType)
-            if (isInstance) {
-                return value
-            }
-
-            if (node.isSafe) {
-                return null
-            }
-
-            throw DebugException(
-                ErrorCode.EVALUATION_FAILED,
-                "ClassCastException: ${value.referenceType().name()} cannot be cast to ${node.targetType}"
-            )
+    private fun castObjectReference(value: ObjectReference, baseType: String, node: TypeCastNode): Value? {
+        if (isSubtypeOf(value.referenceType(), baseType)) {
+            return value
         }
+        if (node.isSafe) {
+            return null
+        }
+        throw DebugException(
+            ErrorCode.EVALUATION_FAILED,
+            "ClassCastException: ${value.referenceType().name()} cannot be cast to ${node.targetType}"
+        )
+    }
 
+    private fun fallbackCast(value: Value, node: TypeCastNode): Value? {
         if (node.isSafe) return null
         throw DebugException(
             ErrorCode.EVALUATION_FAILED,
@@ -530,59 +572,36 @@ class JdiAstEvaluator(
 
     /**
      * Casts or converts primitive values to the requested [baseType].
-     * Uses [convertOrFallback] to perform conversions when operands are numeric/char,
-     * while safely failing (or returning null for safe casts) when incompatible.
      */
-    @Suppress("CyclomaticComplexMethod", "ReturnCount", "ThrowsCount")
     private fun castPrimitiveValue(value: Value, baseType: String, node: TypeCastNode): Value? {
-        val isNumericOrChar = isNumeric(value) || value is CharValue
         val kind = PrimitiveKind.fromTypeName(baseType)
+        val converted = kind?.let { convertPrimitive(value, it) }
 
-        fun convertOrFallback(targetName: String, convert: () -> Value): Value? {
-            return if (isNumericOrChar) {
-                convert()
-            } else if (node.isSafe) {
-                null
-            } else {
-                throw DebugException(
-                    ErrorCode.EVALUATION_FAILED,
-                    "ClassCastException: $value cannot be cast to $targetName"
-                )
-            }
+        if (converted != null) {
+            return converted
         }
+        if (node.isSafe) {
+            return null
+        }
+        throw DebugException(
+            ErrorCode.EVALUATION_FAILED,
+            "ClassCastException: Primitive $value cannot be cast to ${node.targetType}"
+        )
+    }
 
+    private fun convertPrimitive(value: Value, kind: PrimitiveKind): Value? {
+        val isNumericOrChar = isNumeric(value) || value is CharValue
         return when (kind) {
-            PrimitiveKind.INT -> convertOrFallback("Int") { vm.mirrorOf(toInt(value)) }
-            PrimitiveKind.LONG -> convertOrFallback("Long") { vm.mirrorOf(toLong(value)) }
-            PrimitiveKind.FLOAT -> convertOrFallback("Float") { vm.mirrorOf(toFloat(value)) }
-            PrimitiveKind.DOUBLE -> convertOrFallback("Double") { vm.mirrorOf(toDouble(value)) }
-            PrimitiveKind.BYTE -> convertOrFallback("Byte") { vm.mirrorOf(toInt(value).toByte()) }
-            PrimitiveKind.SHORT -> convertOrFallback("Short") { vm.mirrorOf(toInt(value).toShort()) }
-            PrimitiveKind.CHAR -> convertOrFallback("Char") { vm.mirrorOf(toInt(value).toChar()) }
-            PrimitiveKind.BOOLEAN -> {
-                if (value is BooleanValue) {
-                    value
-                } else if (node.isSafe) {
-                    null
-                } else {
-                    throw DebugException(
-                        ErrorCode.EVALUATION_FAILED,
-                        "ClassCastException: $value cannot be cast to Boolean"
-                    )
-                }
-            }
+            PrimitiveKind.INT -> if (isNumericOrChar) vm.mirrorOf(toInt(value)) else null
+            PrimitiveKind.LONG -> if (isNumericOrChar) vm.mirrorOf(toLong(value)) else null
+            PrimitiveKind.FLOAT -> if (isNumericOrChar) vm.mirrorOf(toFloat(value)) else null
+            PrimitiveKind.DOUBLE -> if (isNumericOrChar) vm.mirrorOf(toDouble(value)) else null
+            PrimitiveKind.BYTE -> if (isNumericOrChar) vm.mirrorOf(toInt(value).toByte()) else null
+            PrimitiveKind.SHORT -> if (isNumericOrChar) vm.mirrorOf(toInt(value).toShort()) else null
+            PrimitiveKind.CHAR -> if (isNumericOrChar) vm.mirrorOf(toInt(value).toChar()) else null
+            PrimitiveKind.BOOLEAN -> value as? BooleanValue
             PrimitiveKind.STRING -> vm.mirrorOf(valueToString(value))
             PrimitiveKind.NUMBER, PrimitiveKind.UNIVERSAL -> value
-            null -> {
-                if (node.isSafe) {
-                    null
-                } else {
-                    throw DebugException(
-                        ErrorCode.EVALUATION_FAILED,
-                        "ClassCastException: Primitive $value cannot be cast to ${node.targetType}"
-                    )
-                }
-            }
         }
     }
 
@@ -626,53 +645,50 @@ class JdiAstEvaluator(
      * Recursively traverses class inheritance and interface implementation hierarchies to check
      * if [type] is a subtype of [targetTypeName].
      */
-    @Suppress("ReturnCount")
     private fun isSubtypeOf(type: ReferenceType, targetTypeName: String): Boolean {
         val baseName = extractBaseTypeName(targetTypeName)
-        // 1. Any type is a subtype of universal supertypes (Any / Object)
-        if (baseName in universalSupertypes) return true
+        if (matchesTypeName(type, baseName)) return true
 
-        // 2. Exact match or boxed primitive wrapper match (e.g. Int -> java.lang.Integer)
-        val resolvedTarget = kotlinPrimitiveWrapperMap[baseName] ?: baseName
-        if (type.name() == resolvedTarget ||
-            type.name().endsWith(".$resolvedTarget") ||
-            type.name().endsWith(".$baseName")
-        ) {
-            return true
+        return when (type) {
+            is com.sun.jdi.ClassType -> isClassSubtypeOf(type, baseName)
+            is com.sun.jdi.InterfaceType -> isInterfaceSubtypeOf(type, baseName)
+            is com.sun.jdi.ArrayType -> isArraySubtypeOf(type, baseName)
+            else -> false
         }
+    }
 
-        // 3. Class hierarchy traversal (superclasses and all implemented interfaces)
-        if (type is com.sun.jdi.ClassType) {
-            val superclass = runCatching { type.superclass() }.getOrNull()
-            if (superclass != null && isSubtypeOf(superclass, baseName)) return true
-            val ifaces = runCatching { type.allInterfaces() }.getOrDefault(emptyList())
-            for (iface in ifaces) {
-                if (iface.name() == baseName || iface.name().endsWith(".$baseName")) return true
-            }
-        } else if (type is com.sun.jdi.InterfaceType) {
-            // 4. Interface hierarchy traversal (extended superinterfaces)
-            val superIfaces = runCatching { type.superinterfaces() }.getOrDefault(emptyList())
-            for (superIface in superIfaces) {
-                if (isSubtypeOf(superIface, baseName)) return true
-            }
-        } else if (type is com.sun.jdi.ArrayType) {
-            // 5. Array hierarchy & primitive array component type matching
-            if (baseName in arraySupertypes) {
-                return true
-            }
-            val mappedArray = kotlinPrimitiveArrayMap[baseName]
-            if (mappedArray != null && type.name() == mappedArray) {
-                return true
-            }
-            if (baseName.endsWith("[]")) {
-                val componentTarget = baseName.dropLast(2)
-                val componentType = type.componentTypeName()
-                if (componentType.equals(componentTarget, ignoreCase = true) ||
-                    componentType.endsWith(".$componentTarget", ignoreCase = true)
-                ) {
-                    return true
-                }
-            }
+    private fun matchesTypeName(type: ReferenceType, baseName: String): Boolean {
+        if (baseName in universalSupertypes) return true
+        val resolvedTarget = PrimitiveKind.fromTypeName(baseName)?.wrapperClassName ?: baseName
+        val typeName = type.name()
+        return typeName == resolvedTarget ||
+            typeName.endsWith(".$resolvedTarget") ||
+            typeName.endsWith(".$baseName")
+    }
+
+    private fun isClassSubtypeOf(type: com.sun.jdi.ClassType, baseName: String): Boolean {
+        val superclass = runCatching { type.superclass() }.getOrNull()
+        if (superclass != null && isSubtypeOf(superclass, baseName)) return true
+
+        val ifaces = runCatching { type.allInterfaces() }.getOrDefault(emptyList())
+        return ifaces.any { it.name() == baseName || it.name().endsWith(".$baseName") }
+    }
+
+    private fun isInterfaceSubtypeOf(type: com.sun.jdi.InterfaceType, baseName: String): Boolean {
+        val superIfaces = runCatching { type.superinterfaces() }.getOrDefault(emptyList())
+        return superIfaces.any { isSubtypeOf(it, baseName) }
+    }
+
+    private fun isArraySubtypeOf(type: com.sun.jdi.ArrayType, baseName: String): Boolean {
+        if (baseName in arraySupertypes) return true
+        val mappedArray = kotlinPrimitiveArrayMap[baseName]
+        if (mappedArray != null && type.name() == mappedArray) return true
+
+        if (baseName.endsWith("[]")) {
+            val componentTarget = baseName.dropLast(2)
+            val componentType = type.componentTypeName()
+            return componentType.equals(componentTarget, ignoreCase = true) ||
+                componentType.endsWith(".$componentTarget", ignoreCase = true)
         }
         return false
     }
