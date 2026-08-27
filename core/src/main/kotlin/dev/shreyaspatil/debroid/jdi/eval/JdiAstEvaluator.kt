@@ -643,27 +643,15 @@ class JdiAstEvaluator(
 
         // 3. Class hierarchy traversal (superclasses and all implemented interfaces)
         if (type is com.sun.jdi.ClassType) {
-            val superclass = try {
-                type.superclass()
-            } catch (_: Exception) {
-                null
-            }
+            val superclass = runCatching { type.superclass() }.getOrNull()
             if (superclass != null && isSubtypeOf(superclass, baseName)) return true
-            val ifaces = try {
-                type.allInterfaces()
-            } catch (_: Exception) {
-                emptyList()
-            }
+            val ifaces = runCatching { type.allInterfaces() }.getOrDefault(emptyList())
             for (iface in ifaces) {
                 if (iface.name() == baseName || iface.name().endsWith(".$baseName")) return true
             }
         } else if (type is com.sun.jdi.InterfaceType) {
             // 4. Interface hierarchy traversal (extended superinterfaces)
-            val superIfaces = try {
-                type.superinterfaces()
-            } catch (_: Exception) {
-                emptyList()
-            }
+            val superIfaces = runCatching { type.superinterfaces() }.getOrDefault(emptyList())
             for (superIface in superIfaces) {
                 if (isSubtypeOf(superIface, baseName)) return true
             }
