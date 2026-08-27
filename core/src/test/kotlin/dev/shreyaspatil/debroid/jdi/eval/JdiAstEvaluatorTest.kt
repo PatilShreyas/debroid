@@ -861,4 +861,34 @@ class JdiAstEvaluatorTest {
         val safeCustomCast = JdiExpressionEvaluator.evaluate("42 as? dev.shreyaspatil.number.Int", vm, frame)
         assertNull(safeCustomCast)
     }
+
+    @Test
+    fun `evaluates void and nothing supertypes casting and checking`() {
+        assertNull(JdiExpressionEvaluator.evaluate("null as Void", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as java.lang.Void", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as void", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as Nothing", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as kotlin.Unit", vm, frame))
+        assertNull(JdiExpressionEvaluator.evaluate("null as Unit", vm, frame))
+
+        val isVoid = JdiExpressionEvaluator.evaluate("null is Void", vm, frame)
+        assertTrue((isVoid as BooleanValue).value())
+
+        val isNothing = JdiExpressionEvaluator.evaluate("null is Nothing", vm, frame)
+        assertTrue((isNothing as BooleanValue).value())
+
+        val isUnit = JdiExpressionEvaluator.evaluate("null is Unit", vm, frame)
+        assertTrue((isUnit as BooleanValue).value())
+
+        val primCastEx = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("42 as Void", vm, frame)
+        }
+        assertTrue(primCastEx.message?.contains("ClassCastException") == true)
+
+        val safePrimCast = JdiExpressionEvaluator.evaluate("42 as? Void", vm, frame)
+        assertNull(safePrimCast)
+
+        val isPrimVoid = JdiExpressionEvaluator.evaluate("42 is Void", vm, frame)
+        assertFalse((isPrimVoid as BooleanValue).value())
+    }
 }

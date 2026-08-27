@@ -41,7 +41,7 @@ class JdiAstEvaluator(
 ) {
     companion object {
         private val universalSupertypes = PrimitiveKind.UNIVERSAL.allTypeNames
-        private val voidSupertypes = setOf("Void", "Nothing", "kotlin.Unit", "void")
+        private val voidSupertypes = PrimitiveKind.VOID.allTypeNames
         private val arraySupertypes = setOf(
             "Array",
             "kotlin.Array",
@@ -52,16 +52,9 @@ class JdiAstEvaluator(
         )
 
         // Maps Kotlin primitive array type names to their underlying JVM array signatures.
-        private val kotlinPrimitiveArrayMap = mapOf(
-            "IntArray" to "int[]",
-            "LongArray" to "long[]",
-            "ByteArray" to "byte[]",
-            "ShortArray" to "short[]",
-            "FloatArray" to "float[]",
-            "DoubleArray" to "double[]",
-            "BooleanArray" to "boolean[]",
-            "CharArray" to "char[]"
-        )
+        private val kotlinPrimitiveArrayMap: Map<String, String> = PrimitiveKind.entries
+            .mapNotNull { it.arrayType }
+            .associate { it.kotlinTypeName to it.jvmTypeName }
 
         /**
          * Evaluates the [ast] node against [vm] and [frame].
@@ -71,54 +64,68 @@ class JdiAstEvaluator(
         }
     }
 
+    private data class ArrayType(
+        val kotlinTypeName: String,
+        val jvmTypeName: String
+    )
+
     /**
      * Canonical primitive and common supertype categories with segregated Kotlin, Java,
      * and JVM wrapper class names.
      */
     private enum class PrimitiveKind(
         val kotlinTypeNames: Set<String>,
-        val javaTypeNames: Set<String> = emptySet(),
-        val wrapperClassName: String
+        val javaPrimitiveName: String? = null,
+        val wrapperClassName: String,
+        val arrayType: ArrayType? = null
     ) {
         INT(
             kotlinTypeNames = setOf("Int", "kotlin.Int"),
-            javaTypeNames = setOf("int", "Integer"),
-            wrapperClassName = "java.lang.Integer"
+            javaPrimitiveName = "int",
+            wrapperClassName = "java.lang.Integer",
+            arrayType = ArrayType(kotlinTypeName = "IntArray", jvmTypeName = "int[]")
         ),
         LONG(
             kotlinTypeNames = setOf("Long", "kotlin.Long"),
-            javaTypeNames = setOf("long"),
-            wrapperClassName = "java.lang.Long"
+            javaPrimitiveName = "long",
+            wrapperClassName = "java.lang.Long",
+            arrayType = ArrayType(kotlinTypeName = "LongArray", jvmTypeName = "long[]")
         ),
         FLOAT(
             kotlinTypeNames = setOf("Float", "kotlin.Float"),
-            javaTypeNames = setOf("float"),
-            wrapperClassName = "java.lang.Float"
+            javaPrimitiveName = "float",
+            wrapperClassName = "java.lang.Float",
+            arrayType = ArrayType(kotlinTypeName = "FloatArray", jvmTypeName = "float[]")
         ),
         DOUBLE(
             kotlinTypeNames = setOf("Double", "kotlin.Double"),
-            javaTypeNames = setOf("double"),
-            wrapperClassName = "java.lang.Double"
+            javaPrimitiveName = "double",
+            wrapperClassName = "java.lang.Double",
+            arrayType = ArrayType(kotlinTypeName = "DoubleArray", jvmTypeName = "double[]")
         ),
         BYTE(
             kotlinTypeNames = setOf("Byte", "kotlin.Byte"),
-            javaTypeNames = setOf("byte"),
-            wrapperClassName = "java.lang.Byte"
+            javaPrimitiveName = "byte",
+            wrapperClassName = "java.lang.Byte",
+            arrayType = ArrayType(kotlinTypeName = "ByteArray", jvmTypeName = "byte[]")
         ),
         SHORT(
             kotlinTypeNames = setOf("Short", "kotlin.Short"),
-            javaTypeNames = setOf("short"),
-            wrapperClassName = "java.lang.Short"
+            javaPrimitiveName = "short",
+            wrapperClassName = "java.lang.Short",
+            arrayType = ArrayType(kotlinTypeName = "ShortArray", jvmTypeName = "short[]")
         ),
         CHAR(
             kotlinTypeNames = setOf("Char", "kotlin.Char"),
-            javaTypeNames = setOf("char", "Character"),
-            wrapperClassName = "java.lang.Character"
+            javaPrimitiveName = "char",
+            wrapperClassName = "java.lang.Character",
+            arrayType = ArrayType(kotlinTypeName = "CharArray", jvmTypeName = "char[]")
         ),
         BOOLEAN(
             kotlinTypeNames = setOf("Boolean", "kotlin.Boolean"),
-            javaTypeNames = setOf("boolean"),
-            wrapperClassName = "java.lang.Boolean"
+            javaPrimitiveName = "boolean",
+            wrapperClassName = "java.lang.Boolean",
+            arrayType = ArrayType(kotlinTypeName = "BooleanArray", jvmTypeName = "boolean[]")
         ),
         STRING(
             kotlinTypeNames = setOf("String", "kotlin.String"),
@@ -130,11 +137,20 @@ class JdiAstEvaluator(
         ),
         UNIVERSAL(
             kotlinTypeNames = setOf("Any", "kotlin.Any"),
-            javaTypeNames = setOf("Object"),
             wrapperClassName = "java.lang.Object"
+        ),
+        VOID(
+            kotlinTypeNames = setOf("Void", "Nothing", "Unit", "kotlin.Unit"),
+            javaPrimitiveName = "void",
+            wrapperClassName = "java.lang.Void"
         );
 
-        val allTypeNames: Set<String> = kotlinTypeNames + javaTypeNames + wrapperClassName
+        val allTypeNames: Set<String> = buildSet {
+            addAll(kotlinTypeNames)
+            javaPrimitiveName?.let { add(it) }
+            add(wrapperClassName)
+            add(wrapperClassName.substringAfterLast('.'))
+        }
 
         companion object {
             private val typeNameToKind: Map<String, PrimitiveKind> = entries
@@ -602,6 +618,7 @@ class JdiAstEvaluator(
             PrimitiveKind.BOOLEAN -> value as? BooleanValue
             PrimitiveKind.STRING -> vm.mirrorOf(valueToString(value))
             PrimitiveKind.NUMBER, PrimitiveKind.UNIVERSAL -> value
+            PrimitiveKind.VOID -> null
         }
     }
 
@@ -637,7 +654,7 @@ class JdiAstEvaluator(
             PrimitiveKind.BOOLEAN -> value is BooleanValue
             PrimitiveKind.NUMBER -> isNumeric(value)
             PrimitiveKind.UNIVERSAL -> true
-            PrimitiveKind.STRING -> false
+            PrimitiveKind.STRING, PrimitiveKind.VOID -> false
         }
     }
 
