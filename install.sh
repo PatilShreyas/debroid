@@ -139,7 +139,100 @@ echo "🚀 Initializing Debroid state and extracting AI skills..."
 "${INSTALL_DIR}/${BINARY_NAME}" --help >/dev/null 2>&1 || true
 
 # ==============================================================================
-# Execution Step 4: Verify PATH and Java Runtime Environment
+# Helper Functions: Shell Configuration Automation
+# ==============================================================================
+
+path_has_dir() {
+    case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac
+}
+
+configure_shell_path() {
+    local install_dir="$1"
+
+    if path_has_dir "$install_dir"; then
+        echo "✅ '$install_dir' is already in your PATH."
+        return 0
+    fi
+
+    local user_shell
+    user_shell="$(basename "${SHELL:-}")"
+    local config_file=""
+
+    case "$user_shell" in
+        bash) config_file="$HOME/.bashrc" ;;
+        zsh)  config_file="$HOME/.zshrc" ;;
+        fish) config_file="$HOME/.config/fish/config.fish" ;;
+    esac
+
+    if [ -z "$config_file" ]; then
+        echo "⚠️  Could not automatically detect a supported shell profile (detected: '${user_shell:-unknown}')."
+        echo "   Please add '$install_dir' to your PATH manually:"
+        echo "   export PATH=\"$install_dir:\$PATH\""
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$config_file")"
+
+    # Resolve symlinks so tmp+mv rewrites the stow/dotfiles target, not the link itself.
+    if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+        local _cf="$config_file"
+        local _depth=0
+        while [ -L "$_cf" ] && [ "$_depth" -lt 40 ]; do
+            local _link
+            _link="$(readlink "$_cf")" || break
+            case "$_link" in
+                /*) _cf="$_link" ;;
+                *)  _cf="$(cd "$(dirname "$_cf")" && pwd -P)/$_link" ;;
+            esac
+            _depth=$((_depth + 1))
+        done
+        if [ ! -L "$_cf" ]; then
+            config_file="$(cd "$(dirname "$_cf")" && pwd -P)/$(basename "$_cf")"
+        fi
+        unset _cf _link _depth
+    fi
+
+    # Build the new installer block
+    local new_block
+    if [ "$user_shell" = "fish" ]; then
+        new_block="# >>> debroid installer >>>
+fish_add_path $install_dir
+# <<< debroid installer <<<"
+    else
+        new_block="# >>> debroid installer >>>
+export PATH=\"$install_dir:\$PATH\"
+# <<< debroid installer <<<"
+    fi
+
+    if grep -qs "debroid installer" "$config_file" 2>/dev/null; then
+        # Replace existing block in-place
+        local tmp="$config_file.tmp.$$"
+        awk '
+            /# >>> debroid installer >>>/ { skip=1; next }
+            /# <<< debroid installer <<</ { skip=0; next }
+            !skip { print }
+        ' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
+    elif grep -qs "\.local/bin" "$config_file" 2>/dev/null; then
+        echo "✅ '$install_dir' is already configured in $config_file."
+        return 0
+    else
+        [ -f "$config_file" ] && cp "$config_file" "$config_file.bak.$(date +%s)"
+
+        # macOS bash: ensure bash_profile sources bashrc
+        if [ "$user_shell" = "bash" ] && [ "$(uname -s)" = "Darwin" ]; then
+            if [ -f "$HOME/.bash_profile" ] && ! grep -qs "source ~/.bashrc" "$HOME/.bash_profile"; then
+                printf '\n[[ -r ~/.bashrc ]] && source ~/.bashrc\n' >> "$HOME/.bash_profile"
+            fi
+        fi
+    fi
+
+    printf '\n%s\n' "$new_block" >> "$config_file"
+    echo "✅ Automatically added '$install_dir' to PATH in $config_file"
+    echo "   (Restart your shell or run 'source $config_file' to apply changes in this window)"
+}
+
+# ==============================================================================
+# Execution Step 4: Configure Shell PATH & Verify Java Runtime Environment
 # ==============================================================================
 
 echo ""
@@ -150,20 +243,20 @@ if command -v java >/dev/null 2>&1 && java -version >/dev/null 2>&1; then
 else
     echo "⚠️  Warning: Java runtime not found or unconfigured in PATH!"
     echo "   Debroid requires Java 11 or higher (JDK 11 / 17 / 21) to debug Android apps."
-    echo "   Please install OpenJDK or set JAVA_HOME in your shell profile (e.g., ~/.zshrc)."
+    echo "   Please install OpenJDK or set JAVA_HOME in your shell profile."
 fi
 
-if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    echo ""
-    echo "⚠️  Notice: '${INSTALL_DIR}' is not in your current system PATH."
-    echo "   To run 'debroid' directly from anywhere, add it to your shell configuration:"
-    echo "   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
-    echo "   source ~/.zshrc"
-fi
+echo ""
+echo "⚙️  Configuring shell PATH..."
+configure_shell_path "$INSTALL_DIR"
 
 echo "=============================================================================="
 echo "🎉 Debroid installed successfully!"
 echo "   Binary Location: ${INSTALL_DIR}/${BINARY_NAME}"
 echo "   AI Skills:       ${HOME}/.debroid/skills/debroid-cli/SKILL.md"
-echo "   Test it:         debroid --help (or ${INSTALL_DIR}/${BINARY_NAME} --help)"
+if path_has_dir "$INSTALL_DIR"; then
+    echo "   Test it:         debroid --help"
+else
+    echo "   Test it:         debroid --help (after restarting terminal or sourcing config)"
+fi
 echo "=============================================================================="
