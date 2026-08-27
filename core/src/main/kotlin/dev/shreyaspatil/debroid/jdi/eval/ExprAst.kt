@@ -6,7 +6,7 @@ package dev.shreyaspatil.debroid.jdi.eval
 sealed interface ExprNode
 
 /**
- * Literal AST nodes.
+ * Literal AST nodes representing primitive constants and strings.
  */
 data class IntLiteralNode(val value: Int) : ExprNode
 data class LongLiteralNode(val value: Long) : ExprNode
@@ -18,14 +18,18 @@ data class CharLiteralNode(val value: Char) : ExprNode
 data object NullLiteralNode : ExprNode
 
 /**
- * Reference AST nodes.
+ * Reference AST nodes referencing identifiers or context receivers in scope.
  */
 data class IdentifierNode(val name: String) : ExprNode
 data object ThisNode : ExprNode
 data object SuperNode : ExprNode
 
 /**
- * Member and array access nodes.
+ * Member access AST node (e.g. `obj.property` or `obj?.property`).
+ *
+ * @property target The receiver expression.
+ * @property memberName The property or field identifier name.
+ * @property isSafe Whether safe navigation (`?.`) is used, short-circuiting on null receivers.
  */
 data class MemberAccessNode(
     val target: ExprNode,
@@ -33,11 +37,25 @@ data class MemberAccessNode(
     val isSafe: Boolean = false
 ) : ExprNode
 
+/**
+ * Array access AST node (e.g. `arr[index]`).
+ *
+ * @property target The array expression.
+ * @property index The index expression to evaluate.
+ */
 data class ArrayAccessNode(
     val target: ExprNode,
     val index: ExprNode
 ) : ExprNode
 
+/**
+ * Method invocation AST node (e.g. `target.method(arg1, arg2)` or `method(arg1)`).
+ *
+ * @property target The receiver expression, or `null` if invoked implicitly on `this`.
+ * @property methodName The name of the method to invoke.
+ * @property args Evaluated argument expressions.
+ * @property isSafe Whether safe navigation (`?.`) is used.
+ */
 data class MethodCallNode(
     val target: ExprNode?,
     val methodName: String,
@@ -46,7 +64,7 @@ data class MethodCallNode(
 ) : ExprNode
 
 /**
- * Unary operations.
+ * Unary operations supported in expressions.
  */
 enum class UnaryOp {
     NOT,
@@ -55,13 +73,16 @@ enum class UnaryOp {
     BITWISE_NOT
 }
 
+/**
+ * Unary operation AST node (e.g. `!flag`, `-count`, `~mask`).
+ */
 data class UnaryOpNode(
     val op: UnaryOp,
     val expr: ExprNode
 ) : ExprNode
 
 /**
- * Binary operations.
+ * Binary operators supported across logical, bitwise, relational, and arithmetic operations.
  */
 enum class BinaryOp {
     LOGICAL_OR,
@@ -89,6 +110,9 @@ enum class BinaryOp {
     ELVIS
 }
 
+/**
+ * Binary operation AST node evaluating two operand expressions.
+ */
 data class BinaryOpNode(
     val op: BinaryOp,
     val left: ExprNode,
@@ -96,7 +120,7 @@ data class BinaryOpNode(
 ) : ExprNode
 
 /**
- * Ternary conditional operator (cond ? thenExpr : elseExpr).
+ * Ternary conditional operator AST node (`condition ? thenExpr : elseExpr`).
  */
 data class TernaryOpNode(
     val condition: ExprNode,

@@ -76,12 +76,26 @@ sealed interface Token {
     data object Eof : Token { override fun toString(): String = "EOF" }
 }
 
+/**
+ * Wraps a [Token] with its 0-indexed character offset [position] in the input source.
+ */
 data class TokenPos(val token: Token, val position: Int)
 
+/**
+ * Tokenizer for expression strings in Debroid.
+ *
+ * Scans literals (integers, floats, doubles, longs, strings, chars, booleans, null),
+ * identifiers (including backticked identifiers like `` `special-prop` ``),
+ * keywords (`this`, `super`, `is`, `!is`, `instanceof`),
+ * and operators (`&&`, `||`, `?.`, `?:`, `>>>`, `==`, etc.).
+ */
 class ExprLexer(private val input: String) {
     private var index = 0
     private val length = input.length
 
+    /**
+     * Converts the input string into a list of [TokenPos], ending with [Token.Eof].
+     */
     fun tokenize(): List<TokenPos> {
         val tokens = mutableListOf<TokenPos>()
         while (index < length) {
@@ -116,6 +130,9 @@ class ExprLexer(private val input: String) {
         }
     }
 
+    /**
+     * Checks if the current character starts a fractional literal (e.g., `.5` or `.123`).
+     */
     private fun isFractionalStart(): Boolean =
         index < length && input[index] == '.' && index + 1 < length && input[index + 1].isDigit()
 

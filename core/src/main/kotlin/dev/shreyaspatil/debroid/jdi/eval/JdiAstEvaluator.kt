@@ -19,17 +19,39 @@ import com.sun.jdi.VirtualMachine
 import dev.shreyaspatil.debroid.adb.DebugException
 import dev.shreyaspatil.debroid.models.ErrorCode
 
+/**
+ * Evaluates an expression AST against the target Android VM using Java Debug Interface (JDI).
+ *
+ * Handles:
+ * - Local variable lookups from the active suspended [StackFrame].
+ * - Member and property access on [ObjectReference], automatically resolving Kotlin getter
+ *   conventions (`get<Prop>()` and `is<Prop>()`).
+ * - Instance method invocations via single-threaded JDI dispatch.
+ * - Short-circuiting boolean operations (`&&`, `||`, `?:`).
+ * - Primitive numeric promotions and mixed-type relational/arithmetic comparisons.
+ * - Subtype and interface hierarchy checks (`is`, `!is`, `instanceof`).
+ *
+ * @property vm The JDI [VirtualMachine] mirror.
+ * @property frame The suspended [StackFrame] context.
+ */
 @Suppress("TooManyFunctions", "LargeClass", "ThrowsCount")
 class JdiAstEvaluator(
     private val vm: VirtualMachine,
     private val frame: StackFrame
 ) {
     companion object {
+        /**
+         * Evaluates the [ast] node against [vm] and [frame].
+         */
         fun evaluate(ast: ExprNode, vm: VirtualMachine, frame: StackFrame): Value? {
             return JdiAstEvaluator(vm, frame).evaluateNode(ast)
         }
     }
 
+    /**
+     * Evaluates a single AST [node], recursively evaluating subexpressions and dispatching
+     * JDI operations.
+     */
     @Suppress("CyclomaticComplexMethod")
     fun evaluateNode(node: ExprNode): Value? {
         return when (node) {
@@ -140,6 +162,16 @@ class JdiAstEvaluator(
         )
     }
 
+    /**
+     * Attempts to invoke a Kotlin getter method corresponding to [propName] on [obj].
+     *
+     * Tries getter naming conventions in order:
+     * 1. `get<PropName>()` (standard Kotlin / JavaBean property getter)
+     * 2. `is<PropName>()` (boolean property getter)
+     * 3. `<propName>()` (direct method name match)
+     *
+     * Runs single-threaded on the suspended frame's thread to avoid deadlock.
+     */
     private fun tryInvokePropertyGetter(obj: ObjectReference, propName: String): Result<Value?> {
         val capitalized = propName.replaceFirstChar { it.uppercase() }
         val candidateNames = listOf(
@@ -165,6 +197,12 @@ class JdiAstEvaluator(
         return Result.failure(NoSuchMethodException("No getter found for $propName"))
     }
 
+    /**
+     * Resolves and invokes an instance method on the target object (or implicit `this`).
+     *
+     * Selects candidate methods matching the given name and argument count, and invokes the first
+     * matching overload using [ObjectReference.INVOKE_SINGLE_THREADED] to prevent deadlocks.
+     */
     @Suppress("ReturnCount")
     private fun resolveMethodCall(node: MethodCallNode): Value? {
         val targetObj: ObjectReference = if (node.target != null) {
@@ -221,6 +259,9 @@ class JdiAstEvaluator(
         )
     }
 
+    /**
+     * Resolves indexed array access with bounds checking.
+     */
     private fun resolveArrayAccess(node: ArrayAccessNode): Value? {
         val targetVal = evaluateNode(node.target)
             ?: throw DebugException(ErrorCode.EVALUATION_FAILED, "NullPointerException: Cannot index into null array.")
@@ -243,6 +284,9 @@ class JdiAstEvaluator(
         return targetVal.getValue(idx)
     }
 
+    /**
+     * Evaluates unary prefix operators (`!`, `-`, `+`, `~`).
+     */
     private fun evaluateUnary(node: UnaryOpNode): Value {
         val v = evaluateNode(node.expr)
         return when (node.op) {
@@ -282,9 +326,13 @@ class JdiAstEvaluator(
         }
     }
 
+    /**
+     * Evaluates binary expressions with short-circuiting for logical operations (`&&`, `||`, `?:`)
+     * and eager evaluation for arithmetic, bitwise, equality, and relational operators.
+     */
     @Suppress("CyclomaticComplexMethod", "ReturnCount")
     private fun evaluateBinary(node: BinaryOpNode): Value? {
-        // Short-circuiting operators
+        // Short-circuiting operators: avoid evaluating right branch when left determines the outcome
         when (node.op) {
             BinaryOp.LOGICAL_AND -> {
                 val left = evaluateNode(node.left)
@@ -345,12 +393,19 @@ class JdiAstEvaluator(
         }
     }
 
+    /**
+     * Performs a runtime type check equivalent to Kotlin `is` or Java `instanceof`.
+     */
     private fun evaluateTypeCheck(value: Value?, typeName: String): Boolean {
         if (value == null || value !is ObjectReference) return false
         val refType = value.referenceType()
         return isSubtypeOf(refType, typeName)
     }
 
+    /**
+     * Recursively traverses class inheritance and interface implementation hierarchies to check
+     * if [type] is a subtype of [targetTypeName].
+     */
     private fun isSubtypeOf(type: ReferenceType, targetTypeName: String): Boolean {
         if (type.name() == targetTypeName || type.name().endsWith(".$targetTypeName")) return true
         if (type is com.sun.jdi.ClassType) {
@@ -363,6 +418,10 @@ class JdiAstEvaluator(
         return false
     }
 
+    /**
+     * Evaluates equality (`==` and `!=`) with type coercion across primitives, numeric types,
+     * strings, and object references.
+     */
     @Suppress("CyclomaticComplexMethod")
     private fun evaluateEquality(left: Value?, right: Value?, equal: Boolean): Value {
         if (left == null || right == null) {
@@ -387,6 +446,9 @@ class JdiAstEvaluator(
         return vm.mirrorOf(if (equal) areEqual else !areEqual)
     }
 
+    /**
+     * Evaluates relational comparisons (`<`, `<=`, `>`, `>=`) with numeric promotion.
+     */
     private fun evaluateRelational(op: BinaryOp, left: Value?, right: Value?): Value {
         if (!isNumeric(left) || !isNumeric(right)) {
             throw DebugException(
@@ -414,6 +476,10 @@ class JdiAstEvaluator(
         return vm.mirrorOf(result)
     }
 
+    /**
+     * Evaluates `+` operations, handling String concatenation if either operand is a string,
+     * or delegating to numeric arithmetic.
+     */
     private fun evaluateAddition(left: Value?, right: Value?): Value {
         if (left is StringReference || right is StringReference) {
             val leftStr = valueToString(left)
@@ -423,6 +489,10 @@ class JdiAstEvaluator(
         return evaluateArithmetic(BinaryOp.ADD, left, right)
     }
 
+    /**
+     * Evaluates binary arithmetic operators (`+`, `-`, `*`, `/`, `%`) using Kotlin numeric promotion:
+     * Double > Float > Long > Int.
+     */
     @Suppress("CyclomaticComplexMethod")
     private fun evaluateArithmetic(op: BinaryOp, left: Value?, right: Value?): Value {
         if (!isNumeric(left) || !isNumeric(right)) {
@@ -501,6 +571,9 @@ class JdiAstEvaluator(
         }
     }
 
+    /**
+     * Evaluates bitwise operators (`&`, `|`, `^`) on integral primitives or booleans.
+     */
     private fun evaluateBitwise(op: BinaryOp, left: Value?, right: Value?): Value {
         if (left == null || right == null) {
             throw DebugException(ErrorCode.EVALUATION_FAILED, "Bitwise operator '$op' requires non-null operands.")
@@ -548,6 +621,9 @@ class JdiAstEvaluator(
         return vm.mirrorOf(res)
     }
 
+    /**
+     * Evaluates bit shift operators (`<<`, `>>`, `>>>`) on integral primitives.
+     */
     private fun evaluateShift(op: BinaryOp, left: Value?, right: Value?): Value {
         if (left == null || right == null) {
             throw DebugException(ErrorCode.EVALUATION_FAILED, "Shift operator '$op' requires non-null operands.")
@@ -579,6 +655,9 @@ class JdiAstEvaluator(
         return vm.mirrorOf(res)
     }
 
+    /**
+     * Evaluates ternary conditional expressions (`condition ? thenExpr : elseExpr`).
+     */
     private fun evaluateTernary(node: TernaryOpNode): Value? {
         val condition = evaluateNode(node.condition)
         if (condition !is BooleanValue) {

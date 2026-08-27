@@ -3,10 +3,33 @@ package dev.shreyaspatil.debroid.jdi.eval
 import dev.shreyaspatil.debroid.adb.DebugException
 import dev.shreyaspatil.debroid.models.ErrorCode
 
+/**
+ * Recursive-descent expression parser for Debroid.
+ *
+ * Implements operator precedence matching standard Kotlin and Java semantics:
+ * 1. Ternary / Elvis (`?:`, `? :`)
+ * 2. Logical OR (`||`)
+ * 3. Logical AND (`&&`)
+ * 4. Bitwise OR (`|`)
+ * 5. Bitwise XOR (`^`)
+ * 6. Bitwise AND (`&`)
+ * 7. Equality (`==`, `!=`)
+ * 8. Relational & Type Checks (`<`, `<=`, `>`, `>=`, `is`, `!is`, `instanceof`)
+ * 9. Bit shifts (`<<`, `>>`, `>>>`)
+ * 10. Additive (`+`, `-`)
+ * 11. Multiplicative (`*`, `/`, `%`)
+ * 12. Unary prefix (`!`, `-`, `+`, `~`)
+ * 13. Postfix / Primary (member access `.` / `?.`, indexing `[]`, method invocation `()`, literals, identifiers)
+ */
 class ExprParser(private val tokens: List<TokenPos>) {
     private var current = 0
 
     companion object {
+        /**
+         * Parses the given [expr] string into an [ExprNode] AST root.
+         *
+         * @throws DebugException with [ErrorCode.EVALUATION_FAILED] on syntax or token errors.
+         */
         fun parse(expr: String): ExprNode {
             val lexer = ExprLexer(expr)
             val tokenList = lexer.tokenize()
@@ -23,6 +46,9 @@ class ExprParser(private val tokens: List<TokenPos>) {
         }
     }
 
+    /**
+     * Parses the full expression starting from top-level precedence (ternary / Elvis).
+     */
     fun parseExpression(): ExprNode = parseTernary()
 
     private fun parseTernary(): ExprNode {
