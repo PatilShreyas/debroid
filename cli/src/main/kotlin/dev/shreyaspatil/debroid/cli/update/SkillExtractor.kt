@@ -9,7 +9,10 @@ import java.nio.file.StandardCopyOption
  * Handles extracting the embedded AI Agent skill instructions to a master path.
  */
 class SkillExtractor(
-    private val masterSkillDir: File = File(System.getProperty("user.home"), ".debroid/skills/debroid-cli")
+    private val masterSkillDir: File = File(
+        System.getenv("HOME") ?: System.getProperty("user.home"),
+        ".debroid/skills/debroid-cli"
+    )
 ) {
 
     fun extractSkillsToMaster() {

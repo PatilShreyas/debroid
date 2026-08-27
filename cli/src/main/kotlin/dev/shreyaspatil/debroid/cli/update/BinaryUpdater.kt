@@ -29,7 +29,8 @@ class BinaryUpdater(
         }
 
         // Option 2: Default installation path (~/.local/bin/debroid)
-        val userLocalBin = File(System.getProperty("user.home"), ".local/bin/debroid")
+        val homeDir = System.getenv("HOME") ?: System.getProperty("user.home")
+        val userLocalBin = File(homeDir, ".local/bin/debroid")
         if (userLocalBin.exists() && userLocalBin.isFile) return userLocalBin
 
         // Option 3: System path (/usr/local/bin/debroid)

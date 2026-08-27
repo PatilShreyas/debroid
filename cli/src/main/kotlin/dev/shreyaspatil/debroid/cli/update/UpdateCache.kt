@@ -74,7 +74,8 @@ class UpdateCache(private val cacheFile: File = defaultCacheFile()) {
         const val TWENTY_FOUR_HOURS_MS = 86_400_000L
 
         private fun defaultCacheFile(): File {
-            val debroidDir = File(System.getProperty("user.home"), ".debroid")
+            val homeDir = System.getenv("HOME") ?: System.getProperty("user.home")
+            val debroidDir = File(homeDir, ".debroid")
             return File(debroidDir, "update-cache.json")
         }
     }

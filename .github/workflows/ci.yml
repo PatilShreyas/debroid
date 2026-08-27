@@ -23,5 +23,11 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Install test shells
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+
       - name: Build and verify
         run: ./gradlew build
+
+      - name: Run installer integration tests
+        run: ./scripts/test_install.sh
