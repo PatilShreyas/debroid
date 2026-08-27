@@ -98,6 +98,7 @@ data class DebugEventPayload(
     val threadName: String?,
     val location: String?,
     val className: String?,
+    val breakpointId: String? = null,
     val exceptionMessage: String? = null,
     val stacktrace: List<StackFrameInfo>? = null,
     val timestamp: Long = System.currentTimeMillis()

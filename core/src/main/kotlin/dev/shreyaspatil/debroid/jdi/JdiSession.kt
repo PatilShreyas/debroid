@@ -200,7 +200,7 @@ class JdiSession(
             }
         }.orEmpty()
 
-        var requests = bindLocationsForClasses(fastPathClasses, line)
+        var requests = bindLocationsForClasses(id, fastPathClasses, line)
 
         if (requests.isEmpty()) {
             val matchingClasses = vm.allClasses().filter { ref ->
@@ -230,7 +230,7 @@ class JdiSession(
                     false
                 }
             }
-            requests = bindLocationsForClasses(matchingClasses, line)
+            requests = bindLocationsForClasses(id, matchingClasses, line)
         }
 
         if (requests.isNotEmpty()) {
@@ -240,13 +240,18 @@ class JdiSession(
         return false
     }
 
-    private fun bindLocationsForClasses(classes: List<ReferenceType>, line: Int): MutableList<BreakpointRequest> {
+    private fun bindLocationsForClasses(
+        id: String,
+        classes: List<ReferenceType>,
+        line: Int
+    ): MutableList<BreakpointRequest> {
         val requests = mutableListOf<BreakpointRequest>()
         for (ref in classes) {
             try {
                 val locations = ref.locationsOfLine(line)
                 for (loc in locations) {
                     val bpReq = vm.eventRequestManager().createBreakpointRequest(loc)
+                    bpReq.putProperty(PROP_BREAKPOINT_ID, id)
                     bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
                     bpReq.enable()
                     requests.add(bpReq)
@@ -294,7 +299,7 @@ class JdiSession(
         val erm = vm.eventRequestManager()
         val req: ExceptionRequest = erm.createExceptionRequest(refType, notifyCaught, notifyUncaught)
         if (className != null) {
-            req.putProperty("className", className)
+            req.putProperty(PROP_CLASS_NAME, className)
         }
         req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
         req.enable()
@@ -452,7 +457,7 @@ class JdiSession(
         val active = exceptionRequests.map { (id, req) ->
             ExceptionBreakpointInfo(
                 id = id,
-                className = req.getProperty("className") as? String,
+                className = req.getProperty(PROP_CLASS_NAME) as? String,
                 notifyCaught = req.notifyCaught(),
                 notifyUncaught = req.notifyUncaught()
             )
@@ -1169,6 +1174,7 @@ class JdiSession(
                 val reqs = mutableListOf<BreakpointRequest>()
                 for (loc in locations) {
                     val bpReq = vm.eventRequestManager().createBreakpointRequest(loc)
+                    bpReq.putProperty(PROP_BREAKPOINT_ID, bpId)
                     bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
                     bpReq.enable()
                     reqs.add(bpReq)
@@ -1187,6 +1193,8 @@ class JdiSession(
 
     private fun handleBreakpointEvent(event: BreakpointEvent) {
         val loc = event.location()
+        val bpId = (event.request()?.getProperty(PROP_BREAKPOINT_ID) as? String)
+            ?: jdiBreakpointRequests.entries.firstOrNull { it.value.contains(event.request()) }?.key
         pushEvent(
             DebugEventPayload(
                 eventType = EventType.BREAKPOINT_HIT,
@@ -1195,6 +1203,7 @@ class JdiSession(
                 threadName = event.thread().name(),
                 location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                 className = loc.declaringType().name(),
+                breakpointId = bpId,
                 stacktrace = getFramesSafely(event.thread())
             )
         )
@@ -1217,7 +1226,7 @@ class JdiSession(
 
     private fun handleExceptionEvent(event: ExceptionEvent) {
         // Client-side filtering because JDWP ExceptionOnly filters can sometimes be buggy/too-broad
-        val expectedClassName = event.request()?.getProperty("className") as? String
+        val expectedClassName = event.request()?.getProperty(PROP_CLASS_NAME) as? String
         if (expectedClassName != null) {
             val thrownClass = event.exception().referenceType()
             var matches = false
@@ -1387,6 +1396,8 @@ class JdiSession(
     companion object {
         private const val MAX_EVENT_BUFFER_SIZE = 1000
         private const val MAX_STALLED_RESUME_ATTEMPTS = 5
+        private const val PROP_BREAKPOINT_ID = "breakpointId"
+        private const val PROP_CLASS_NAME = "className"
 
         @Suppress("ObjectPropertyNaming")
         private val TERMINAL_TYPES = setOf(

@@ -143,6 +143,7 @@ class JdiSessionTest {
         assertTrue(info.verified)
         assertEquals(42, info.line)
         assertEquals("MainActivity.kt", info.file)
+        verify { bpReq.putProperty("breakpointId", info.id) }
         verify { bpReq.enable() }
     }
 
@@ -1202,6 +1203,114 @@ class JdiSessionTest {
         // Event should have been ignored and VM resumed
         verify { vm.resume() }
         assertEquals(0, session.pollEvents("0").events.size)
+    }
+
+    @Test
+    fun `handleBreakpointEvent includes breakpointId from request property`() {
+        val req = mockk<BreakpointRequest>(relaxed = true)
+        every { req.getProperty("breakpointId") } returns "bp_1"
+
+        val loc = mockk<Location>(relaxed = true)
+        val declaringType = mockk<ReferenceType>(relaxed = true)
+        every { declaringType.name() } returns "com.example.OrderPricingPipeline"
+        every { loc.declaringType() } returns declaringType
+        every { loc.lineNumber() } returns 15
+        every { loc.sourceName() } returns "OrderPricingPipeline.kt"
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 42L
+        every { thread.name() } returns "main"
+        every { thread.frames() } returns emptyList()
+
+        val event = mockk<com.sun.jdi.event.BreakpointEvent>(relaxed = true)
+        every { event.request() } returns req
+        every { event.location() } returns loc
+        every { event.thread() } returns thread
+
+        val handleMethod = JdiSession::class.java.getDeclaredMethod(
+            "handleBreakpointEvent",
+            com.sun.jdi.event.BreakpointEvent::class.java
+        )
+        handleMethod.isAccessible = true
+        handleMethod.invoke(session, event)
+
+        val pollResult = session.pollEvents("0")
+        assertEquals(1, pollResult.events.size)
+        val emitted = pollResult.events.first()
+        assertEquals(EventType.BREAKPOINT_HIT, emitted.eventType)
+        assertEquals("bp_1", emitted.breakpointId)
+        assertEquals("42", emitted.threadId)
+        assertEquals("OrderPricingPipeline.kt:15", emitted.location)
+    }
+
+    @Test
+    fun `handleBreakpointEvent includes breakpointId from session fallback map when property is missing`() {
+        val req = mockk<BreakpointRequest>(relaxed = true)
+        every { req.getProperty("breakpointId") } returns null
+
+        val loc = mockk<Location>(relaxed = true)
+        val declaringType = mockk<ReferenceType>(relaxed = true)
+        every { declaringType.name() } returns "com.example.OrderPricingPipeline"
+        every { loc.declaringType() } returns declaringType
+        every { loc.lineNumber() } returns 15
+        every { loc.sourceName() } returns "OrderPricingPipeline.kt"
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 42L
+        every { thread.name() } returns "main"
+        every { thread.frames() } returns emptyList()
+
+        val jdiBreakpointRequestsField = JdiSession::class.java.getDeclaredField("jdiBreakpointRequests")
+        jdiBreakpointRequestsField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val map = jdiBreakpointRequestsField.get(session) as MutableMap<String, MutableList<BreakpointRequest>>
+        map["bp_fallback"] = mutableListOf(req)
+
+        val event = mockk<com.sun.jdi.event.BreakpointEvent>(relaxed = true)
+        every { event.request() } returns req
+        every { event.location() } returns loc
+        every { event.thread() } returns thread
+
+        val handleMethod = JdiSession::class.java.getDeclaredMethod(
+            "handleBreakpointEvent",
+            com.sun.jdi.event.BreakpointEvent::class.java
+        )
+        handleMethod.isAccessible = true
+        handleMethod.invoke(session, event)
+
+        val pollResult = session.pollEvents("0")
+        assertEquals(1, pollResult.events.size)
+        val emitted = pollResult.events.first()
+        assertEquals(EventType.BREAKPOINT_HIT, emitted.eventType)
+        assertEquals("bp_fallback", emitted.breakpointId)
+    }
+
+    @Test
+    fun `resolveDeferredBreakpoints tags BreakpointRequest with breakpointId`() {
+        every { vm.allClasses() } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val info = session.setBreakpoint(file = "DeferredClass.kt", line = 10)
+        assertFalse(info.verified)
+
+        val preparedClass = mockk<ReferenceType>(relaxed = true)
+        val loc = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { preparedClass.name() } returns "com.example.DeferredClass"
+        every { preparedClass.sourceName() } returns "DeferredClass.kt"
+        every { preparedClass.locationsOfLine(10) } returns listOf(loc)
+        every { erm.createBreakpointRequest(loc) } returns bpReq
+
+        val resolveMethod = JdiSession::class.java.getDeclaredMethod(
+            "resolveDeferredBreakpointsForClass",
+            ReferenceType::class.java
+        )
+        resolveMethod.isAccessible = true
+        resolveMethod.invoke(session, preparedClass)
+
+        verify { bpReq.putProperty("breakpointId", info.id) }
+        verify { bpReq.enable() }
     }
 
     // ---------------- B4: clearDebugApp called on detach when launched -----

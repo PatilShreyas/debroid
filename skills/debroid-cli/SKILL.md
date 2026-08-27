@@ -80,7 +80,7 @@ debroid poll <session_id> <cursor> --with-stacktrace
 * **Initial Cursor:** Always start with `"0"`.
 * **Subsequent Cursors:** Use the `nextCursor` value from the previous JSON response.
 * **Waiting:** If `events` is empty, ask the user to trigger the action in the app, then poll again.
-* **Event types you may see:** `BREAKPOINT_HIT`, `STEP_HIT`, `EXCEPTION_HIT`, `WATCHPOINT_ACCESS_HIT`, `WATCHPOINT_MODIFY_HIT`, `DISCONNECT`.
+* **Event types you may see:** `BREAKPOINT_HIT` (includes `breakpointId`), `STEP_HIT`, `EXCEPTION_HIT`, `WATCHPOINT_ACCESS_HIT`, `WATCHPOINT_MODIFY_HIT`, `DISCONNECT`.
 
 ### Step 5: Inspect the Pause State
 Once `poll` returns an event (e.g., `BREAKPOINT_HIT`), extract the `threadId`.
