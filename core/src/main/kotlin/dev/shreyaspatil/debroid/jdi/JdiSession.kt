@@ -952,7 +952,7 @@ class JdiSession(
                 name = name,
                 type = "String",
                 valuePreview = "\"${value.value()}\"",
-                isPrimitive = true,
+                isPrimitive = false,
                 objectId = value.uniqueID().toString()
             ).also { objectReferenceCache[value.uniqueID()] = value }
             is ArrayReference -> VariableInfo(

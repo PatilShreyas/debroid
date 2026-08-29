@@ -423,6 +423,37 @@ class JdiSessionTest {
         assertEquals("myLocal", vars[0].name)
         assertEquals("int", vars[0].type)
         assertEquals("42", vars[0].valuePreview)
+        assertTrue(vars[0].isPrimitive)
+        assertNull(vars[0].objectId)
+    }
+
+    @Test
+    fun `getVariables returns string local variable with isPrimitive false`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        val value = mockk<StringReference>(relaxed = true)
+
+        every { thread.frame(0) } returns frame
+        every { local.name() } returns "myStringLocal"
+        every { local.isArgument } returns false
+        every { frame.visibleVariables() } returns listOf(local)
+        every { frame.getValue(local) } returns value
+        every { value.value() } returns "testString"
+        every { value.uniqueID() } returns 201L
+
+        val vars = session.getVariables("1", dev.shreyaspatil.debroid.models.VariableScope.LOCAL)
+
+        assertEquals(1, vars.size)
+        assertEquals("myStringLocal", vars[0].name)
+        assertEquals("String", vars[0].type)
+        assertEquals("\"testString\"", vars[0].valuePreview)
+        assertFalse(vars[0].isPrimitive)
+        assertEquals("201", vars[0].objectId)
     }
 
     @Test
@@ -452,7 +483,8 @@ class JdiSessionTest {
         assertEquals("evaluatedResult", result.name)
         assertEquals("String", result.type)
         assertEquals("\"hello\"", result.valuePreview)
-        assertTrue(result.isPrimitive)
+        assertFalse(result.isPrimitive)
+        assertEquals("99", result.objectId)
 
         unmockkStatic(JdiExpressionEvaluator::class)
     }
@@ -482,7 +514,8 @@ class JdiSessionTest {
         assertEquals("evaluatedResult", result.name)
         assertEquals("String", result.type)
         assertEquals("\"hello world\"", result.valuePreview)
-        assertTrue(result.isPrimitive)
+        assertFalse(result.isPrimitive)
+        assertEquals("100", result.objectId)
 
         unmockkStatic(JdiExpressionEvaluator::class)
     }
@@ -514,6 +547,8 @@ class JdiSessionTest {
         assertEquals("myVar", result.name)
         assertEquals("String", result.type)
         assertEquals("\"fallbackValue\"", result.valuePreview)
+        assertFalse(result.isPrimitive)
+        assertEquals("101", result.objectId)
 
         unmockkStatic(JdiExpressionEvaluator::class)
     }
@@ -549,6 +584,8 @@ class JdiSessionTest {
         assertEquals("myField", result.name)
         assertEquals("String", result.type)
         assertEquals("\"fieldValue\"", result.valuePreview)
+        assertFalse(result.isPrimitive)
+        assertEquals("102", result.objectId)
 
         unmockkStatic(JdiExpressionEvaluator::class)
     }

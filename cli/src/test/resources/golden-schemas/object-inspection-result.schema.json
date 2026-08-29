@@ -30,7 +30,7 @@
                     },
                     "isPrimitive": {
                         "type": "boolean",
-                        "description": "Whether the variable is a primitive or String"
+                        "description": "Whether the variable is a primitive"
                     },
                     "objectId": {
                         "type": "string",
