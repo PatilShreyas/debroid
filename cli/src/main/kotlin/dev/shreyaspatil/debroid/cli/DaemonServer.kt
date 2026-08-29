@@ -14,6 +14,7 @@ import dev.shreyaspatil.debroid.cli.models.DaemonRequest
 import dev.shreyaspatil.debroid.cli.models.toCli
 import dev.shreyaspatil.debroid.jdi.JdiSessionManager
 import dev.shreyaspatil.debroid.models.VariableScope
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.BufferedReader
@@ -24,15 +25,18 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
 
+@OptIn(ExperimentalSerializationApi::class)
 object DaemonServer {
     private val sessionManager = JdiSessionManager()
     private val compactJson = Json {
         encodeDefaults = true
+        explicitNulls = false
         ignoreUnknownKeys = true
     }
     private val prettyJson = Json {
         prettyPrint = true
         encodeDefaults = true
+        explicitNulls = false
         ignoreUnknownKeys = true
     }
 

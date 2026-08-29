@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Runtime Type Checks & Type Casting:** `debroid eval <session_id> <thread_id> "(account as AdminAccount).permissions"` or `account as? GuestAccount ?: fallback` (supports safe/unsafe casting `as` / `as?`, type checks `is` / `!is`, and numeric conversions)
   - **Mixed Arithmetic & String Formatting:** `debroid eval <session_id> <thread_id> "\"Total: $\" + (amount * (1.0 - discount))"`
 
+### Changed
+- **Omit Null Values in JSON Serialization:** Configured CLI JSON serialization to omit null fields (`explicitNulls = false`), reducing JSON payload size and saving context tokens for AI agents.
+
 ### Fixed
 - **StringReference Incorrectly Marked as Primitive:** Fixed an issue where `StringReference` variable values were formatted with `isPrimitive = true` despite providing a heap `objectId`. Strings are reference types on the JVM heap and are now correctly reported with `isPrimitive = false` (#58).
 - **Breakpoint ID in Poll Breakpoint Hit Event:** Fixed an issue where polling for `BREAKPOINT_HIT` events returned `breakpointId` as `null`. Registered breakpoint request IDs (`bp_*`) are now attached to JDI breakpoint requests and propagated into the poll event payload (#73).
