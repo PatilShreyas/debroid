@@ -41,10 +41,11 @@ import dev.shreyaspatil.debroid.models.ErrorCode
 @Suppress("TooManyFunctions", "LargeClass", "ThrowsCount")
 class JdiAstEvaluator(
     private val vm: VirtualMachine,
-    private val initialFrame: StackFrame
+    initialFrame: StackFrame
 ) {
     private val thread = runCatching { initialFrame.thread() }.getOrNull()
-    private val activeFrame: StackFrame get() = runCatching { thread?.frame(0) }.getOrNull() ?: initialFrame
+    private val fallbackFrame = initialFrame
+    private val activeFrame: StackFrame get() = runCatching { thread?.frame(0) }.getOrNull() ?: fallbackFrame
     private val classResolver = JdiClassResolver(vm, initialFrame)
 
     private sealed interface JdiTarget {

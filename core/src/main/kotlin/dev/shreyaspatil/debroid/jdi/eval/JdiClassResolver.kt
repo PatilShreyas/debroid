@@ -21,14 +21,15 @@ import com.sun.jdi.VirtualMachine
  */
 class JdiClassResolver(
     private val vm: VirtualMachine,
-    private val initialFrame: StackFrame
+    initialFrame: StackFrame
 ) {
     // Cache the ThreadReference once at creation time. In JDI on Android ART, executing a method invocation
     // on the debuggee VM momentarily resumes execution and invalidates previous StackFrame objects. Calling
     // frame.thread() subsequently throws IncompatibleThreadStateException ("Thread has been resumed").
     // We dynamically query thread.frame(0) via activeFrame to always use a valid stack frame.
     private val thread = runCatching { initialFrame.thread() }.getOrNull()
-    private val activeFrame: StackFrame get() = runCatching { thread?.frame(0) }.getOrNull() ?: initialFrame
+    private val fallbackFrame = initialFrame
+    private val activeFrame: StackFrame get() = runCatching { thread?.frame(0) }.getOrNull() ?: fallbackFrame
 
     /**
      * Resolves a [ReferenceType] matching [className] in the VM.
