@@ -104,13 +104,23 @@ debroid pause-state <session_id> <thread_id>
   - **Important:** `newValue` is parsed as a Java expression! To set a String literal, you must wrap the value in escaped quotes (e.g., `\"my string\"`). To set it to the result of an expression, provide the expression (e.g., `5`, `true`, `varName + 1`, Int/Long: `10`, `100L`, Float/Double: `10.5f`, `20.5d`).
 - Evaluate expressions: `debroid eval <session_id> <thread_id> "<expression>"`
   - **Expression Engine**: Supports compound boolean/logical operators (`&&`, `||`, `!`), relational comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`), arithmetic, and idiomatic Kotlin/Java expressions.
-  - **Evaluating Expressions**:
+  - **Supported Capabilities**:
     - **Compound Logic & Relational**: Evaluate expressions directly (e.g., `amount >= 600.0 && isExpress`, `(x > 5 || y == 0) && !flag`).
     - **Kotlin Properties & Getters**: Access Kotlin properties directly (e.g., `order.amount` or `user.name`) — automatically resolves backing fields or getter methods (`getAmount()`, `isExpress()`).
     - **Safe Calls & Elvis**: Supports safe navigation and fallback defaults (e.g., `user?.address?.city`, `user?.name ?: "Unknown"`).
     - **Type Casting & Checks**: Supports safe and unsafe type casts and type checks (e.g., `(user as Admin).permissions`, `user as? Admin ?: defaultAdmin`, `order is Order`, `42 as Long`).
     - **Method Calls & Arithmetic**: Supports method invocations, parameter passing, and math operators (e.g., `order.getAmount() * 0.15`, `processor.calculateTotal(order)`).
+    - **Static Methods, Constants & Singletons**: Supports calling static methods and accessing static constants. **Encouraged Best Practice: Prefer fully-qualified class names** (e.g., `java.lang.Math.max(10, 20)`, `android.util.Log.d("Tag", "msg")`, `java.lang.System.currentTimeMillis()`, `java.lang.Integer.MAX_VALUE`, `com.example.OrderConfig.currency`, `com.example.OrderValidator.isValid(50.0)`). Standard default imports (`java.lang.*`, `java.util.*`, `kotlin.*`, `kotlin.math.*`, `android.util.*`, etc.) and classes in the active stack frame's package are also resolved automatically when unqualified.
+    - **Kotlin Objects & Companion Functions**: Supports standalone Kotlin `object` singletons (e.g., `OrderConfig.formatCurrency(100.0)`), companion object properties/methods (`OrderValidator.MIN_AMOUNT`), and `@JvmStatic` methods.
     - **Field Inspection**: To view an object's instance fields in detail, retrieve its `objectId` from `locals` or `pause-state` and use `debroid inspect <session_id> <object_id>`.
+  - **🚫 Unsupported & Impossible in `eval` (DO NOT ATTEMPT IN SESSIONS)**:
+    - **Kotlin Extension Functions syntax (`receiver.extFunc()`):** Extension functions are compiled to static methods in file facade classes (e.g., `StringExtKt.extFunc(receiver)`). They are NOT instance methods on the receiver. To call an extension function, invoke it explicitly via its fully-qualified static facade class: `com.example.utils.StringExtKt.extFunc(receiver)`.
+    - **Lambdas & Higher-Order Functions:** Passing inline closures/lambdas (e.g., `list.map { it.name }`, `items.filter { it.price > 10 }`, `list.forEach { ... }`) is NOT supported by the runtime JDI evaluator (cannot synthesize anonymous classes at runtime).
+    - **Control Flow Statements:** `if-else` statements, `when` blocks, loops (`for`, `while`, `do-while`), `try-catch`, `return`, `throw`, etc. are not supported. Use elvis `?:` or boolean logic expressions instead.
+    - **Variable Declarations & Assignments:** Declaring new variables (`val x = 10`) or direct assignment statements (`x = 20`) in `eval` is not supported. Use `debroid set-var <session_id> <thread_id> <var_name> <new_value>` to mutate existing variables.
+    - **Object Instantiation via `new` / Constructor calls:** Creating new object instances via constructors (e.g., `User("Alice")`, `new HashMap()`) is not supported.
+    - **Coroutines & `suspend` Functions:** Calling `suspend` functions directly inside `eval` is not supported. Inspect active continuation frames using `debroid coroutine <session_id> <continuation_id>`.
+    - **Direct Access to Private Fields without Getters:** To inspect private fields without public accessors, use `debroid inspect <session_id> <object_id>` instead of `eval`.
 - Step execution: `debroid step <session_id> <thread_id> <ACTION>` (Actions: `STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`)
 - Resume all threads: `debroid resume <session_id>`
   > Note: `resume` resumes **all** threads in the VM. For per-thread resume, use `step <session_id> <thread_id> RESUME_THREAD`.
