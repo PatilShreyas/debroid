@@ -39,6 +39,7 @@ import dev.shreyaspatil.debroid.cli.models.DaemonRequest
 import dev.shreyaspatil.debroid.cli.models.JsonSchemaGenerator
 import dev.shreyaspatil.debroid.cli.update.AutoUpdateManager
 import dev.shreyaspatil.debroid.models.StepAction
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
@@ -54,12 +55,16 @@ import java.io.PrintWriter
 import java.net.Socket
 import kotlin.system.exitProcess
 
+@OptIn(ExperimentalSerializationApi::class)
 object CliRunner {
 
     private const val DAEMON_SOCKET_TIMEOUT_MS = 30_000
     private const val VERSION_CHECK_TIMEOUT_MS = 5_000
 
-    private val json = Json { encodeDefaults = true }
+    private val json = Json {
+        encodeDefaults = true
+        explicitNulls = false
+    }
 
     abstract class BaseJsonCommand(
         name: String? = null,
@@ -207,7 +212,11 @@ object CliRunner {
     ) {
         override fun run() {
             if (!DaemonServer.isDaemonRunning()) {
-                val jsonRes = Json { prettyPrint = pretty }
+                val jsonRes = Json {
+                    prettyPrint = pretty
+                    encodeDefaults = true
+                    explicitNulls = false
+                }
                 println(jsonRes.encodeToString(CliShutdownResult(shutdown = true, message = "Daemon is not running")))
                 return
             }
@@ -594,10 +603,12 @@ object CliRunner {
                 Json {
                     prettyPrint = true
                     encodeDefaults = true
+                    explicitNulls = false
                 }
             } else {
                 Json {
                     encodeDefaults = true
+                    explicitNulls = false
                 }
             }
             println(jsonFormatter.encodeToString(CliUpdateResult.serializer(), result))
