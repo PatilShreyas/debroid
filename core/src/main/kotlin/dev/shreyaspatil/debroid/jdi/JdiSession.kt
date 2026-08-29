@@ -6,6 +6,7 @@ import com.sun.jdi.ObjectReference
 import com.sun.jdi.PrimitiveType
 import com.sun.jdi.PrimitiveValue
 import com.sun.jdi.ReferenceType
+import com.sun.jdi.StackFrame
 import com.sun.jdi.StringReference
 import com.sun.jdi.ThreadReference
 import com.sun.jdi.VMDisconnectedException
@@ -637,7 +638,6 @@ class JdiSession(
      * @param expr The expression to evaluate.
      * @return VariableInfo representing the evaluated result.
      */
-    @Suppress("ReturnCount")
     fun evaluateExpression(threadId: String, expr: String): VariableInfo {
         val thread = findThread(threadId)
         if (!thread.isSuspended) {
@@ -648,26 +648,35 @@ class JdiSession(
             val value = JdiExpressionEvaluator.evaluate(expr, vm, thread.frame(0))
             formatValue("evaluatedResult", value)
         } catch (e: Exception) {
-            // Fallback to local variable or field lookup if ExpressionParser fails
-            val frame = thread.frame(0)
-            val thisObj = frame.thisObject()
-            val visVar = try {
-                frame.visibleVariables()
-            } catch (_: com.sun.jdi.AbsentInformationException) { emptyList() }.find { it.name() == expr }
-            if (visVar != null) {
-                return formatValue(visVar.name(), frame.getValue(visVar))
-            }
-            if (thisObj != null) {
-                val field = thisObj.referenceType().fieldByName(expr)
-                if (field != null) {
-                    return formatValue(field.name(), thisObj.getValue(field))
-                }
-            }
+            val fallback = runCatching {
+                val frame = thread.frame(0)
+                evaluateFallback(frame, expr)
+            }.getOrNull()
+            if (fallback != null) return fallback
+
             throw DebugException(
                 ErrorCode.EVALUATION_FAILED,
                 "Expression '$expr' could not be evaluated: ${e.message}"
             )
         }
+    }
+
+    private fun evaluateFallback(frame: StackFrame, expr: String): VariableInfo? {
+        val visVar = try {
+            frame.visibleVariables()
+        } catch (_: com.sun.jdi.AbsentInformationException) { emptyList() }.find { it.name() == expr }
+        if (visVar != null) {
+            return formatValue(visVar.name(), frame.getValue(visVar))
+        }
+
+        val thisObj = frame.thisObject()
+        if (thisObj != null) {
+            val field = thisObj.referenceType().fieldByName(expr)
+            if (field != null) {
+                return formatValue(field.name(), thisObj.getValue(field))
+            }
+        }
+        return null
     }
 
     /**

@@ -4,12 +4,14 @@ import com.sun.jdi.AbsentInformationException
 import com.sun.jdi.ArrayReference
 import com.sun.jdi.ArrayType
 import com.sun.jdi.BooleanValue
+import com.sun.jdi.ClassObjectReference
 import com.sun.jdi.ClassType
 import com.sun.jdi.DoubleValue
 import com.sun.jdi.Field
 import com.sun.jdi.FloatValue
 import com.sun.jdi.IntegerValue
 import com.sun.jdi.InterfaceType
+import com.sun.jdi.InvocationException
 import com.sun.jdi.LocalVariable
 import com.sun.jdi.LongValue
 import com.sun.jdi.Method
@@ -45,6 +47,8 @@ class JdiAstEvaluatorTest {
         thread = mockk(relaxed = true)
 
         every { frame.thread() } returns thread
+        every { thread.frame(0) } returns frame
+        every { thread.isSuspended } returns true
         every { frame.thisObject() } returns null
         every { frame.visibleVariables() } returns emptyList()
 
@@ -898,5 +902,923 @@ class JdiAstEvaluatorTest {
 
         val isPrimVoid = JdiExpressionEvaluator.evaluate("42 is Void", vm, frame)
         assertFalse((isPrimVoid as BooleanValue).value())
+    }
+
+    @Test
+    fun `evaluates fully-qualified static method calls`() {
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Math"
+        }
+        val maxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("int", "int")
+        }
+        val expectedResult = mockk<IntegerValue> {
+            every { value() } returns 20
+        }
+
+        every { vm.classesByName("java.lang.Math") } returns listOf(mathClass)
+        every { mathClass.methodsByName("max") } returns listOf(maxMethod)
+        every {
+            mathClass.invokeMethod(
+                thread,
+                maxMethod,
+                match {
+                    it.size == 2 &&
+                        (it[0] as IntegerValue).value() == 10 &&
+                        (it[1] as IntegerValue).value() == 20
+                },
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedResult
+
+        val result = JdiExpressionEvaluator.evaluate("java.lang.Math.max(10, 20)", vm, frame)
+        assertEquals(expectedResult, result)
+    }
+
+    @Test
+    fun `evaluates unqualified static method calls with default package imports`() {
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Math"
+        }
+        val minMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("int", "int")
+        }
+        val expectedResult = mockk<IntegerValue> {
+            every { value() } returns 10
+        }
+
+        every { vm.classesByName("Math") } returns emptyList()
+        every { vm.classesByName("java.lang.Math") } returns listOf(mathClass)
+        every { mathClass.methodsByName("min") } returns listOf(minMethod)
+        every {
+            mathClass.invokeMethod(
+                thread,
+                minMethod,
+                any(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedResult
+
+        val result = JdiExpressionEvaluator.evaluate("Math.min(10, 20)", vm, frame)
+        assertEquals(expectedResult, result)
+    }
+
+    @Test
+    fun `evaluates static fields and constants`() {
+        val integerClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Integer"
+        }
+        val maxValField = mockk<Field> {
+            every { isStatic } returns true
+            every { name() } returns "MAX_VALUE"
+        }
+        val expectedMaxVal = mockk<IntegerValue> {
+            every { value() } returns Int.MAX_VALUE
+        }
+
+        every { vm.classesByName("Integer") } returns emptyList()
+        every { vm.classesByName("java.lang.Integer") } returns listOf(integerClass)
+        every { integerClass.fieldByName("MAX_VALUE") } returns maxValField
+        every { integerClass.getValue(maxValField) } returns expectedMaxVal
+
+        val result = JdiExpressionEvaluator.evaluate("Integer.MAX_VALUE", vm, frame)
+        assertEquals(expectedMaxVal, result)
+    }
+
+    @Test
+    fun `evaluates class literals dot class`() {
+        val stringClass = mockk<ClassType> {
+            every { name() } returns "java.lang.String"
+        }
+        val classObjRef = mockk<ClassObjectReference>()
+
+        every { vm.classesByName("String") } returns emptyList()
+        every { vm.classesByName("java.lang.String") } returns listOf(stringClass)
+        every { stringClass.classObject() } returns classObjRef
+
+        val result = JdiExpressionEvaluator.evaluate("String.class", vm, frame)
+        assertEquals(classObjRef, result)
+    }
+
+    @Test
+    fun `evaluates Kotlin singleton object invocation via INSTANCE`() {
+        val singletonClass = mockk<ClassType> {
+            every { name() } returns "com.example.AppConfig"
+        }
+        val instanceField = mockk<Field> {
+            every { isStatic } returns true
+            every { name() } returns "INSTANCE"
+        }
+        val singletonInstance = mockk<ObjectReference> {
+            every { referenceType() } returns singletonClass
+        }
+        val getVersionMethod = mockk<Method> {
+            every { isStatic } returns false
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val expectedVersion = mockk<StringReference> {
+            every { value() } returns "1.0.0"
+        }
+
+        every { vm.classesByName("com.example.AppConfig") } returns listOf(singletonClass)
+        every { singletonClass.fieldByName("INSTANCE") } returns instanceField
+        every { singletonClass.getValue(instanceField) } returns singletonInstance
+        every { singletonClass.methodsByName("getVersion") } returns listOf(getVersionMethod)
+        every {
+            singletonInstance.invokeMethod(
+                thread,
+                getVersionMethod,
+                emptyList(),
+                ObjectReference.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedVersion
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.AppConfig.getVersion()", vm, frame)
+        assertEquals(expectedVersion, result)
+    }
+
+    @Test
+    fun `evaluates Kotlin companion object static access`() {
+        val hostClass = mockk<ClassType> {
+            every { name() } returns "com.example.User"
+        }
+        val companionClass = mockk<ClassType> {
+            every { name() } returns "com.example.User\$Companion"
+        }
+        val companionField = mockk<Field> {
+            every { isStatic } returns true
+            every { name() } returns "Companion"
+        }
+        val companionInstance = mockk<ObjectReference> {
+            every { referenceType() } returns companionClass
+        }
+        val createMethod = mockk<Method> {
+            every { isStatic } returns false
+            every { argumentTypeNames() } returns listOf("java.lang.String")
+        }
+        val createdUser = mockk<ObjectReference>()
+
+        every { vm.classesByName("com.example.User") } returns listOf(hostClass)
+        every { hostClass.methodsByName("create") } returns emptyList()
+        every { hostClass.fieldByName("INSTANCE") } returns null
+        every { hostClass.fieldByName("Companion") } returns companionField
+        every { hostClass.getValue(companionField) } returns companionInstance
+        every { companionClass.methodsByName("create") } returns listOf(createMethod)
+        every {
+            companionInstance.invokeMethod(
+                thread,
+                createMethod,
+                any(),
+                ObjectReference.INVOKE_SINGLE_THREADED
+            )
+        } returns createdUser
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.User.create(\"Alice\")", vm, frame)
+        assertEquals(createdUser, result)
+    }
+
+    @Test
+    fun `evaluates stdlib kotlin static functions via Kt file facade resolution`() {
+        val mathKtClass = mockk<ClassType> {
+            every { name() } returns "kotlin.math.MathKt"
+        }
+        val maxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("int", "int")
+        }
+        val expectedVal = mockk<IntegerValue> {
+            every { value() } returns 20
+        }
+
+        every { vm.classesByName("kotlin.math") } returns emptyList()
+        every { vm.classesByName("kotlin.math.MathKt") } returns listOf(mathKtClass)
+        every { vm.allClasses() } returns listOf(mathKtClass)
+        every { mathKtClass.methodsByName("max") } returns listOf(maxMethod)
+        every {
+            mathKtClass.invokeMethod(
+                thread,
+                maxMethod,
+                any(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedVal
+
+        val result = JdiExpressionEvaluator.evaluate("kotlin.math.max(10, 20)", vm, frame)
+        assertEquals(expectedVal, result)
+    }
+
+    @Test
+    fun `evaluates Kotlin companion JvmStatic method directly on host class`() {
+        val orderValidatorClass = mockk<ClassType> {
+            every { name() } returns "com.example.OrderValidator"
+        }
+        val jvmStaticTaxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val expectedRate = mockk<DoubleValue> {
+            every { value() } returns 0.08
+        }
+
+        every { vm.classesByName("com.example.OrderValidator") } returns listOf(orderValidatorClass)
+        every { orderValidatorClass.methodsByName("getTaxRate") } returns listOf(jvmStaticTaxMethod)
+        every {
+            orderValidatorClass.invokeMethod(
+                thread,
+                jvmStaticTaxMethod,
+                emptyList(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedRate
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.OrderValidator.getTaxRate()", vm, frame)
+        assertEquals(expectedRate, result)
+    }
+
+    @Test
+    fun `evaluates chained method calls on static method invocation result`() {
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Math"
+        }
+        val maxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("int", "int")
+        }
+        val intObjType = mockk<ClassType> {
+            every { name() } returns "java.lang.Integer"
+        }
+        val toStringMethod = mockk<Method> {
+            every { isStatic } returns false
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val intObjRef = mockk<ObjectReference> {
+            every { referenceType() } returns intObjType
+        }
+        val resultString = mockk<StringReference> {
+            every { value() } returns "20"
+        }
+
+        every { vm.classesByName("java.lang.Math") } returns listOf(mathClass)
+        every { mathClass.methodsByName("max") } returns listOf(maxMethod)
+        every {
+            mathClass.invokeMethod(
+                thread,
+                maxMethod,
+                any(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns intObjRef
+
+        every { intObjType.methodsByName("toString") } returns listOf(toStringMethod)
+        every {
+            intObjRef.invokeMethod(
+                thread,
+                toStringMethod,
+                emptyList(),
+                ObjectReference.INVOKE_SINGLE_THREADED
+            )
+        } returns resultString
+
+        val result = JdiExpressionEvaluator.evaluate("java.lang.Math.max(10, 20).toString()", vm, frame)
+        assertEquals(resultString, result)
+    }
+
+    @Test
+    fun `throws evaluation error when static method or class is not found`() {
+        every { vm.allClasses() } returns emptyList()
+        every { vm.classesByName(any()) } returns emptyList()
+
+        val classNotFoundEx = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("NonExistentClass.foo()", vm, frame)
+        }
+        assertTrue(classNotFoundEx.message?.contains("Cannot resolve identifier or class") == true)
+
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Math"
+            every { methodsByName("nonExistentMethod") } returns emptyList()
+            every { fieldByName("INSTANCE") } returns null
+            every { fieldByName("Companion") } returns null
+        }
+        every { vm.classesByName("java.lang.Math") } returns listOf(mathClass)
+
+        val methodNotFoundEx = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("java.lang.Math.nonExistentMethod()", vm, frame)
+        }
+        assertTrue(methodNotFoundEx.message?.contains("Static method 'nonExistentMethod'") == true)
+    }
+
+    @Test
+    fun `local variable shadows class name with same identifier`() {
+        val mathVar = mockk<LocalVariable> { every { name() } returns "Math" }
+        val customObjType = mockk<ClassType> {
+            every { name() } returns "com.example.CustomMath"
+        }
+        val customObjRef = mockk<ObjectReference> {
+            every { referenceType() } returns customObjType
+        }
+        val customMethod = mockk<Method> {
+            every { isStatic } returns false
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val expectedVal = mockk<IntegerValue> {
+            every { value() } returns 99
+        }
+
+        every { frame.visibleVariables() } returns listOf(mathVar)
+        every { frame.getValue(mathVar) } returns customObjRef
+        every { customObjType.methodsByName("customFunc") } returns listOf(customMethod)
+        every {
+            customObjRef.invokeMethod(
+                thread,
+                customMethod,
+                emptyList(),
+                ObjectReference.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedVal
+
+        val result = JdiExpressionEvaluator.evaluate("Math.customFunc()", vm, frame)
+        assertEquals(expectedVal, result)
+    }
+
+    @Test
+    fun `evaluates overloaded static methods with correct argument type match`() {
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Math"
+        }
+        val intMaxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("int", "int")
+        }
+        val doubleMaxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("double", "double")
+        }
+        val expectedDoubleResult = mockk<DoubleValue> {
+            every { value() } returns 20.5
+        }
+
+        every { vm.classesByName("Math") } returns emptyList()
+        every { vm.classesByName("java.lang.Math") } returns listOf(mathClass)
+        every { mathClass.methodsByName("max") } returns listOf(intMaxMethod, doubleMaxMethod)
+        every {
+            mathClass.invokeMethod(
+                thread,
+                doubleMaxMethod,
+                any(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedDoubleResult
+
+        val result = JdiExpressionEvaluator.evaluate("Math.max(10.5, 20.5)", vm, frame)
+        assertEquals(expectedDoubleResult, result)
+    }
+
+    @Test
+    fun `evaluates static method with nested arithmetic expressions as arguments`() {
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Math"
+        }
+        val maxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("int", "int")
+        }
+        val expectedResult = mockk<IntegerValue> {
+            every { value() } returns 10
+        }
+
+        every { vm.classesByName("Math") } returns emptyList()
+        every { vm.classesByName("java.lang.Math") } returns listOf(mathClass)
+        every { mathClass.methodsByName("max") } returns listOf(maxMethod)
+        every {
+            mathClass.invokeMethod(
+                thread,
+                maxMethod,
+                match {
+                    it.size == 2 &&
+                        (it[0] as IntegerValue).value() == 8 &&
+                        (it[1] as IntegerValue).value() == 10
+                },
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedResult
+
+        val result = JdiExpressionEvaluator.evaluate("Math.max(3 + 5, 2 * 5)", vm, frame)
+        assertEquals(expectedResult, result)
+    }
+
+    @Test
+    fun `evaluates static method with zero arguments`() {
+        val systemClass = mockk<ClassType> {
+            every { name() } returns "java.lang.System"
+        }
+        val currentTimeMillisMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val expectedTime = mockk<LongValue> {
+            every { value() } returns 1700000000000L
+        }
+
+        every { vm.classesByName("System") } returns emptyList()
+        every { vm.classesByName("java.lang.System") } returns listOf(systemClass)
+        every { systemClass.methodsByName("currentTimeMillis") } returns listOf(currentTimeMillisMethod)
+        every {
+            systemClass.invokeMethod(
+                thread,
+                currentTimeMillisMethod,
+                emptyList(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedTime
+
+        val result = JdiExpressionEvaluator.evaluate("System.currentTimeMillis()", vm, frame)
+        assertEquals(expectedTime, result)
+    }
+
+    @Test
+    fun `evaluates static method returning null`() {
+        val utilClass = mockk<ClassType> {
+            every { name() } returns "com.example.Util"
+        }
+        val getNullMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns emptyList()
+        }
+
+        every { vm.classesByName("com.example.Util") } returns listOf(utilClass)
+        every { utilClass.methodsByName("getNull") } returns listOf(getNullMethod)
+        every {
+            utilClass.invokeMethod(
+                thread,
+                getNullMethod,
+                emptyList(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns null
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.Util.getNull()", vm, frame)
+        assertNull(result)
+    }
+
+    @Test
+    fun `handles exception thrown inside target VM during static method invocation`() {
+        val exceptionClass = mockk<ClassType> {
+            every { name() } returns "java.lang.IllegalArgumentException"
+        }
+        val exceptionRef = mockk<ObjectReference> {
+            every { referenceType() } returns exceptionClass
+        }
+        val invocationException = InvocationException(exceptionRef)
+
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Math"
+        }
+        val failMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns emptyList()
+        }
+
+        every { vm.classesByName("java.lang.Math") } returns listOf(mathClass)
+        every { mathClass.methodsByName("fail") } returns listOf(failMethod)
+        every {
+            mathClass.invokeMethod(
+                thread,
+                failMethod,
+                emptyList(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } throws invocationException
+
+        val thrown = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("java.lang.Math.fail()", vm, frame)
+        }
+        assertTrue(thrown.message?.contains("threw an exception: java.lang.IllegalArgumentException") == true)
+    }
+
+    @Test
+    fun `evaluates static field on interface`() {
+        val ifaceType = mockk<InterfaceType> {
+            every { name() } returns "com.example.Constants"
+        }
+        val timeoutField = mockk<Field> {
+            every { isStatic } returns true
+            every { name() } returns "TIMEOUT"
+        }
+        val timeoutVal = mockk<IntegerValue> {
+            every { value() } returns 5000
+        }
+
+        every { vm.classesByName("com.example.Constants") } returns listOf(ifaceType)
+        every { ifaceType.fieldByName("TIMEOUT") } returns timeoutField
+        every { ifaceType.getValue(timeoutField) } returns timeoutVal
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.Constants.TIMEOUT", vm, frame)
+        assertEquals(timeoutVal, result)
+    }
+
+    @Test
+    fun `throws when attempting to invoke non-static method on class without instance`() {
+        val customClass = mockk<ClassType> {
+            every { name() } returns "com.example.Service"
+            val instanceMethod = mockk<Method> {
+                every { isStatic } returns false
+                every { argumentTypeNames() } returns emptyList()
+            }
+            every { methodsByName("doWork") } returns listOf(instanceMethod)
+            every { fieldByName("INSTANCE") } returns null
+            every { fieldByName("Companion") } returns null
+        }
+
+        every { vm.classesByName("com.example.Service") } returns listOf(customClass)
+
+        val thrown = assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("com.example.Service.doWork()", vm, frame)
+        }
+        assertTrue(thrown.message?.contains("Static method 'doWork' with 0 args not found") == true)
+    }
+
+    @Test
+    fun `evaluates nested static class invocation using dollar notation resolution`() {
+        val nestedClass = mockk<ClassType> {
+            every { name() } returns "com.example.Outer\$Nested"
+        }
+        val helperMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val expectedResult = mockk<StringReference> {
+            every { value() } returns "nested_result"
+        }
+
+        every { vm.classesByName("com.example.Outer.Nested") } returns emptyList()
+        every { vm.classesByName("com.example.Outer\$Nested") } returns listOf(nestedClass)
+        every { nestedClass.methodsByName("helper") } returns listOf(helperMethod)
+        every {
+            nestedClass.invokeMethod(
+                thread,
+                helperMethod,
+                emptyList(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedResult
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.Outer.Nested.helper()", vm, frame)
+        assertEquals(expectedResult, result)
+    }
+
+    @Test
+    fun `evaluates static getter property access`() {
+        val configClass = mockk<ClassType> {
+            every { name() } returns "com.example.Config"
+        }
+        val getDebugModeMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val debugModeVal = mockk<BooleanValue> {
+            every { value() } returns true
+        }
+
+        every { vm.classesByName("com.example.Config") } returns listOf(configClass)
+        every { configClass.fieldByName("debugMode") } returns null
+        every { configClass.methodsByName("getDebugMode") } returns listOf(getDebugModeMethod)
+        every {
+            configClass.invokeMethod(
+                thread,
+                getDebugModeMethod,
+                emptyList(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns debugModeVal
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.Config.debugMode", vm, frame)
+        assertEquals(debugModeVal, result)
+    }
+
+    @Test
+    fun `evaluates implicit top-level package function without target`() {
+        val declaringClass = mockk<ClassType> {
+            every { name() } returns "com.example.data.DefaultRepository"
+            every { methodsByName("formatOrder") } returns emptyList()
+        }
+        val location = mockk<com.sun.jdi.Location> {
+            every { declaringType() } returns declaringClass
+        }
+        val fileFacadeClass = mockk<ClassType> {
+            every { name() } returns "com.example.data.DataKt"
+        }
+        val formatOrderMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("java.lang.String")
+        }
+        val formattedResult = mockk<StringReference> {
+            every { value() } returns "ORDER-99"
+        }
+
+        every { frame.thisObject() } returns null
+        every { frame.location() } returns location
+        every { vm.allClasses() } returns listOf(fileFacadeClass)
+        every { fileFacadeClass.methodsByName("formatOrder") } returns listOf(formatOrderMethod)
+        every {
+            fileFacadeClass.invokeMethod(
+                thread,
+                formatOrderMethod,
+                any(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns formattedResult
+
+        val result = JdiExpressionEvaluator.evaluate("formatOrder(\"99\")", vm, frame)
+        assertEquals(formattedResult, result)
+    }
+
+    @Test
+    fun `prioritizes exact matching method overload over compatible overloads`() {
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "com.example.MathService"
+        }
+        val doubleMaxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("double", "double")
+        }
+        val intMaxMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("int", "int")
+        }
+        val intResult = mockk<IntegerValue> {
+            every { value() } returns 20
+        }
+
+        every { vm.classesByName("com.example.MathService") } returns listOf(mathClass)
+        every { mathClass.methodsByName("computeMax") } returns listOf(doubleMaxMethod, intMaxMethod)
+        every {
+            mathClass.invokeMethod(
+                thread,
+                intMaxMethod,
+                any(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns intResult
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.MathService.computeMax(10, 20)", vm, frame)
+        assertEquals(intResult, result)
+    }
+
+    @Test
+    fun `evaluates class literals with dot class notation`() {
+        val stringClass = mockk<ClassType> {
+            every { name() } returns "java.lang.String"
+        }
+        val classObjRef = mockk<ClassObjectReference>()
+        every { stringClass.classObject() } returns classObjRef
+        every { vm.classesByName("java.lang.String") } returns listOf(stringClass)
+
+        val result = JdiExpressionEvaluator.evaluate("java.lang.String.class", vm, frame)
+        assertEquals(classObjRef, result)
+    }
+
+    @Test
+    fun `evaluates static method invocation with null literal argument`() {
+        val validatorClass = mockk<ClassType> {
+            every { name() } returns "com.example.Validator"
+        }
+        val checkMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("java.lang.String")
+        }
+        val expectedBool = mockk<BooleanValue> {
+            every { value() } returns false
+        }
+
+        every { vm.classesByName("com.example.Validator") } returns listOf(validatorClass)
+        every { validatorClass.methodsByName("isValid") } returns listOf(checkMethod)
+        every {
+            validatorClass.invokeMethod(
+                thread,
+                checkMethod,
+                listOf(null),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns expectedBool
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.Validator.isValid(null)", vm, frame)
+        assertEquals(expectedBool, result)
+    }
+
+    @Test
+    fun `coerces primitive integer argument to double when calling static method`() {
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "java.lang.Math"
+        }
+        val sqrtMethod = mockk<Method> {
+            every { isStatic } returns true
+            every { argumentTypeNames() } returns listOf("double")
+        }
+        val double4 = mockk<DoubleValue>()
+        val sqrtResult = mockk<DoubleValue> {
+            every { value() } returns 2.0
+        }
+
+        every { vm.classesByName("java.lang.Math") } returns listOf(mathClass)
+        every { mathClass.methodsByName("sqrt") } returns listOf(sqrtMethod)
+        every { vm.mirrorOf(4.0) } returns double4
+        every {
+            mathClass.invokeMethod(
+                thread,
+                sqrtMethod,
+                listOf(double4),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns sqrtResult
+
+        val result = JdiExpressionEvaluator.evaluate("java.lang.Math.sqrt(4)", vm, frame)
+        assertEquals(sqrtResult, result)
+    }
+
+    @Test
+    fun `invokes companion object method when host class also defines an unrelated INSTANCE field`() {
+        val hostClass = mockk<ClassType> {
+            every { name() } returns "com.example.OrderManager"
+            every { methodsByName("getTaxRate") } returns emptyList()
+        }
+        val instanceField = mockk<com.sun.jdi.Field> {
+            every { isStatic } returns true
+        }
+        val companionField = mockk<com.sun.jdi.Field> {
+            every { isStatic } returns true
+        }
+        val instanceObj = mockk<ObjectReference> {
+            val refType = mockk<ReferenceType> {
+                every { name() } returns "com.example.OrderManager\$Instance"
+                every { visibleMethods() } returns emptyList()
+                every { methodsByName("getTaxRate") } returns emptyList()
+            }
+            every { referenceType() } returns refType
+        }
+        val companionObj = mockk<ObjectReference> {
+            val refType = mockk<ReferenceType> {
+                every { name() } returns "com.example.OrderManager\$Companion"
+                val getTaxRateMethod = mockk<Method> {
+                    every { name() } returns "getTaxRate"
+                    every { argumentTypeNames() } returns emptyList()
+                }
+                every { visibleMethods() } returns listOf(getTaxRateMethod)
+                every { methodsByName("getTaxRate") } returns listOf(getTaxRateMethod)
+            }
+            every { referenceType() } returns refType
+        }
+        val companionMethod = companionObj.referenceType().visibleMethods().first()
+        val taxRateResult = mockk<DoubleValue> {
+            every { value() } returns 0.15
+        }
+
+        every { vm.classesByName("com.example.OrderManager") } returns listOf(hostClass)
+        every { hostClass.fieldByName("INSTANCE") } returns instanceField
+        every { hostClass.getValue(instanceField) } returns instanceObj
+        every { hostClass.fieldByName("Companion") } returns companionField
+        every { hostClass.getValue(companionField) } returns companionObj
+        every {
+            companionObj.invokeMethod(
+                thread,
+                companionMethod,
+                emptyList(),
+                ObjectReference.INVOKE_SINGLE_THREADED
+            )
+        } returns taxRateResult
+
+        val result = JdiExpressionEvaluator.evaluate("com.example.OrderManager.getTaxRate()", vm, frame)
+        assertEquals(taxRateResult, result)
+    }
+
+    @Test
+    fun `invokes inherited method from superclass on object reference via visibleMethods`() {
+        val localObj = mockk<ObjectReference>()
+        val subClassType = mockk<ClassType> {
+            every { name() } returns "com.example.CustomOrder"
+            val toStringMethod = mockk<Method> {
+                every { name() } returns "toString"
+                every { argumentTypeNames() } returns emptyList()
+            }
+            // methodsByName declared directly returns empty (inherited from Object)
+            every { methodsByName("toString") } returns emptyList()
+            // visibleMethods includes inherited toString()
+            every { visibleMethods() } returns listOf(toStringMethod)
+        }
+        every { localObj.referenceType() } returns subClassType
+
+        val stringResult = mockk<StringReference> {
+            every { value() } returns "Order#123"
+        }
+        val toStringMethod = subClassType.visibleMethods().first()
+
+        every { frame.thisObject() } returns null
+        val localVar = mockk<com.sun.jdi.LocalVariable> {
+            every { name() } returns "order"
+        }
+        every { frame.visibleVariables() } returns listOf(localVar)
+        every { frame.getValue(localVar) } returns localObj
+        every {
+            localObj.invokeMethod(
+                thread,
+                toStringMethod,
+                emptyList(),
+                ObjectReference.INVOKE_SINGLE_THREADED
+            )
+        } returns stringResult
+
+        val result = JdiExpressionEvaluator.evaluate("order.toString()", vm, frame)
+        assertEquals(stringResult, result)
+    }
+
+    @Test
+    fun `fails evaluation when passing incompatible object to primitive parameter overload`() {
+        val mathClass = mockk<ClassType> {
+            every { name() } returns "com.example.PrimitiveHelper"
+            val intMethod = mockk<Method> {
+                every { isStatic } returns true
+                every { argumentTypeNames() } returns listOf("int")
+            }
+            every { methodsByName("process") } returns listOf(intMethod)
+            every { fieldByName("process") } returns null
+        }
+        every { vm.classesByName("com.example.PrimitiveHelper") } returns listOf(mathClass)
+
+        val strObj = mockk<StringReference> {
+            every { value() } returns "invalid"
+            every { referenceType() } returns mockk { every { name() } returns "java.lang.String" }
+        }
+        every { vm.mirrorOf("invalid") } returns strObj
+        every {
+            mathClass.invokeMethod(
+                thread,
+                any(),
+                any(),
+                ClassType.INVOKE_SINGLE_THREADED
+            )
+        } throws IllegalArgumentException("Invalid argument type")
+
+        assertThrows(DebugException::class.java) {
+            JdiExpressionEvaluator.evaluate("com.example.PrimitiveHelper.process(\"invalid\")", vm, frame)
+        }
+    }
+
+    @Test
+    fun `evaluates inherited property getter via visibleMethods`() {
+        val orderObj = mockk<ObjectReference>()
+        val refType = mockk<ReferenceType> {
+            every { name() } returns "com.example.Order"
+        }
+        val getIdMethod = mockk<Method> {
+            every { name() } returns "getId"
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val idVal = mockk<IntegerValue> {
+            every { value() } returns 42
+        }
+
+        every { orderObj.referenceType() } returns refType
+        // methodsByName returns empty (declared only on superclass)
+        every { refType.methodsByName("getId") } returns emptyList()
+        every { refType.methodsByName("isId") } returns emptyList()
+        every { refType.methodsByName("id") } returns emptyList()
+        every { refType.fieldByName("id") } returns null
+        // visibleMethods returns inherited getter
+        every { refType.visibleMethods() } returns listOf(getIdMethod)
+        every {
+            orderObj.invokeMethod(thread, getIdMethod, emptyList(), ObjectReference.INVOKE_SINGLE_THREADED)
+        } returns idVal
+
+        val orderVar = mockk<LocalVariable> { every { name() } returns "order" }
+        every { frame.visibleVariables() } returns listOf(orderVar)
+        every { frame.getValue(orderVar) } returns orderObj
+
+        val result = JdiExpressionEvaluator.evaluate("order.id", vm, frame)
+        assertEquals(idVal, result)
+    }
+
+    @Test
+    fun `evaluates inherited implicit method invocation on this via visibleMethods`() {
+        val thisObj = mockk<ObjectReference>()
+        val refType = mockk<ReferenceType> {
+            every { name() } returns "com.example.MainActivity"
+        }
+        val finishMethod = mockk<Method> {
+            every { name() } returns "finish"
+            every { argumentTypeNames() } returns emptyList()
+        }
+        val nullReturn = null
+
+        every { frame.thisObject() } returns thisObj
+        every { thisObj.referenceType() } returns refType
+        every { refType.methodsByName("finish") } returns emptyList()
+        every { refType.visibleMethods() } returns listOf(finishMethod)
+        every {
+            thisObj.invokeMethod(thread, finishMethod, emptyList(), ObjectReference.INVOKE_SINGLE_THREADED)
+        } returns nullReturn
+
+        val result = JdiExpressionEvaluator.evaluate("finish()", vm, frame)
+        assertNull(result)
     }
 }

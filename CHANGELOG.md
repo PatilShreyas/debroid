@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Automated Shell PATH Configuration:** Enhanced `install.sh` to automatically detect the user's active shell (`bash`, `zsh`, `fish`) and register `~/.local/bin` in the corresponding profile (`.bashrc`, `.zshrc`, `config.fish`). Includes recursive symlink resolution to preserve GNU Stow / Chezmoi dotfile setups, idempotent delimiter replacement (`# >>> debroid installer >>>`), and automatic skip when already on PATH (#75).
 - **Installer Integration Test Suite:** Added a hermetic multi-shell integration test suite (`scripts/test_install.sh`) executed on every CI PR run, validating binary installation, shell PATH exports, subshell CLI version invocation, AI skill extraction, and dotfile symlink safety across environments (#75).
-- **Rich Kotlin & Compound Expression Evaluation:** The `debroid eval` command now natively supports evaluating complex runtime expressions directly in your paused stack frame, including compound boolean logic, short-circuiting, Kotlin properties, safe calls, default fallbacks, and type casting (#72, #80):
+- **Rich Kotlin & Compound Expression Evaluation:** The `debroid eval` command now natively supports evaluating complex runtime expressions directly in your paused stack frame, including static methods, static constants/fields, compound boolean logic, short-circuiting, Kotlin properties, safe calls, default fallbacks, and type casting (#72, #79, #80):
+  - **Static Methods & Constants:** `debroid eval <session_id> <thread_id> "Math.max(10, 20)"`, `java.lang.System.currentTimeMillis()`, `Integer.MAX_VALUE`, `View.VISIBLE`, or `String.class` (supports fully-qualified and simple class names with standard package imports like `java.lang`, `java.util`, `kotlin`, `android.util`, `android.view`, etc., and Kotlin singleton/companion objects via `INSTANCE`) (#79)
   - **Compound Boolean Logic:** `debroid eval <session_id> <thread_id> "amount >= 600.0 && isExpress"`
   - **Kotlin Property Access:** `debroid eval <session_id> <thread_id> "user.address.city"` (automatically resolves backing fields or getters like `getName()` / `isExpress()`)
   - **Safe Calls & Elvis Fallbacks:** `debroid eval <session_id> <thread_id> "user?.address?.city ?: \"Unknown\""`
@@ -20,8 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Breakpoint ID in Poll Breakpoint Hit Event:** Fixed an issue where polling for `BREAKPOINT_HIT` events returned `breakpointId` as `null`. Registered breakpoint request IDs (`bp_*`) are now attached to JDI breakpoint requests and propagated into the poll event payload (#73).
 - **JVM User Home Resolution in Launcher Stub:** Updated the standalone binary launcher stub in `install.sh` and release workflow to pass `-Duser.home="$USER_HOME"` to the Java runtime, and added `$HOME` environment variable fallbacks in `SkillExtractor`, `UpdateCache`, and `BinaryUpdater` to ensure proper path resolution under custom `$HOME` configurations and Linux environments (#75).
-
-### Changed
 
 ## [v0.2.0] - 2026-08-21
 
