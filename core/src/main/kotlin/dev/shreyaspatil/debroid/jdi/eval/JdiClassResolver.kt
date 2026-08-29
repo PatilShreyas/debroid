@@ -30,19 +30,6 @@ class JdiClassResolver(
     private val thread = runCatching { initialFrame.thread() }.getOrNull()
     private val activeFrame: StackFrame get() = runCatching { thread?.frame(0) }.getOrNull() ?: initialFrame
 
-    companion object {
-        private val defaultImportPackages = listOf(
-            "java.lang",
-            "java.util",
-            "kotlin",
-            "kotlin.math",
-            "kotlin.collections",
-            "android.util",
-            "android.os",
-            "android.view"
-        )
-    }
-
     /**
      * Resolves a [ReferenceType] matching [className] in the VM.
      *
@@ -349,5 +336,18 @@ class JdiClassResolver(
     private fun String.replaceLast(oldChar: Char, newChar: Char): String {
         val index = lastIndexOf(oldChar)
         return if (index < 0) this else substring(0, index) + newChar + substring(index + 1)
+    }
+
+    companion object {
+        private val defaultImportPackages = listOf(
+            "java.lang",
+            "java.util",
+            "kotlin",
+            "kotlin.math",
+            "kotlin.collections",
+            "android.util",
+            "android.os",
+            "android.view"
+        )
     }
 }
