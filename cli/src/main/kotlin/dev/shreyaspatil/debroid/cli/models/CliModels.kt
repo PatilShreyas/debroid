@@ -210,7 +210,7 @@ data class CliVariableInfo(
     val type: String,
     @SerialDescription("Preview string of the variable value")
     val valuePreview: String,
-    @SerialDescription("Whether the variable is a primitive or String")
+    @SerialDescription("Whether the variable is a primitive")
     val isPrimitive: Boolean,
     @SerialDescription("Heap object ID for non-primitive reference objects")
     val objectId: String? = null

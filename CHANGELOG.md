@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Mixed Arithmetic & String Formatting:** `debroid eval <session_id> <thread_id> "\"Total: $\" + (amount * (1.0 - discount))"`
 
 ### Fixed
+- **StringReference Incorrectly Marked as Primitive:** Fixed an issue where `StringReference` variable values were formatted with `isPrimitive = true` despite providing a heap `objectId`. Strings are reference types on the JVM heap and are now correctly reported with `isPrimitive = false` (#58).
 - **Breakpoint ID in Poll Breakpoint Hit Event:** Fixed an issue where polling for `BREAKPOINT_HIT` events returned `breakpointId` as `null`. Registered breakpoint request IDs (`bp_*`) are now attached to JDI breakpoint requests and propagated into the poll event payload (#73).
 - **JVM User Home Resolution in Launcher Stub:** Updated the standalone binary launcher stub in `install.sh` and release workflow to pass `-Duser.home="$USER_HOME"` to the Java runtime, and added `$HOME` environment variable fallbacks in `SkillExtractor`, `UpdateCache`, and `BinaryUpdater` to ensure proper path resolution under custom `$HOME` configurations and Linux environments (#75).
 
