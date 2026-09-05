@@ -144,6 +144,7 @@ debroid detach <session_id>
 - **Autonomous UI Interaction**: Instead of asking the user to click buttons on the device, inspect the UI bounds using `android layout --pretty` (prefer `android-cli` if installed) or `adb shell uiautomator dump /sdcard/window_dump.xml && adb shell cat /sdcard/window_dump.xml`, locate the target element's `bounds="[minX,minY][maxX,maxY]"`, calculate the center coordinates `(minX + maxX)/2`, and simulate a tap with `adb shell input tap X Y`.
 - **`detached` of `launch`'d session and app won't start normally**: Should not happen — `detach` clears `am set-debug-app`. If it does (e.g. daemon was forcibly killed), run `adb shell am clear-debug-app` once.
 - **Daemon or Session Unresponsive**: Run `debroid stop` to terminate the background server and clear ADB port forwards. The next `debroid` command will automatically spawn a fresh, clean daemon.
+- **Daemon Startup Failures**: If the auto-spawned daemon fails to start, review the surfaced startup diagnostics in the error output or inspect `~/.debroid/daemon.log` for full details.
 
 ## 🐛 Reporting Bugs & Feedback (Debroid Tool Itself)
 

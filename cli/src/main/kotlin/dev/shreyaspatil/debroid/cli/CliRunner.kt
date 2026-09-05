@@ -50,8 +50,10 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.io.PrintWriter
+import java.io.RandomAccessFile
 import java.net.Socket
 import kotlin.system.exitProcess
 
@@ -60,6 +62,8 @@ object CliRunner {
 
     private const val DAEMON_SOCKET_TIMEOUT_MS = 30_000
     private const val VERSION_CHECK_TIMEOUT_MS = 5_000
+    private const val MAX_STARTUP_DIAGNOSTIC_BYTES = 64 * 1024
+    private const val DEFAULT_STARTUP_DIAGNOSTIC_LINES = 20
 
     private val json = Json {
         encodeDefaults = true
@@ -92,26 +96,58 @@ object CliRunner {
         }
     }
 
-    @Suppress("MagicNumber", "MaxLineLength", "TooGenericExceptionCaught")
-    private fun ensureDaemonAndSend(request: DaemonRequest, pretty: Boolean = false) {
-        if (!DaemonServer.isDaemonRunning()) {
-            val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
-            val classPath = System.getProperty("java.class.path")
+    private val daemonProcessBuilder: (port: Int) -> ProcessBuilder = { port ->
+        val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
+        val classPath = System.getProperty("java.class.path")
+        ProcessBuilder(
+            javaBin,
+            "--enable-native-access=ALL-UNNAMED",
+            "-cp",
+            classPath,
+            "dev.shreyaspatil.debroid.MainKt",
+            "--port",
+            port.toString(),
+            "daemon"
+        )
+    }
 
-            // Start the daemon process in the background
-            val builder = ProcessBuilder(
-                javaBin,
-                "--enable-native-access=ALL-UNNAMED",
-                "-cp",
-                classPath,
-                "dev.shreyaspatil.debroid.MainKt",
-                "--port",
-                DaemonConfig.PORT.toString(),
-                "daemon"
-            )
-            builder.redirectError(ProcessBuilder.Redirect.DISCARD)
-            builder.redirectOutput(ProcessBuilder.Redirect.DISCARD)
-            builder.start()
+    @Suppress("MagicNumber", "MaxLineLength", "TooGenericExceptionCaught")
+    internal fun ensureDaemonAndSend(
+        request: DaemonRequest,
+        pretty: Boolean = false,
+        logFile: File = DaemonConfig.logFile,
+        processBuilder: (port: Int) -> ProcessBuilder = daemonProcessBuilder
+    ) {
+        if (!DaemonServer.isDaemonRunning()) {
+            val startOffset = runCatching {
+                logFile.parentFile?.mkdirs()
+                if (logFile.exists()) logFile.length() else 0L
+            }.getOrNull() ?: 0L
+
+            val builder = processBuilder(DaemonConfig.PORT)
+            runCatching {
+                builder.redirectErrorStream(true)
+                builder.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
+            }.onFailure {
+                builder.redirectError(ProcessBuilder.Redirect.DISCARD)
+                builder.redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            }
+
+            val process = runCatching { builder.start() }.getOrElse { error ->
+                val diagnostics = readStartupDiagnostics(logFile, startOffset)
+                val errorMessage = if (diagnostics.isNotBlank()) {
+                    "Failed to start background daemon: $diagnostics"
+                } else {
+                    val detail = error.message ?: "Process spawn failed"
+                    "Failed to start background daemon: $detail (log: ${logFile.absolutePath})"
+                }
+                println(
+                    json.encodeToString(
+                        CliDebugError(CliErrorCode.CLI_ERROR.name, errorMessage, false)
+                    )
+                )
+                return
+            }
 
             var started = false
             var attempts = 0
@@ -120,12 +156,23 @@ object CliRunner {
                 Thread.sleep(100)
                 if (DaemonServer.isDaemonRunning()) {
                     started = true
+                } else if (!process.isAlive) {
+                    break
                 }
             }
             if (!started) {
+                if (process.isAlive) {
+                    runCatching { process.destroyForcibly() }
+                }
+                val diagnostics = readStartupDiagnostics(logFile, startOffset)
+                val errorMessage = if (diagnostics.isNotBlank()) {
+                    "Failed to start background daemon: $diagnostics"
+                } else {
+                    "Failed to start background daemon (log: ${logFile.absolutePath})"
+                }
                 println(
                     json.encodeToString(
-                        CliDebugError(CliErrorCode.CLI_ERROR.name, "Failed to start background daemon", false)
+                        CliDebugError(CliErrorCode.CLI_ERROR.name, errorMessage, false)
                     )
                 )
                 return
@@ -154,6 +201,45 @@ object CliRunner {
             )
         }
     }
+
+    internal fun readStartupDiagnostics(
+        logFile: File,
+        startOffset: Long,
+        maxLines: Int = DEFAULT_STARTUP_DIAGNOSTIC_LINES
+    ): String = runCatching {
+        if (!logFile.exists()) return@runCatching ""
+        val fileLength = logFile.length()
+        if (fileLength == 0L) return@runCatching ""
+
+        val effectiveStart = if (startOffset in 0L..fileLength) {
+            startOffset
+        } else {
+            0L
+        }
+        val bytesAvailable = fileLength - effectiveStart
+        if (bytesAvailable <= 0L) return@runCatching ""
+
+        val seekPos = if (bytesAvailable > MAX_STARTUP_DIAGNOSTIC_BYTES) {
+            fileLength - MAX_STARTUP_DIAGNOSTIC_BYTES
+        } else {
+            effectiveStart
+        }
+
+        RandomAccessFile(logFile, "r").use { raf ->
+            raf.seek(seekPos)
+            val bytes = ByteArray((fileLength - seekPos).toInt())
+            raf.readFully(bytes)
+            val content = String(bytes, Charsets.UTF_8)
+            val lines = content.lines()
+                .map { it.trimEnd() }
+                .filter { it.isNotBlank() }
+            if (lines.isEmpty()) {
+                ""
+            } else {
+                lines.takeLast(maxLines).joinToString("\n")
+            }
+        }
+    }.getOrDefault("")
 
     @Suppress("TooGenericExceptionCaught")
     private fun checkDaemonVersionMismatch(request: DaemonRequest): Boolean {

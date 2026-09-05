@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [UNRELEASED]
 
 ### Added
+- **Daemon Log Redirection & Startup Diagnostics:** Background daemon standard output and standard error are now redirected to `~/.debroid/daemon.log` instead of being discarded. When background daemon auto-spawn fails or exits prematurely, startup diagnostics are extracted from the log and surfaced directly in the `CliDebugError` JSON message with fast-fail detection, eliminating silent timeouts and improving debuggability for AI agents (#57).
 
 ### Fixed
 - **Fix Loose Substring Matching in PID Fallback:** Updated the `ps -A` fallback parser in AdbManager to match the exact process name column instead of a loose line substring, preventing erroneous PID matches for similarly-named packages (#59).
