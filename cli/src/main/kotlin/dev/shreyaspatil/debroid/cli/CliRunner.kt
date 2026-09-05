@@ -132,7 +132,22 @@ object CliRunner {
                 builder.redirectError(ProcessBuilder.Redirect.DISCARD)
                 builder.redirectOutput(ProcessBuilder.Redirect.DISCARD)
             }
-            val process = builder.start()
+
+            val process = runCatching { builder.start() }.getOrElse { error ->
+                val diagnostics = readStartupDiagnostics(logFile, startOffset)
+                val errorMessage = if (diagnostics.isNotBlank()) {
+                    "Failed to start background daemon: $diagnostics"
+                } else {
+                    val detail = error.message ?: "Process spawn failed"
+                    "Failed to start background daemon: $detail (log: ${logFile.absolutePath})"
+                }
+                println(
+                    json.encodeToString(
+                        CliDebugError(CliErrorCode.CLI_ERROR.name, errorMessage, false)
+                    )
+                )
+                return
+            }
 
             var started = false
             var attempts = 0

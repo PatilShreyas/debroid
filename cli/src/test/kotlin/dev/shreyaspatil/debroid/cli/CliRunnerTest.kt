@@ -394,4 +394,38 @@ class CliRunnerTest {
             error.message
         )
     }
+
+    @Test
+    fun `ensureDaemonAndSend catches spawn exceptions and returns CliDebugError`(@TempDir tempDir: File) {
+        val testLogFile = File(tempDir, "daemon.log")
+        DaemonConfig.PORT = 65431
+
+        val mockProcessBuilder: (Int) -> ProcessBuilder = {
+            ProcessBuilder("/non/existent/path/to/java_binary")
+        }
+
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            CliRunner.ensureDaemonAndSend(
+                request = DaemonRequest.Detach("s_test"),
+                logFile = testLogFile,
+                processBuilder = mockProcessBuilder
+            )
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        val errorJson = outContent.toString().trim()
+        val error = Json.decodeFromString<CliDebugError>(errorJson)
+        assertEquals(CliErrorCode.CLI_ERROR.name, error.errorCode)
+        assertFalse(error.retryable)
+        assertTrue(error.message.startsWith("Failed to start background daemon:"))
+        assertTrue(
+            error.message.contains("/non/existent/path/to/java_binary") ||
+                error.message.contains("Cannot run program")
+        )
+    }
 }
