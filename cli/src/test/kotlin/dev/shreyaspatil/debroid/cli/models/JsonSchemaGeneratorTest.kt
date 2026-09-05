@@ -4,9 +4,11 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -200,5 +202,31 @@ class JsonSchemaGeneratorTest {
 
         assertEquals("string", props?.get("nextCursor")?.jsonObject?.get("type")?.jsonPrimitive?.content)
         assertEquals("boolean", props?.get("hasMore")?.jsonObject?.get("type")?.jsonPrimitive?.content)
+
+        val droppedProp = props?.get("droppedEventsSinceLastPoll")?.jsonObject
+        assertEquals("integer", droppedProp?.get("type")?.jsonPrimitive?.content)
+        assertEquals("true", droppedProp?.get("nullable")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `test CliEventPollResult serializes droppedEventsSinceLastPoll only when non-null`() {
+        val json = Json { explicitNulls = false }
+        val withoutDropped = CliEventPollResult(
+            events = emptyList(),
+            nextCursor = "1",
+            hasMore = false,
+            droppedEventsSinceLastPoll = null
+        )
+        val serializedWithout = json.encodeToString(CliEventPollResult.serializer(), withoutDropped)
+        assertFalse(serializedWithout.contains("droppedEventsSinceLastPoll"))
+
+        val withDropped = CliEventPollResult(
+            events = emptyList(),
+            nextCursor = "10",
+            hasMore = false,
+            droppedEventsSinceLastPoll = 500L
+        )
+        val serializedWith = json.encodeToString(CliEventPollResult.serializer(), withDropped)
+        assertTrue(serializedWith.contains("\"droppedEventsSinceLastPoll\":500"))
     }
 }

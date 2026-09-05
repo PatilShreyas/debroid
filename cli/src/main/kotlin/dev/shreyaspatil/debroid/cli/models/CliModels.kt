@@ -316,13 +316,16 @@ data class CliEventPollResult(
     @SerialDescription("Opaque cursor token to pass to next poll call")
     val nextCursor: String,
     @SerialDescription("Whether more events remain in queue")
-    val hasMore: Boolean
+    val hasMore: Boolean,
+    @SerialDescription("Number of events dropped from buffer due to overflow since the requested cursor, if any")
+    val droppedEventsSinceLastPoll: Long? = null
 )
 
 fun EventPollResult.toCli() = CliEventPollResult(
-    events.map { it.toCli() },
-    nextCursor,
-    hasMore
+    events = events.map { it.toCli() },
+    nextCursor = nextCursor,
+    hasMore = hasMore,
+    droppedEventsSinceLastPoll = droppedEventsSinceLastPoll
 )
 
 @Serializable

@@ -987,54 +987,115 @@ class JdiSessionTest {
             )
         )
 
-        val bufferField = JdiSession::class.java.getDeclaredField("eventQueueBuffer")
-        bufferField.isAccessible = true
-        val buffer = bufferField.get(
-            session
-        ) as MutableCollection<dev.shreyaspatil.debroid.models.DebugEventPayload>
-        buffer.add(payload)
+        session.pushEvent(payload)
 
         // without stacktrace
         val noTraceResult = session.pollEvents("0", withStacktrace = false)
         assertEquals(1, noTraceResult.events.size)
         assertNull(noTraceResult.events[0].stacktrace)
+        assertNull(noTraceResult.droppedEventsSinceLastPoll)
 
         // with stacktrace
         val withTraceResult = session.pollEvents("0", withStacktrace = true)
         assertEquals(1, withTraceResult.events.size)
         assertNotNull(withTraceResult.events[0].stacktrace)
         assertEquals(1, withTraceResult.events[0].stacktrace?.size)
+        assertNull(withTraceResult.droppedEventsSinceLastPoll)
     }
 
     @Test
-    fun `pollEvents is thread safe and calculates cursors correctly during concurrent pushes and evictions`() {
-        val pushMethod = JdiSession::class.java.getDeclaredMethod(
-            "pushEvent",
-            DebugEventPayload::class.java
+    fun `pollEvents calculates dropped events count when buffer evicts events`() {
+        val overflowSession = JdiSession(
+            sessionId = "sess_overflow",
+            appId = "com.test.app",
+            localPort = 8080,
+            vm = vm,
+            adbManager = adbManager
         )
-        pushMethod.isAccessible = true
 
-        val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
-        val pushCount = 1500
-
-        val pushTask = Runnable {
-            for (i in 0 until pushCount) {
-                val payload = dev.shreyaspatil.debroid.models.DebugEventPayload(
-                    eventType = dev.shreyaspatil.debroid.models.EventType.BREAKPOINT_HIT,
-                    sessionId = "sess_1",
+        val totalPushed = JdiSession.MAX_EVENT_BUFFER_SIZE + 12
+        for (i in 0 until totalPushed) {
+            overflowSession.pushEvent(
+                DebugEventPayload(
+                    eventType = EventType.BREAKPOINT_HIT,
+                    sessionId = "sess_overflow",
                     threadId = "1",
                     threadName = "main",
                     location = "Main.kt:$i",
                     className = "Main"
                 )
-                pushMethod.invoke(session, payload)
+            )
+        }
+
+        // Capacity is 10,000, pushed 10,012.
+        // Evicted: 12 events (indices 0..11).
+        // Buffer now holds indices 12..10011 (size 10,000).
+        // eventQueueOffset is 12.
+
+        // Poll with stale cursor "0": 12 events dropped since cursor 0.
+        val pollFrom0 = overflowSession.pollEvents("0")
+        assertEquals(10_000, pollFrom0.events.size)
+        assertEquals(totalPushed.toString(), pollFrom0.nextCursor)
+        assertEquals(12L, pollFrom0.droppedEventsSinceLastPoll)
+
+        // Poll with stale cursor "5": 7 events dropped (5..11).
+        val pollFrom5 = overflowSession.pollEvents("5")
+        assertEquals(10_000, pollFrom5.events.size)
+        assertEquals(7L, pollFrom5.droppedEventsSinceLastPoll)
+
+        // Poll with fresh cursor "12" (matches eventQueueOffset): null (0 dropped).
+        val pollFrom12 = overflowSession.pollEvents("12")
+        assertEquals(10_000, pollFrom12.events.size)
+        assertNull(pollFrom12.droppedEventsSinceLastPoll)
+
+        // Poll with cursor ahead "15": null (0 dropped).
+        val pollFrom15 = overflowSession.pollEvents("15")
+        assertEquals(10_000 - 3, pollFrom15.events.size)
+        assertNull(pollFrom15.droppedEventsSinceLastPoll)
+
+        // Poll with cursor beyond buffer: null (0 dropped), empty events.
+        val pollFromEnd = overflowSession.pollEvents(totalPushed.toString())
+        assertEquals(0, pollFromEnd.events.size)
+        assertNull(pollFromEnd.droppedEventsSinceLastPoll)
+
+        // Invalid cursor string or negative cursor: coerced to 0, 12 dropped.
+        val pollInvalid = overflowSession.pollEvents("invalid_cursor")
+        assertEquals(12L, pollInvalid.droppedEventsSinceLastPoll)
+        val pollNegative = overflowSession.pollEvents("-5")
+        assertEquals(12L, pollNegative.droppedEventsSinceLastPoll)
+    }
+
+    @Test
+    fun `pollEvents is thread safe and calculates cursors correctly during concurrent pushes and evictions`() {
+        val testSession = JdiSession(
+            sessionId = "sess_concurrent",
+            appId = "com.test.app",
+            localPort = 8080,
+            vm = vm,
+            adbManager = adbManager
+        )
+
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
+        val pushCount = JdiSession.MAX_EVENT_BUFFER_SIZE + 500
+
+        val pushTask = Runnable {
+            for (i in 0 until pushCount) {
+                val payload = dev.shreyaspatil.debroid.models.DebugEventPayload(
+                    eventType = dev.shreyaspatil.debroid.models.EventType.BREAKPOINT_HIT,
+                    sessionId = "sess_concurrent",
+                    threadId = "1",
+                    threadName = "main",
+                    location = "Main.kt:$i",
+                    className = "Main"
+                )
+                testSession.pushEvent(payload)
             }
         }
 
         val pollResults = java.util.concurrent.ConcurrentLinkedQueue<dev.shreyaspatil.debroid.models.EventPollResult>()
         val pollTask = Runnable {
             for (i in 0 until 50) {
-                val res = session.pollEvents("0")
+                val res = testSession.pollEvents("0")
                 pollResults.add(res)
                 Thread.sleep(1)
             }
@@ -1049,9 +1110,10 @@ class JdiSessionTest {
         futures.forEach { it.get() }
         executor.shutdown()
 
-        val finalPoll = session.pollEvents("0")
-        assertEquals(1000, finalPoll.events.size)
-        assertEquals("1500", finalPoll.nextCursor)
+        val finalPoll = testSession.pollEvents("0")
+        assertEquals(10_000, finalPoll.events.size)
+        assertEquals((10_000 + 500).toString(), finalPoll.nextCursor)
+        assertEquals(500L, finalPoll.droppedEventsSinceLastPoll)
     }
 
     // ---------------- B1: deferred breakpoints ----------------
