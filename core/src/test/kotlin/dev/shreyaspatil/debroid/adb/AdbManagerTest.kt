@@ -97,6 +97,62 @@ class AdbManagerTest {
     }
 
     @Test
+    fun `findPid fallback to ps ignores lines where appId is only a substring`() {
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "pidof", "com.test.app"), any())
+        } returns Result.failure(Exception("Not found"))
+        val psOutput = """
+            USER           PID  PPID     VSZ    RSS WCHAN  ADDR S NAME
+            u0_a100      11111   123 1234567 123456 0         0 S com.test.appsync
+            u0_a101      22222   123 1234567 123456 0         0 S com.test.app.service
+            u0_a123      12345   123 1234567 123456 0         0 S com.test.app
+        """.trimIndent()
+        every { commandRunner.runCommand(listOf("adb", "shell", "ps", "-A"), any()) } returns Result.success(psOutput)
+
+        val result = adbManager.findPid("com.test.app")
+
+        assertTrue(result.isSuccess)
+        assertEquals(12345, result.getOrNull())
+    }
+
+    @Test
+    fun `findPid fallback to ps fails when appId only appears as substring of another process`() {
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "pidof", "com.test.app"), any())
+        } returns Result.failure(Exception("Not found"))
+        val psOutput = """
+            USER           PID  PPID     VSZ    RSS WCHAN  ADDR S NAME
+            u0_a100      11111   123 1234567 123456 0         0 S com.test.appsync
+            u0_a101      22222   123 1234567 123456 0         0 S com.test.app.service
+        """.trimIndent()
+        every { commandRunner.runCommand(listOf("adb", "shell", "ps", "-A"), any()) } returns Result.success(psOutput)
+
+        val result = adbManager.findPid("com.test.app")
+
+        assertTrue(result.isFailure)
+        val exception = result.exceptionOrNull() as DebugException
+        assertEquals(ErrorCode.APP_NOT_DEBUGGABLE, exception.code)
+    }
+
+    @Test
+    fun `findPid fallback to ps ignores lines where appId appears in non-process-name columns`() {
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "pidof", "com.test.app"), any())
+        } returns Result.failure(Exception("Not found"))
+        val psOutput = """
+            USER           PID  PPID     VSZ    RSS WCHAN  ADDR S NAME
+            com.test.app 99999   123 1234567 123456 0         0 S com.other.service
+        """.trimIndent()
+        every { commandRunner.runCommand(listOf("adb", "shell", "ps", "-A"), any()) } returns Result.success(psOutput)
+
+        val result = adbManager.findPid("com.test.app")
+
+        assertTrue(result.isFailure)
+        val exception = result.exceptionOrNull() as DebugException
+        assertEquals(ErrorCode.APP_NOT_DEBUGGABLE, exception.code)
+    }
+
+    @Test
     fun `forwardJdwpPort successfully executes`() {
         val cmd = listOf("adb", "forward", "tcp:8080", "jdwp:12345")
         every { commandRunner.runCommand(cmd, any()) } returns Result.success("")

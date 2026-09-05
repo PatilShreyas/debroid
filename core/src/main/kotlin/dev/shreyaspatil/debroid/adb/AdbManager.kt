@@ -84,10 +84,11 @@ class AdbManager(
         // Fallback to ps
         val psOutput = runAdb("shell", "ps", "-A").getOrNull() ?: ""
         val fallbackPid = psOutput.lines()
-            .firstOrNull { it.contains(appId) }
-            ?.trim()
-            ?.split("\\s+".toRegex())
-            ?.getOrNull(1)
+            .map { it.trim().split("\\s+".toRegex()) }
+            .firstOrNull { parts ->
+                parts.size >= 2 && parts.last() == appId && parts[1].toIntOrNull() != null
+            }
+            ?.get(1)
             ?.toIntOrNull()
 
         return fallbackPid?.let { Result.success(it) }

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Fixed
+- **Fix Loose Substring Matching in PID Fallback:** Updated the `ps -A` fallback parser in AdbManager to match the exact process name column instead of a loose line substring, preventing erroneous PID matches for similarly-named packages (#59).
 
 ### Changed
 
