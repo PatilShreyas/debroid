@@ -107,7 +107,8 @@ data class DebugEventPayload(
 data class EventPollResult(
     val events: List<DebugEventPayload>,
     val nextCursor: String,
-    val hasMore: Boolean
+    val hasMore: Boolean,
+    val droppedEventsSinceLastPoll: Long? = null
 )
 
 data class ExceptionBreakpointInfo(

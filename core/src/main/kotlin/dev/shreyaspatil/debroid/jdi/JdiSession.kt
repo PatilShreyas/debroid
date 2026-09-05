@@ -100,7 +100,7 @@ class JdiSession(
 
     @Volatile private var eventQueueOffset = 0
 
-    private fun pushEvent(payload: DebugEventPayload) {
+    internal fun pushEvent(payload: DebugEventPayload) {
         synchronized(eventQueueLock) {
             eventQueueBuffer.add(payload)
             if (eventQueueBuffer.size > MAX_EVENT_BUFFER_SIZE) {
@@ -1055,11 +1055,17 @@ class JdiSession(
     }
 
     fun pollEvents(sinceCursor: String, withStacktrace: Boolean = false): EventPollResult {
-        val cursorIndex = sinceCursor.toIntOrNull() ?: 0
+        val cursorIndex = sinceCursor.toIntOrNull()?.coerceAtLeast(0) ?: 0
         val eventsToReturn: List<DebugEventPayload>
         val nextCursorStr: String
+        val droppedEvents: Long?
 
         synchronized(eventQueueLock) {
+            droppedEvents = if (cursorIndex < eventQueueOffset) {
+                (eventQueueOffset - cursorIndex).toLong()
+            } else {
+                null
+            }
             val actualStartIndex = maxOf(0, cursorIndex - eventQueueOffset)
             val rawList = eventQueueBuffer.toList()
             val rawSubList = if (actualStartIndex < rawList.size) {
@@ -1078,7 +1084,8 @@ class JdiSession(
         return EventPollResult(
             events = eventsToReturn,
             nextCursor = nextCursorStr,
-            hasMore = false
+            hasMore = false,
+            droppedEventsSinceLastPoll = droppedEvents
         )
     }
 
@@ -1411,7 +1418,7 @@ class JdiSession(
     private fun handleDisconnectEvent() = shutdown(isExpected = false)
 
     companion object {
-        private const val MAX_EVENT_BUFFER_SIZE = 1000
+        internal const val MAX_EVENT_BUFFER_SIZE = 10_000
         private const val MAX_STALLED_RESUME_ATTEMPTS = 5
         private const val PROP_BREAKPOINT_ID = "breakpointId"
         private const val PROP_CLASS_NAME = "className"

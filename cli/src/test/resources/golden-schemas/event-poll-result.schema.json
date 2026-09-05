@@ -98,6 +98,11 @@
         "hasMore": {
             "type": "boolean",
             "description": "Whether more events remain in queue"
+        },
+        "droppedEventsSinceLastPoll": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Number of events dropped from buffer due to overflow since the requested cursor, if any"
         }
     }
 }

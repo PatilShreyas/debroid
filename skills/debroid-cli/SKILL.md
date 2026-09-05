@@ -79,6 +79,7 @@ debroid poll <session_id> <cursor> --with-stacktrace
 ```
 * **Initial Cursor:** Always start with `"0"`.
 * **Subsequent Cursors:** Use the `nextCursor` value from the previous JSON response.
+* **Buffer Overflow & Stale Cursors:** Inspect `droppedEventsSinceLastPoll` (omitted from JSON when 0). If present and > 0, events were evicted from the buffer before they could be polled (e.g. due to high event volume or delayed polling). If an expected breakpoint or exception event is not present in `events`, it may have been among the dropped events.
 * **Waiting:** If `events` is empty, ask the user to trigger the action in the app, then poll again.
 * **Event types you may see:** `BREAKPOINT_HIT` (includes `breakpointId`), `STEP_HIT`, `EXCEPTION_HIT`, `WATCHPOINT_ACCESS_HIT`, `WATCHPOINT_MODIFY_HIT`, `DISCONNECT`.
 
