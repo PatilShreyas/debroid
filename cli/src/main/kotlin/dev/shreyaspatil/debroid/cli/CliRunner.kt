@@ -62,6 +62,8 @@ object CliRunner {
 
     private const val DAEMON_SOCKET_TIMEOUT_MS = 30_000
     private const val VERSION_CHECK_TIMEOUT_MS = 5_000
+    private const val MAX_STARTUP_DIAGNOSTIC_BYTES = 64 * 1024
+    private const val DEFAULT_STARTUP_DIAGNOSTIC_LINES = 20
 
     private val json = Json {
         encodeDefaults = true
@@ -94,7 +96,7 @@ object CliRunner {
         }
     }
 
-    internal var daemonProcessBuilder: (port: Int) -> ProcessBuilder = { port ->
+    private val daemonProcessBuilder: (port: Int) -> ProcessBuilder = { port ->
         val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
         val classPath = System.getProperty("java.class.path")
         ProcessBuilder(
@@ -110,21 +112,23 @@ object CliRunner {
     }
 
     @Suppress("MagicNumber", "MaxLineLength", "TooGenericExceptionCaught")
-    internal fun ensureDaemonAndSend(request: DaemonRequest, pretty: Boolean = false) {
+    internal fun ensureDaemonAndSend(
+        request: DaemonRequest,
+        pretty: Boolean = false,
+        logFile: File = DaemonConfig.logFile,
+        processBuilder: (port: Int) -> ProcessBuilder = daemonProcessBuilder
+    ) {
         if (!DaemonServer.isDaemonRunning()) {
-            val logFile = DaemonConfig.logFile
-            val startOffset = try {
+            val startOffset = runCatching {
                 logFile.parentFile?.mkdirs()
                 if (logFile.exists()) logFile.length() else 0L
-            } catch (_: Exception) {
-                0L
-            }
+            }.getOrNull() ?: 0L
 
-            val builder = daemonProcessBuilder(DaemonConfig.PORT)
-            try {
+            val builder = processBuilder(DaemonConfig.PORT)
+            runCatching {
                 builder.redirectErrorStream(true)
                 builder.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-            } catch (_: Exception) {
+            }.onFailure {
                 builder.redirectError(ProcessBuilder.Redirect.DISCARD)
                 builder.redirectOutput(ProcessBuilder.Redirect.DISCARD)
             }
@@ -143,11 +147,7 @@ object CliRunner {
             }
             if (!started) {
                 if (process.isAlive) {
-                    try {
-                        process.destroyForcibly()
-                    } catch (_: Exception) {
-                        // Ignore process termination errors
-                    }
+                    runCatching { process.destroyForcibly() }
                 }
                 val diagnostics = readStartupDiagnostics(logFile, startOffset)
                 val errorMessage = if (diagnostics.isNotBlank()) {
@@ -187,50 +187,44 @@ object CliRunner {
         }
     }
 
-    @Suppress("TooGenericExceptionCaught", "MagicNumber")
     internal fun readStartupDiagnostics(
         logFile: File,
         startOffset: Long,
-        maxLines: Int = 20
-    ): String {
-        return try {
-            if (!logFile.exists()) return ""
-            val fileLength = logFile.length()
-            if (fileLength == 0L) return ""
+        maxLines: Int = DEFAULT_STARTUP_DIAGNOSTIC_LINES
+    ): String = runCatching {
+        if (!logFile.exists()) return@runCatching ""
+        val fileLength = logFile.length()
+        if (fileLength == 0L) return@runCatching ""
 
-            val maxBytes = 64 * 1024
-            val effectiveStart = if (startOffset in 0L..fileLength) {
-                startOffset
-            } else {
-                0L
-            }
-            val bytesAvailable = fileLength - effectiveStart
-            if (bytesAvailable <= 0L) return ""
-
-            val seekPos = if (bytesAvailable > maxBytes) {
-                fileLength - maxBytes
-            } else {
-                effectiveStart
-            }
-
-            RandomAccessFile(logFile, "r").use { raf ->
-                raf.seek(seekPos)
-                val bytes = ByteArray((fileLength - seekPos).toInt())
-                raf.readFully(bytes)
-                val content = String(bytes, Charsets.UTF_8)
-                val lines = content.lines()
-                    .map { it.trimEnd() }
-                    .filter { it.isNotBlank() }
-                if (lines.isEmpty()) {
-                    ""
-                } else {
-                    lines.takeLast(maxLines).joinToString("\n")
-                }
-            }
-        } catch (_: Exception) {
-            ""
+        val effectiveStart = if (startOffset in 0L..fileLength) {
+            startOffset
+        } else {
+            0L
         }
-    }
+        val bytesAvailable = fileLength - effectiveStart
+        if (bytesAvailable <= 0L) return@runCatching ""
+
+        val seekPos = if (bytesAvailable > MAX_STARTUP_DIAGNOSTIC_BYTES) {
+            fileLength - MAX_STARTUP_DIAGNOSTIC_BYTES
+        } else {
+            effectiveStart
+        }
+
+        RandomAccessFile(logFile, "r").use { raf ->
+            raf.seek(seekPos)
+            val bytes = ByteArray((fileLength - seekPos).toInt())
+            raf.readFully(bytes)
+            val content = String(bytes, Charsets.UTF_8)
+            val lines = content.lines()
+                .map { it.trimEnd() }
+                .filter { it.isNotBlank() }
+            if (lines.isEmpty()) {
+                ""
+            } else {
+                lines.takeLast(maxLines).joinToString("\n")
+            }
+        }
+    }.getOrDefault("")
 
     @Suppress("TooGenericExceptionCaught")
     private fun checkDaemonVersionMismatch(request: DaemonRequest): Boolean {

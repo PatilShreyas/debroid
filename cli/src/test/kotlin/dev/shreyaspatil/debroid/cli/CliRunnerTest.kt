@@ -19,21 +19,15 @@ import java.net.ServerSocket
 class CliRunnerTest {
 
     private val originalPort = DaemonConfig.PORT
-    private val originalLogFile = DaemonConfig.logFile
-    private val originalProcessBuilder = CliRunner.daemonProcessBuilder
 
     @BeforeEach
     fun setUp() {
         DaemonConfig.PORT = 9876
-        DaemonConfig.logFile = DaemonConfig.defaultLogFile()
-        CliRunner.daemonProcessBuilder = originalProcessBuilder
     }
 
     @AfterEach
     fun tearDown() {
         DaemonConfig.PORT = originalPort
-        DaemonConfig.logFile = originalLogFile
-        CliRunner.daemonProcessBuilder = originalProcessBuilder
     }
 
     @Test
@@ -254,6 +248,7 @@ class CliRunnerTest {
     fun `default log file is daemon dot log in dot debroid directory`() {
         val defaultFile = DaemonConfig.defaultLogFile()
         assertTrue(defaultFile.path.endsWith(".debroid/daemon.log"))
+        assertEquals(defaultFile, DaemonConfig.logFile)
     }
 
     @Test
@@ -315,11 +310,10 @@ class CliRunnerTest {
     @Test
     fun `ensureDaemonAndSend surfaces diagnostics and logs on startup failure`(@TempDir tempDir: File) {
         val testLogFile = File(tempDir, "daemon.log")
-        DaemonConfig.logFile = testLogFile
         DaemonConfig.PORT = 65431
 
         val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
-        CliRunner.daemonProcessBuilder = {
+        val mockProcessBuilder: (Int) -> ProcessBuilder = {
             ProcessBuilder(javaBin, "-cp", "invalid-classpath", "dev.shreyaspatil.debroid.NonExistentMainClass")
         }
 
@@ -329,7 +323,11 @@ class CliRunnerTest {
 
         val startTime = System.currentTimeMillis()
         try {
-            CliRunner.ensureDaemonAndSend(DaemonRequest.Detach("s_test"))
+            CliRunner.ensureDaemonAndSend(
+                request = DaemonRequest.Detach("s_test"),
+                logFile = testLogFile,
+                processBuilder = mockProcessBuilder
+            )
         } finally {
             System.setOut(originalOut)
         }
@@ -362,11 +360,10 @@ class CliRunnerTest {
     @Test
     fun `ensureDaemonAndSend falls back to log path when process exits without output`(@TempDir tempDir: File) {
         val testLogFile = File(tempDir, "daemon.log")
-        DaemonConfig.logFile = testLogFile
         DaemonConfig.PORT = 65431
 
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
-        CliRunner.daemonProcessBuilder = {
+        val mockProcessBuilder: (Int) -> ProcessBuilder = {
             if (isWindows) {
                 ProcessBuilder("cmd", "/c", "exit 1")
             } else {
@@ -379,7 +376,11 @@ class CliRunnerTest {
         System.setOut(java.io.PrintStream(outContent))
 
         try {
-            CliRunner.ensureDaemonAndSend(DaemonRequest.Detach("s_test"))
+            CliRunner.ensureDaemonAndSend(
+                request = DaemonRequest.Detach("s_test"),
+                logFile = testLogFile,
+                processBuilder = mockProcessBuilder
+            )
         } finally {
             System.setOut(originalOut)
         }
