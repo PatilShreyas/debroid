@@ -1,27 +1,39 @@
 package dev.shreyaspatil.debroid.cli
 
 import com.github.ajalt.clikt.core.context
+import dev.shreyaspatil.debroid.cli.models.CliDebugError
+import dev.shreyaspatil.debroid.cli.models.CliErrorCode
+import dev.shreyaspatil.debroid.cli.models.DaemonRequest
+import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import java.net.InetAddress
 import java.net.ServerSocket
 
 class CliRunnerTest {
 
     private val originalPort = DaemonConfig.PORT
+    private val originalLogFile = DaemonConfig.logFile
+    private val originalProcessBuilder = CliRunner.daemonProcessBuilder
 
     @BeforeEach
     fun setUp() {
         DaemonConfig.PORT = 9876
+        DaemonConfig.logFile = DaemonConfig.defaultLogFile()
+        CliRunner.daemonProcessBuilder = originalProcessBuilder
     }
 
     @AfterEach
     fun tearDown() {
         DaemonConfig.PORT = originalPort
+        DaemonConfig.logFile = originalLogFile
+        CliRunner.daemonProcessBuilder = originalProcessBuilder
     }
 
     @Test
@@ -236,5 +248,149 @@ class CliRunnerTest {
 
         assertEquals(1, exitCode)
         assertTrue(errContent.toString().contains("no such subcommand"))
+    }
+
+    @Test
+    fun `default log file is daemon dot log in dot debroid directory`() {
+        val defaultFile = DaemonConfig.defaultLogFile()
+        assertTrue(defaultFile.path.endsWith(".debroid/daemon.log"))
+    }
+
+    @Test
+    fun `readStartupDiagnostics returns empty string when file does not exist`(@TempDir tempDir: File) {
+        val nonExistent = File(tempDir, "daemon.log")
+        val result = CliRunner.readStartupDiagnostics(nonExistent, 0L)
+        assertEquals("", result)
+    }
+
+    @Test
+    fun `readStartupDiagnostics returns empty string when file is empty`(@TempDir tempDir: File) {
+        val emptyLog = File(tempDir, "daemon.log").apply { createNewFile() }
+        val result = CliRunner.readStartupDiagnostics(emptyLog, 0L)
+        assertEquals("", result)
+    }
+
+    @Test
+    fun `readStartupDiagnostics reads only newly appended content after start offset`(@TempDir tempDir: File) {
+        val logFile = File(tempDir, "daemon.log")
+        logFile.writeText("Old line 1\nOld line 2\n")
+        val offset = logFile.length()
+        logFile.appendText("New error line: BindException\n")
+
+        val result = CliRunner.readStartupDiagnostics(logFile, offset)
+        assertEquals("New error line: BindException", result)
+    }
+
+    @Test
+    fun `readStartupDiagnostics filters blank lines and caps at maxLines`(@TempDir tempDir: File) {
+        val logFile = File(tempDir, "daemon.log")
+        val lines = (1..30).joinToString("\n") { "Log line $it" } + "\n\n"
+        logFile.writeText(lines)
+
+        val result = CliRunner.readStartupDiagnostics(logFile, 0L, maxLines = 5)
+        val expected = (26..30).joinToString("\n") { "Log line $it" }
+        assertEquals(expected, result)
+    }
+
+    @Test
+    fun `readStartupDiagnostics handles file length less than start offset`(@TempDir tempDir: File) {
+        val logFile = File(tempDir, "daemon.log")
+        logFile.writeText("Short line")
+
+        val result = CliRunner.readStartupDiagnostics(logFile, 500L)
+        assertEquals("Short line", result)
+    }
+
+    @Test
+    fun `readStartupDiagnostics reads tail when appended bytes exceed max limit`(@TempDir tempDir: File) {
+        val logFile = File(tempDir, "daemon.log")
+        val largePadding = "A".repeat(70 * 1024) + "\n"
+        val errorSuffix = "Important error at the end"
+        logFile.writeText(largePadding + errorSuffix)
+
+        val result = CliRunner.readStartupDiagnostics(logFile, 0L, maxLines = 1)
+        assertEquals(errorSuffix, result)
+    }
+
+    @Test
+    fun `ensureDaemonAndSend surfaces diagnostics and logs on startup failure`(@TempDir tempDir: File) {
+        val testLogFile = File(tempDir, "daemon.log")
+        DaemonConfig.logFile = testLogFile
+        DaemonConfig.PORT = 65431
+
+        val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
+        CliRunner.daemonProcessBuilder = {
+            ProcessBuilder(javaBin, "-cp", "invalid-classpath", "dev.shreyaspatil.debroid.NonExistentMainClass")
+        }
+
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        val startTime = System.currentTimeMillis()
+        try {
+            CliRunner.ensureDaemonAndSend(DaemonRequest.Detach("s_test"))
+        } finally {
+            System.setOut(originalOut)
+        }
+        val duration = System.currentTimeMillis() - startTime
+
+        assertTrue(duration < 4000, "Should fast-fail rather than waiting full 5000ms timeout (took ${duration}ms)")
+        assertTrue(testLogFile.exists(), "Log file should be created")
+        val logContent = testLogFile.readText()
+        assertTrue(
+            logContent.contains("Could not find or load main class") ||
+                logContent.contains("ClassNotFoundException"),
+            "Log file should contain failure diagnostics: $logContent"
+        )
+
+        val errorJson = outContent.toString().trim()
+        val error = Json.decodeFromString<CliDebugError>(errorJson)
+        assertEquals(CliErrorCode.CLI_ERROR.name, error.errorCode)
+        assertFalse(error.retryable)
+        assertTrue(
+            error.message.startsWith("Failed to start background daemon:"),
+            "Error message should indicate daemon startup failure: ${error.message}"
+        )
+        assertTrue(
+            error.message.contains("Could not find or load main class") ||
+                error.message.contains("ClassNotFoundException"),
+            "Error message should contain diagnostic output: ${error.message}"
+        )
+    }
+
+    @Test
+    fun `ensureDaemonAndSend falls back to log path when process exits without output`(@TempDir tempDir: File) {
+        val testLogFile = File(tempDir, "daemon.log")
+        DaemonConfig.logFile = testLogFile
+        DaemonConfig.PORT = 65431
+
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+        CliRunner.daemonProcessBuilder = {
+            if (isWindows) {
+                ProcessBuilder("cmd", "/c", "exit 1")
+            } else {
+                ProcessBuilder("sh", "-c", "exit 1")
+            }
+        }
+
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            CliRunner.ensureDaemonAndSend(DaemonRequest.Detach("s_test"))
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        val errorJson = outContent.toString().trim()
+        val error = Json.decodeFromString<CliDebugError>(errorJson)
+        assertEquals(CliErrorCode.CLI_ERROR.name, error.errorCode)
+        assertFalse(error.retryable)
+        assertEquals(
+            "Failed to start background daemon (log: ${testLogFile.absolutePath})",
+            error.message
+        )
     }
 }

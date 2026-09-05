@@ -169,6 +169,8 @@ Here is the full list of commands and their signatures (note: all commands suppo
 | `step` | `debroid step <session_id> <thread_id> <action> [--pretty]` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
 | `update` | `debroid update [--check-only] [--pretty]` | Checks for CLI updates or performs an in-place self-update to the latest release |
 
+> **Daemon Logs:** When the background daemon is automatically spawned by CLI commands, stdout and stderr logs are recorded in `~/.debroid/daemon.log` for troubleshooting and startup diagnostics.
+>
 > **Security Note:** The Debroid daemon listens on `localhost` (127.0.0.1) without authentication to enable fast communication with the CLI. It exposes live JVM manipulation. Only run Debroid on a machine where every local user is fully trusted.
 
 ## 🤝 Contributing

@@ -50,8 +50,10 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.io.PrintWriter
+import java.io.RandomAccessFile
 import java.net.Socket
 import kotlin.system.exitProcess
 
@@ -92,26 +94,41 @@ object CliRunner {
         }
     }
 
-    @Suppress("MagicNumber", "MaxLineLength", "TooGenericExceptionCaught")
-    private fun ensureDaemonAndSend(request: DaemonRequest, pretty: Boolean = false) {
-        if (!DaemonServer.isDaemonRunning()) {
-            val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
-            val classPath = System.getProperty("java.class.path")
+    internal var daemonProcessBuilder: (port: Int) -> ProcessBuilder = { port ->
+        val javaBin = System.getenv("JAVA_HOME")?.let { "$it/bin/java" } ?: "java"
+        val classPath = System.getProperty("java.class.path")
+        ProcessBuilder(
+            javaBin,
+            "--enable-native-access=ALL-UNNAMED",
+            "-cp",
+            classPath,
+            "dev.shreyaspatil.debroid.MainKt",
+            "--port",
+            port.toString(),
+            "daemon"
+        )
+    }
 
-            // Start the daemon process in the background
-            val builder = ProcessBuilder(
-                javaBin,
-                "--enable-native-access=ALL-UNNAMED",
-                "-cp",
-                classPath,
-                "dev.shreyaspatil.debroid.MainKt",
-                "--port",
-                DaemonConfig.PORT.toString(),
-                "daemon"
-            )
-            builder.redirectError(ProcessBuilder.Redirect.DISCARD)
-            builder.redirectOutput(ProcessBuilder.Redirect.DISCARD)
-            builder.start()
+    @Suppress("MagicNumber", "MaxLineLength", "TooGenericExceptionCaught")
+    internal fun ensureDaemonAndSend(request: DaemonRequest, pretty: Boolean = false) {
+        if (!DaemonServer.isDaemonRunning()) {
+            val logFile = DaemonConfig.logFile
+            val startOffset = try {
+                logFile.parentFile?.mkdirs()
+                if (logFile.exists()) logFile.length() else 0L
+            } catch (_: Exception) {
+                0L
+            }
+
+            val builder = daemonProcessBuilder(DaemonConfig.PORT)
+            try {
+                builder.redirectErrorStream(true)
+                builder.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
+            } catch (_: Exception) {
+                builder.redirectError(ProcessBuilder.Redirect.DISCARD)
+                builder.redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            }
+            val process = builder.start()
 
             var started = false
             var attempts = 0
@@ -120,12 +137,27 @@ object CliRunner {
                 Thread.sleep(100)
                 if (DaemonServer.isDaemonRunning()) {
                     started = true
+                } else if (!process.isAlive) {
+                    break
                 }
             }
             if (!started) {
+                if (process.isAlive) {
+                    try {
+                        process.destroyForcibly()
+                    } catch (_: Exception) {
+                        // Ignore process termination errors
+                    }
+                }
+                val diagnostics = readStartupDiagnostics(logFile, startOffset)
+                val errorMessage = if (diagnostics.isNotBlank()) {
+                    "Failed to start background daemon: $diagnostics"
+                } else {
+                    "Failed to start background daemon (log: ${logFile.absolutePath})"
+                }
                 println(
                     json.encodeToString(
-                        CliDebugError(CliErrorCode.CLI_ERROR.name, "Failed to start background daemon", false)
+                        CliDebugError(CliErrorCode.CLI_ERROR.name, errorMessage, false)
                     )
                 )
                 return
@@ -152,6 +184,51 @@ object CliRunner {
                     CliDebugError(CliErrorCode.CLI_ERROR.name, "Failed to communicate with daemon: ${e.message}", false)
                 )
             )
+        }
+    }
+
+    @Suppress("TooGenericExceptionCaught", "MagicNumber")
+    internal fun readStartupDiagnostics(
+        logFile: File,
+        startOffset: Long,
+        maxLines: Int = 20
+    ): String {
+        return try {
+            if (!logFile.exists()) return ""
+            val fileLength = logFile.length()
+            if (fileLength == 0L) return ""
+
+            val maxBytes = 64 * 1024
+            val effectiveStart = if (startOffset in 0L..fileLength) {
+                startOffset
+            } else {
+                0L
+            }
+            val bytesAvailable = fileLength - effectiveStart
+            if (bytesAvailable <= 0L) return ""
+
+            val seekPos = if (bytesAvailable > maxBytes) {
+                fileLength - maxBytes
+            } else {
+                effectiveStart
+            }
+
+            RandomAccessFile(logFile, "r").use { raf ->
+                raf.seek(seekPos)
+                val bytes = ByteArray((fileLength - seekPos).toInt())
+                raf.readFully(bytes)
+                val content = String(bytes, Charsets.UTF_8)
+                val lines = content.lines()
+                    .map { it.trimEnd() }
+                    .filter { it.isNotBlank() }
+                if (lines.isEmpty()) {
+                    ""
+                } else {
+                    lines.takeLast(maxLines).joinToString("\n")
+                }
+            }
+        } catch (_: Exception) {
+            ""
         }
     }
 
