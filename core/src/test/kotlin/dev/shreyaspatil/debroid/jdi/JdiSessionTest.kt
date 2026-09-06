@@ -33,6 +33,7 @@ import dev.shreyaspatil.debroid.models.StackFrameInfo
 import dev.shreyaspatil.debroid.models.StepAction
 import dev.shreyaspatil.debroid.models.ThreadInfo
 import dev.shreyaspatil.debroid.models.ThreadStatus
+import dev.shreyaspatil.debroid.models.VariableScope
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -454,6 +455,137 @@ class JdiSessionTest {
         assertEquals("\"testString\"", vars[0].valuePreview)
         assertFalse(vars[0].isPrimitive)
         assertEquals("201", vars[0].objectId)
+    }
+
+    @Test
+    fun `getVariables returns both method arguments and declared locals when scope is LOCAL`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val argVar = mockk<LocalVariable>(relaxed = true)
+        val localVar = mockk<LocalVariable>(relaxed = true)
+        val argValue = mockk<StringReference>(relaxed = true)
+        val localValue = mockk<PrimitiveValue>(relaxed = true)
+
+        every { thread.frame(0) } returns frame
+
+        every { argVar.name() } returns "orderId"
+        every { argVar.isArgument } returns true
+        every { frame.getValue(argVar) } returns argValue
+        every { argValue.value() } returns "ORD-123"
+        every { argValue.uniqueID() } returns 301L
+
+        every { localVar.name() } returns "fee"
+        every { localVar.isArgument } returns false
+        every { frame.getValue(localVar) } returns localValue
+        every { localValue.type().name() } returns "double"
+        every { localValue.toString() } returns "15.0"
+
+        every { frame.visibleVariables() } returns listOf(argVar, localVar)
+
+        val vars = session.getVariables("1", VariableScope.LOCAL)
+
+        assertEquals(2, vars.size)
+        assertEquals("orderId", vars[0].name)
+        assertEquals("String", vars[0].type)
+        assertEquals("\"ORD-123\"", vars[0].valuePreview)
+        assertFalse(vars[0].isPrimitive)
+        assertEquals("301", vars[0].objectId)
+
+        assertEquals("fee", vars[1].name)
+        assertEquals("double", vars[1].type)
+        assertEquals("15.0", vars[1].valuePreview)
+        assertTrue(vars[1].isPrimitive)
+    }
+
+    @Test
+    fun `getVariables returns only method arguments when scope is ARGS`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val argVar = mockk<LocalVariable>(relaxed = true)
+        val localVar = mockk<LocalVariable>(relaxed = true)
+        val argValue = mockk<StringReference>(relaxed = true)
+
+        every { thread.frame(0) } returns frame
+
+        every { argVar.name() } returns "orderId"
+        every { argVar.isArgument } returns true
+        every { frame.getValue(argVar) } returns argValue
+        every { argValue.value() } returns "ORD-123"
+        every { argValue.uniqueID() } returns 301L
+
+        every { localVar.name() } returns "fee"
+        every { localVar.isArgument } returns false
+
+        every { frame.visibleVariables() } returns listOf(argVar, localVar)
+
+        val vars = session.getVariables("1", VariableScope.ARGS)
+
+        assertEquals(1, vars.size)
+        assertEquals("orderId", vars[0].name)
+    }
+
+    @Test
+    fun `getVariables returns empty list when thread has no frames`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+        every { thread.frame(0) } throws IndexOutOfBoundsException("No frames on stack")
+
+        val vars = session.getVariables("1", VariableScope.LOCAL)
+
+        assertTrue(vars.isEmpty())
+    }
+
+    @Test
+    fun `getPauseState includes method arguments in locals list`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.name() } returns "main"
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val method = mockk<Method>(relaxed = true)
+        val refType = mockk<ReferenceType>(relaxed = true)
+
+        every { thread.frames() } returns listOf(frame)
+        every { thread.frame(0) } returns frame
+        every { frame.location() } returns location
+        every { location.method() } returns method
+        every { location.declaringType() } returns refType
+        every { method.name() } returns "processOrder"
+        every { refType.name() } returns "com.example.OrderService"
+        every { location.sourceName() } returns "OrderService.kt"
+        every { location.lineNumber() } returns 42
+
+        val argVar = mockk<LocalVariable>(relaxed = true)
+        val argValue = mockk<StringReference>(relaxed = true)
+        every { argVar.name() } returns "orderId"
+        every { argVar.isArgument } returns true
+        every { frame.getValue(argVar) } returns argValue
+        every { argValue.value() } returns "ORD-999"
+        every { argValue.uniqueID() } returns 401L
+
+        every { frame.visibleVariables() } returns listOf(argVar)
+
+        val pauseState = session.getPauseState("1")
+
+        assertEquals("1", pauseState.threadId)
+        assertEquals("main", pauseState.threadName)
+        assertEquals(1, pauseState.frames.size)
+        assertEquals(1, pauseState.locals.size)
+        assertEquals("orderId", pauseState.locals[0].name)
+        assertEquals("\"ORD-999\"", pauseState.locals[0].valuePreview)
     }
 
     @Test

@@ -157,8 +157,8 @@ Here is the full list of commands and their signatures (note: all commands suppo
 | `remove-watch` | `debroid remove-watch <session_id> <watchpoint_id> [--pretty]` | Removes a watchpoint |
 | `points` | `debroid points <session_id> [--pretty]` | Lists all active and deferred breakpoints, exception points, and watchpoints for the session |
 | `threads` | `debroid threads <session_id> [--pretty]` | Lists active threads |
-| `locals` | `debroid locals <session_id> <thread_id> [--pretty]` | Gets shallow local variables |
-| `pause-state` | `debroid pause-state <session_id> <thread_id> [--pretty]` | Gets frames, locals, and instance state |
+| `locals` | `debroid locals <session_id> <thread_id> [--pretty]` | Gets shallow local variables and method parameters |
+| `pause-state` | `debroid pause-state <session_id> <thread_id> [--pretty]` | Gets frames, locals (including method parameters), and instance state |
 | `set-var` | `debroid set-var <session_id> <thread_id> <var_name> <new_value> [--pretty]` | Mutates local variable |
 | `eval` | `debroid eval <session_id> <thread_id> <expression...> [--pretty]` | Evaluates string expression |
 | `resume` | `debroid resume <session_id> [--pretty]` | Resumes all threads |
