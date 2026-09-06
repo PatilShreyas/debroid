@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [UNRELEASED]
 
+### Added
+
+### Fixed
+
+### Changed
+
+## [v0.3.1] - 2026-09-06
+
 ### Fixed
 - **Daemon Startup Diagnostics & Log Redirection:** Fixed silent timeouts when background daemon auto-spawn fails or terminates early. Daemon standard output and error are now captured at `~/.debroid/daemon.log`, and startup diagnostics are surfaced directly in error responses for fast diagnosis (#57).
 - **Event Polling Buffer Overflow Signal & Increased Capacity:** Fixed unnotified event loss when polling is delayed under high event volume by adding `droppedEventsSinceLastPoll` to `debroid poll` output and increasing the in-memory event buffer capacity to 10,000 events (#92).
