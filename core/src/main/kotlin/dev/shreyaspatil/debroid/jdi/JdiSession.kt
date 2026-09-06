@@ -811,46 +811,45 @@ class JdiSession(
             throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread $threadId is not suspended.")
         }
 
-        val frame = thread.frame(0)
-        val result = mutableListOf<VariableInfo>()
+        return runCatching {
+            val frame = thread.frame(0)
+            val result = mutableListOf<VariableInfo>()
 
-        when (scope) {
-            VariableScope.LOCAL, VariableScope.ARGS -> {
-                val visVars = try { frame.visibleVariables() } catch (
-                    e: com.sun.jdi.AbsentInformationException
-                ) { emptyList() }
-                for (v in visVars) {
-                    if (scope == VariableScope.ARGS && !v.isArgument) continue
-                    if (scope == VariableScope.LOCAL && v.isArgument) continue
+            when (scope) {
+                VariableScope.LOCAL, VariableScope.ARGS -> {
+                    val visVars = runCatching { frame.visibleVariables() }.getOrDefault(emptyList())
+                    for (v in visVars) {
+                        if (scope == VariableScope.ARGS && !v.isArgument) continue
 
-                    val value = frame.getValue(v)
-                    result.add(formatValue(v.name(), value))
+                        val value = frame.getValue(v)
+                        result.add(formatValue(v.name(), value))
+                    }
                 }
-            }
-            VariableScope.INSTANCE -> {
-                val thisObj = try { frame.thisObject() } catch (e: Exception) { null }
-                if (thisObj != null) {
-                    val fields = thisObj.referenceType().fields()
-                    val fieldValues = thisObj.getValues(fields)
-                    for ((f, valRef) in fieldValues) {
-                        if (!f.isStatic) {
-                            result.add(formatValue(f.name(), valRef))
+                VariableScope.INSTANCE -> {
+                    val thisObj = runCatching { frame.thisObject() }.getOrNull()
+                    if (thisObj != null) {
+                        val fields = thisObj.referenceType().fields()
+                        val fieldValues = thisObj.getValues(fields)
+                        for ((f, valRef) in fieldValues) {
+                            if (!f.isStatic) {
+                                result.add(formatValue(f.name(), valRef))
+                            }
                         }
                     }
                 }
-            }
-            VariableScope.STATIC -> {
-                val location = frame.location()
-                val refType = location.declaringType()
-                val fields = refType.fields().filter { it.isStatic }
-                val fieldValues = refType.getValues(fields)
-                for ((f, valRef) in fieldValues) {
-                    result.add(formatValue(f.name(), valRef))
+                VariableScope.STATIC -> {
+                    val location = frame.location()
+                    val refType = location.declaringType()
+                    val fields = refType.fields().filter { it.isStatic }
+                    val fieldValues = refType.getValues(fields)
+                    for ((f, valRef) in fieldValues) {
+                        result.add(formatValue(f.name(), valRef))
+                    }
                 }
             }
-        }
 
-        return result
+            result
+        }.getOrDefault(emptyList())
     }
 
     fun getPauseState(threadId: String): PauseStateResult {

@@ -22,3 +22,6 @@ stub.sh
 
 # Logs
 *.log
+
+# Kotlin
+.kotlin/

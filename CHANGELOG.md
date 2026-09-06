@@ -7,14 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [UNRELEASED]
 
-### Added
-- **Daemon Log Redirection & Startup Diagnostics:** Background daemon standard output and standard error are now redirected to `~/.debroid/daemon.log` instead of being discarded. When background daemon auto-spawn fails or exits prematurely, startup diagnostics are extracted from the log and surfaced directly in the `CliDebugError` JSON message with fast-fail detection, eliminating silent timeouts and improving debuggability for AI agents (#57).
-- **Stale Cursor Buffer Overflow Signal & Increased Buffer Capacity:** Added `droppedEventsSinceLastPoll` to `EventPollResult` and `debroid poll` CLI output to indicate when events have been evicted from the buffer due to high volume or delayed polling, and increased the in-memory event buffer capacity to 10,000 events (#92).
-
 ### Fixed
-- **Fix Loose Substring Matching in PID Fallback:** Updated the `ps -A` fallback parser in AdbManager to match the exact process name column instead of a loose line substring, preventing erroneous PID matches for similarly-named packages (#59).
-
-### Changed
+- **Daemon Startup Diagnostics & Log Redirection:** Fixed silent timeouts when background daemon auto-spawn fails or terminates early. Daemon standard output and error are now captured at `~/.debroid/daemon.log`, and startup diagnostics are surfaced directly in error responses for fast diagnosis (#57).
+- **Event Polling Buffer Overflow Signal & Increased Capacity:** Fixed unnotified event loss when polling is delayed under high event volume by adding `droppedEventsSinceLastPoll` to `debroid poll` output and increasing the in-memory event buffer capacity to 10,000 events (#92).
+- **PID Fallback Exact Process Name Matching:** Fixed an issue where the `ps -A` fallback parser in AdbManager loosely matched package substrings, preventing erroneous PID matches for similarly-named applications (#59).
+- **Include Method Arguments in `locals` and `pause-state`:** Fixed an issue where `debroid locals` and `debroid pause-state` omitted method parameters/arguments from the local variable inspection of a suspended thread. Function parameters are now properly displayed alongside locally declared variables, matching standard debugger behavior (#94).
 
 ## [v0.3.0] - 2026-08-29
 
