@@ -1,6 +1,7 @@
 package dev.shreyaspatil.debroid.jdi
 
 import com.sun.jdi.ArrayReference
+import com.sun.jdi.IncompatibleThreadStateException
 import com.sun.jdi.Location
 import com.sun.jdi.ObjectReference
 import com.sun.jdi.PrimitiveType
@@ -775,7 +776,15 @@ class JdiSession(
     }
 
     private fun extractFrames(thread: ThreadReference): List<StackFrameInfo> {
-        val frames = thread.frames()
+        val frames = try {
+            thread.frames()
+        } catch (e: IncompatibleThreadStateException) {
+            throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread ${thread.uniqueID()} is not suspended.")
+        }
+        return extractFrames(frames)
+    }
+
+    private fun extractFrames(frames: List<StackFrame>): List<StackFrameInfo> {
         return frames.mapIndexed { index, frame ->
             val location = frame.location()
             var continuationObjId: String? = null
@@ -811,8 +820,19 @@ class JdiSession(
             throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread $threadId is not suspended.")
         }
 
+        val frame = try {
+            thread.frame(0)
+        } catch (e: IncompatibleThreadStateException) {
+            throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread $threadId is not suspended.")
+        } catch (e: IndexOutOfBoundsException) {
+            return emptyList()
+        }
+
+        return extractVariables(frame, scope)
+    }
+
+    private fun extractVariables(frame: StackFrame, scope: VariableScope): List<VariableInfo> {
         return runCatching {
-            val frame = thread.frame(0)
             val result = mutableListOf<VariableInfo>()
 
             when (scope) {
@@ -854,9 +874,21 @@ class JdiSession(
 
     fun getPauseState(threadId: String): PauseStateResult {
         val thread = findThread(threadId)
-        val frames = getStackFrames(threadId)
-        val locals = getVariables(threadId, VariableScope.LOCAL)
-        val instances = getVariables(threadId, VariableScope.INSTANCE)
+        if (!thread.isSuspended) {
+            throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread $threadId is not suspended.")
+        }
+
+        val rawFrames = try {
+            thread.frames()
+        } catch (e: IncompatibleThreadStateException) {
+            throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread ${thread.uniqueID()} is not suspended.")
+        }
+
+        val frames = extractFrames(rawFrames)
+        val topFrame = rawFrames.firstOrNull()
+
+        val locals = topFrame?.let { extractVariables(it, VariableScope.LOCAL) }.orEmpty()
+        val instances = topFrame?.let { extractVariables(it, VariableScope.INSTANCE) }.orEmpty()
 
         return PauseStateResult(
             threadId = threadId,
