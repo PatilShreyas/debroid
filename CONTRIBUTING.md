@@ -56,6 +56,10 @@ We maintain a `CHANGELOG.md` in the root of the project to track all notable cha
 2. Categorize the entry under the appropriate subsection (e.g., `### Added`, `### Fixed`, `### Changed`).
 3. If your change fixes a GitHub issue, mention the issue number in the changelog entry.
 4. **Never manually mention or change the version number** in `CHANGELOG.md` or `version.txt`. Always append your changes strictly under the `## [UNRELEASED]` header. Versions are bumped automatically during the release process.
+5. **Write for End Users and Agents (Tone & Perspective):**
+   - **Audience:** Write release notes for developers and AI agents using the tool, not for compiler/internal implementers.
+   - **Focus on Impact & Value:** Emphasize what changed from the user's perspective (e.g. latency improvements, new CLI options, clearer error responses, fixes to observable behaviors).
+   - **Avoid Internal Code Details:** Do not mention private internal methods, internal classes (e.g., `vm.allThreads()`, `findThread()`), or code architecture details that aren't visible in the CLI contracts. Keep it concise, descriptive, and focused on the user-facing benefit.
 
 ## 🚨 CRITICAL RULE: Schema Contracts & Golden Tests
 All CLI JSON response models are guarded by Golden Schema tests in `JsonSchemaGoldenTest` (`cli/src/test/resources/golden-schemas/*.schema.json`) to prevent unintended breaking changes for downstream AI agents.

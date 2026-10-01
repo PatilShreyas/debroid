@@ -589,6 +589,92 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `getPauseState calls vm allThreads exactly once`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.name() } returns "main"
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val method = mockk<Method>(relaxed = true)
+        val refType = mockk<ReferenceType>(relaxed = true)
+
+        every { thread.frames() } returns listOf(frame)
+        every { thread.frame(0) } returns frame
+        every { frame.location() } returns location
+        every { location.method() } returns method
+        every { location.declaringType() } returns refType
+        every { method.name() } returns "testMethod"
+        every { refType.name() } returns "com.example.Test"
+
+        session.getPauseState("1")
+
+        verify(exactly = 1) { vm.allThreads() }
+    }
+
+    @Test
+    fun `getPauseState throws THREAD_NOT_SUSPENDED when thread is not suspended`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns false
+        every { vm.allThreads() } returns listOf(thread)
+
+        val ex = assertThrows<DebugException> {
+            session.getPauseState("1")
+        }
+
+        assertEquals(ErrorCode.THREAD_NOT_SUSPENDED, ex.code)
+    }
+
+    @Test
+    fun `getPauseState throws THREAD_NOT_SUSPENDED on IncompatibleThreadStateException`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.name() } returns "main"
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+        every { thread.frames() } throws com.sun.jdi.IncompatibleThreadStateException("Thread resumed")
+
+        val ex = assertThrows<DebugException> {
+            session.getPauseState("1")
+        }
+
+        assertEquals(ErrorCode.THREAD_NOT_SUSPENDED, ex.code)
+    }
+
+    @Test
+    fun `getStackFrames throws THREAD_NOT_SUSPENDED when IncompatibleThreadStateException is thrown`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+        every { thread.frames() } throws com.sun.jdi.IncompatibleThreadStateException("Thread not suspended")
+
+        val ex = assertThrows<DebugException> {
+            session.getStackFrames("1")
+        }
+
+        assertEquals(ErrorCode.THREAD_NOT_SUSPENDED, ex.code)
+    }
+
+    @Test
+    fun `getVariables throws THREAD_NOT_SUSPENDED when IncompatibleThreadStateException is thrown`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+        every { thread.frame(0) } throws com.sun.jdi.IncompatibleThreadStateException("Thread not suspended")
+
+        val ex = assertThrows<DebugException> {
+            session.getVariables("1", VariableScope.LOCAL)
+        }
+
+        assertEquals(ErrorCode.THREAD_NOT_SUSPENDED, ex.code)
+    }
+
+    @Test
     fun `evaluateExpression evaluates simple local variable`() {
         val thread = mockk<ThreadReference>(relaxed = true)
         every { thread.uniqueID() } returns 1L
