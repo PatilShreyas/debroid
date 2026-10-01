@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Fixed
-- **Pause-State Latency & Thread Safety:** Optimized `debroid pause-state` to eliminate redundant thread and stack frame queries over ADB/JDWP, significantly speeding up paused state inspection at breakpoints. Also added graceful error handling to return a clean `THREAD_NOT_SUSPENDED` error when inspecting an unpaused thread (#23).
+- **Pause-State Latency & Thread Safety:** Optimized `debroid pause-state` to eliminate redundant thread and stack frame queries over ADB/JDWP, significantly speeding up paused state inspection at breakpoints. Also added graceful error handling to return a clean `THREAD_NOT_SUSPENDED` error when inspecting an unpaused thread (#99).
 
 ### Changed
 
