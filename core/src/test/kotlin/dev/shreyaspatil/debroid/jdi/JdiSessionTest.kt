@@ -15,7 +15,15 @@ import com.sun.jdi.StringReference
 import com.sun.jdi.ThreadReference
 import com.sun.jdi.VMDisconnectedException
 import com.sun.jdi.VirtualMachine
+import com.sun.jdi.event.AccessWatchpointEvent
+import com.sun.jdi.event.BreakpointEvent
+import com.sun.jdi.event.ClassPrepareEvent
+import com.sun.jdi.event.Event
 import com.sun.jdi.event.EventQueue
+import com.sun.jdi.event.ExceptionEvent
+import com.sun.jdi.event.ModificationWatchpointEvent
+import com.sun.jdi.event.StepEvent
+import com.sun.jdi.event.VMDisconnectEvent
 import com.sun.jdi.request.AccessWatchpointRequest
 import com.sun.jdi.request.BreakpointRequest
 import com.sun.jdi.request.ClassPrepareRequest
@@ -1373,6 +1381,201 @@ class JdiSessionTest {
 
         assertTrue(removed)
         verify(exactly = 1) { erm.deleteEventRequest(classPrepReq) }
+    }
+
+    @Test
+    fun `setBreakpoint on not-yet-loaded class configures SUSPEND_EVENT_THREAD and framework exclusions`() {
+        every { vm.allClasses() } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        session.setBreakpoint(file = "MainActivity.kt", line = 15)
+
+        verify(exactly = 1) { classPrepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD) }
+        verify { classPrepReq.addClassExclusionFilter("android.*") }
+        verify { classPrepReq.addClassExclusionFilter("androidx.*") }
+        verify { classPrepReq.addClassExclusionFilter("java.*") }
+        verify { classPrepReq.addClassExclusionFilter("kotlin.*") }
+    }
+
+    @Test
+    fun `setBreakpoint with framework packageName does not exclude that framework prefix`() {
+        every { vm.allClasses() } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        session.setBreakpoint(file = "ComponentActivity.kt", line = 100, packageName = "androidx.activity")
+
+        verify(exactly = 1) { classPrepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD) }
+        verify { classPrepReq.addClassExclusionFilter("android.*") }
+        verify(exactly = 0) { classPrepReq.addClassExclusionFilter("androidx.*") }
+    }
+
+    @Test
+    fun `setBreakpoint re-arms ClassPrepareRequest if newly deferred breakpoint needs previously excluded framework`() {
+        every { vm.allClasses() } returns emptyList()
+        val req1 = mockk<ClassPrepareRequest>(relaxed = true)
+        val req2 = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns req1 andThen req2
+
+        session.setBreakpoint(file = "MainActivity.kt", line = 15)
+        verify { req1.addClassExclusionFilter("androidx.*") }
+
+        session.setBreakpoint(file = "ComponentActivity.kt", line = 100, packageName = "androidx.activity")
+        verify(exactly = 1) { erm.deleteEventRequest(req1) }
+        verify(exactly = 0) { req2.addClassExclusionFilter("androidx.*") }
+        verify { req2.addClassExclusionFilter("android.*") }
+    }
+
+    @Test
+    fun `setBreakpoint midway on already loaded class binds immediately and never arms ClassPrepareRequest`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { refType.name() } returns "com.example.MainActivity"
+        every { refType.sourceName() } returns "MainActivity.kt"
+        every { refType.locationsOfLine(15) } returns listOf(location)
+        every { vm.allClasses() } returns listOf(refType)
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 15)
+
+        assertTrue(info.verified)
+        verify(exactly = 1) { bpReq.enable() }
+        verify(exactly = 0) { erm.createClassPrepareRequest() }
+    }
+
+    @Test
+    fun `setExceptionBreakpoint on deferred framework class does not exclude that framework`() {
+        every { vm.classesByName("java.lang.NullPointerException") } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        session.setExceptionBreakpoint("java.lang.NullPointerException", notifyCaught = true, notifyUncaught = true)
+
+        verify(exactly = 1) { classPrepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD) }
+        verify(exactly = 0) { classPrepReq.addClassExclusionFilter("java.*") }
+        verify { classPrepReq.addClassExclusionFilter("android.*") }
+        verify { classPrepReq.addClassExclusionFilter("androidx.*") }
+    }
+
+    @Test
+    fun `setWatchpoint on deferred framework class does not exclude that framework`() {
+        every { vm.classesByName("android.view.View") } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        session.setWatchpoint("android.view.View", "mFlags")
+
+        verify(exactly = 1) { classPrepReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD) }
+        verify(exactly = 0) { classPrepReq.addClassExclusionFilter("android.*") }
+        verify { classPrepReq.addClassExclusionFilter("java.*") }
+        verify { classPrepReq.addClassExclusionFilter("androidx.*") }
+    }
+
+    @Test
+    fun `setExceptionBreakpoint re-arms ClassPrepareRequest if needed framework was excluded`() {
+        every { vm.allClasses() } returns emptyList()
+        every { vm.classesByName("java.lang.NullPointerException") } returns emptyList()
+        val req1 = mockk<ClassPrepareRequest>(relaxed = true)
+        val req2 = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns req1 andThen req2
+
+        session.setBreakpoint(file = "MainActivity.kt", line = 15)
+        verify { req1.addClassExclusionFilter("java.*") }
+
+        session.setExceptionBreakpoint("java.lang.NullPointerException", notifyCaught = true, notifyUncaught = true)
+        verify(exactly = 1) { erm.deleteEventRequest(req1) }
+        verify(exactly = 0) { req2.addClassExclusionFilter("java.*") }
+        verify { req2.addClassExclusionFilter("android.*") }
+    }
+
+    @Test
+    fun `resolveDeferredBreakpoints does not bind when packageName does not match`() {
+        every { vm.allClasses() } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 15, packageName = "com.example.app")
+        assertFalse(info.verified)
+
+        val preparedClass = mockk<ReferenceType>(relaxed = true)
+        val loc = mockk<Location>(relaxed = true)
+        every { preparedClass.name() } returns "com.other.app.MainActivity"
+        every { preparedClass.sourceName() } returns "MainActivity.kt"
+        every { preparedClass.locationsOfLine(15) } returns listOf(loc)
+
+        val resolveMethod = JdiSession::class.java.getDeclaredMethod(
+            "resolveDeferredBreakpointsForClass",
+            ReferenceType::class.java
+        )
+        resolveMethod.isAccessible = true
+        resolveMethod.invoke(session, preparedClass)
+
+        verify(exactly = 0) { erm.createBreakpointRequest(loc) }
+    }
+
+    @Test
+    fun `resolveDeferredBreakpoints binds when packageName matches`() {
+        every { vm.allClasses() } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 15, packageName = "com.example.app")
+        assertFalse(info.verified)
+
+        val preparedClass = mockk<ReferenceType>(relaxed = true)
+        val loc = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { preparedClass.name() } returns "com.example.app.MainActivity"
+        every { preparedClass.sourceName() } returns "MainActivity.kt"
+        every { preparedClass.locationsOfLine(15) } returns listOf(loc)
+        every { erm.createBreakpointRequest(loc) } returns bpReq
+
+        val resolveMethod = JdiSession::class.java.getDeclaredMethod(
+            "resolveDeferredBreakpointsForClass",
+            ReferenceType::class.java
+        )
+        resolveMethod.isAccessible = true
+        resolveMethod.invoke(session, preparedClass)
+
+        verify(exactly = 1) { erm.createBreakpointRequest(loc) }
+        verify { bpReq.putProperty("breakpointId", info.id) }
+        verify { bpReq.enable() }
+    }
+
+    @Test
+    fun `processJdiEvent returns false for ClassPrepareEvent and true for suspending events`() {
+        val classPrepEvent = mockk<ClassPrepareEvent>(relaxed = true)
+        val bpEvent = mockk<BreakpointEvent>(relaxed = true)
+        val stepEvent = mockk<StepEvent>(relaxed = true)
+        val exEvent = mockk<ExceptionEvent>(relaxed = true)
+        val accessWpEvent = mockk<AccessWatchpointEvent>(relaxed = true)
+        val modWpEvent = mockk<ModificationWatchpointEvent>(relaxed = true)
+        val disconnectEvent = mockk<VMDisconnectEvent>(relaxed = true)
+
+        val processMethod = JdiSession::class.java.getDeclaredMethod(
+            "processJdiEvent",
+            Event::class.java
+        )
+        processMethod.isAccessible = true
+
+        val classPrepResult = processMethod.invoke(session, classPrepEvent) as Boolean
+        val bpResult = processMethod.invoke(session, bpEvent) as Boolean
+        val stepResult = processMethod.invoke(session, stepEvent) as Boolean
+        val exResult = processMethod.invoke(session, exEvent) as Boolean
+        val accessWpResult = processMethod.invoke(session, accessWpEvent) as Boolean
+        val modWpResult = processMethod.invoke(session, modWpEvent) as Boolean
+        val disconnectResult = processMethod.invoke(session, disconnectEvent) as Boolean
+
+        assertFalse(classPrepResult)
+        assertTrue(bpResult)
+        assertTrue(stepResult)
+        assertTrue(exResult)
+        assertTrue(accessWpResult)
+        assertTrue(modWpResult)
+        assertTrue(disconnectResult)
     }
 
     // ---------------- B2: exception breakpoint semantics ----------------
