@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Fixed
+- **App Startup Freeze with Deferred Breakpoints on Modern ART:** Fixed an issue where launching apps with deferred breakpoints froze or deadlocked the process on modern ART runtimes (Android 15+). Scoped deferred `ClassPrepareRequest` to `SUSPEND_EVENT_THREAD` and applied class exclusion filters for standard Android framework and runtime packages (`android.*`, `androidx.*`, etc.), while retaining immediate suspension and event resolution for target application classes. Also resolved an issue in the JDI event processing loop where event sets were resumed redundantly during class prepare handling (#97).
 - **Pause-State Latency & Thread Safety:** Optimized `debroid pause-state` to eliminate redundant thread and stack frame queries over ADB/JDWP, significantly speeding up paused state inspection at breakpoints. Also added graceful error handling to return a clean `THREAD_NOT_SUSPENDED` error when inspecting an unpaused thread (#99).
 
 ### Changed

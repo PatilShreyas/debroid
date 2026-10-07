@@ -16,6 +16,7 @@ import com.sun.jdi.VirtualMachine
 import com.sun.jdi.event.AccessWatchpointEvent
 import com.sun.jdi.event.BreakpointEvent
 import com.sun.jdi.event.ClassPrepareEvent
+import com.sun.jdi.event.Event
 import com.sun.jdi.event.ExceptionEvent
 import com.sun.jdi.event.ModificationWatchpointEvent
 import com.sun.jdi.event.StepEvent
@@ -53,7 +54,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
-@Suppress("TooManyFunctions")
+@Suppress("TooManyFunctions", "LargeClass")
 class JdiSession(
     val sessionId: String,
     val appId: String,
@@ -75,8 +76,14 @@ class JdiSession(
     private val exceptionRequests = ConcurrentHashMap<String, ExceptionRequest>()
     private val watchpointRequests = ConcurrentHashMap<String, MutableList<WatchpointRequest>>()
     private val classPrepareRequest = AtomicReference<ClassPrepareRequest?>(null)
+    private val activeExclusions = AtomicReference<Set<String>>(emptySet())
 
-    private data class DeferredBreakpoint(val id: String, val file: String, val line: Int)
+    private data class DeferredBreakpoint(
+        val id: String,
+        val file: String,
+        val line: Int,
+        val packageName: String? = null
+    )
     private data class DeferredWatchpoint(
         val id: String,
         val fieldName: String,
@@ -181,7 +188,7 @@ class JdiSession(
         } else {
             // Defer: arm a ClassPrepareRequest (once) and remember this breakpoint
             // so that when the class is later loaded we can bind it (B1).
-            deferredBreakpoints[id] = DeferredBreakpoint(id, file, line)
+            deferredBreakpoints[id] = DeferredBreakpoint(id, file, line, packageName)
             ensureClassPrepareRequest()
         }
 
@@ -364,15 +371,52 @@ class JdiSession(
 
     /**
      * Lazily creates and enables a single shared [ClassPrepareRequest]
-     * used to resolve deferred breakpoints and watchpoints. Avoid creating one per deferred
-     * item (which would leak requests and cause duplicate events).
+     * used to resolve deferred breakpoints and watchpoints. Framework and runtime classes
+     * are excluded by default to prevent event storms and thread suspension freezes on modern ART.
      */
     private fun ensureClassPrepareRequest() {
-        if (classPrepareRequest.get() != null) return
-        val req = vm.eventRequestManager().createClassPrepareRequest()
-        req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+        val existing = classPrepareRequest.get()
+        if (existing != null) {
+            val currentExclusions = activeExclusions.get()
+            val needsRecreation = frameworkExclusionPatterns.any { pattern ->
+                val prefix = pattern.removeSuffix("*")
+                isFrameworkPrefixNeeded(prefix) && currentExclusions.contains(pattern)
+            }
+            if (!needsRecreation) return
+
+            classPrepareRequest.set(null)
+            try { vm.eventRequestManager().deleteEventRequest(existing) } catch (_: Exception) {}
+        }
+
+        val erm = vm.eventRequestManager()
+        val req = erm.createClassPrepareRequest()
+        val currentExclusions = mutableSetOf<String>()
+
+        for (pattern in frameworkExclusionPatterns) {
+            val prefix = pattern.removeSuffix("*")
+            if (!isFrameworkPrefixNeeded(prefix)) {
+                req.addClassExclusionFilter(pattern)
+                currentExclusions.add(pattern)
+            }
+        }
+        activeExclusions.set(currentExclusions)
+
+        req.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
         req.enable()
         classPrepareRequest.set(req)
+    }
+
+    private fun isFrameworkPrefixNeeded(prefix: String): Boolean {
+        if (deferredBreakpoints.values.any { it.packageName?.startsWith(prefix) == true }) {
+            return true
+        }
+        if (deferredWatchpoints.keys.any { it.startsWith(prefix) }) {
+            return true
+        }
+        if (deferredExceptionBreakpoints.keys.any { it.startsWith(prefix) }) {
+            return true
+        }
+        return false
     }
 
     fun removeBreakpoint(id: String): Boolean {
@@ -447,6 +491,7 @@ class JdiSession(
      */
     private fun maybeDisableClassPrepareRequest() {
         if (deferredBreakpoints.isEmpty() && deferredWatchpoints.isEmpty() && deferredExceptionBreakpoints.isEmpty()) {
+            activeExclusions.set(emptySet())
             classPrepareRequest.getAndSet(null)?.let { req ->
                 try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
             }
@@ -1125,8 +1170,19 @@ class JdiSession(
         while (isConnected.get()) {
             try {
                 val eventSet = eventQueue.remove(1000) ?: continue
+                var shouldResume = true
                 for (event in eventSet) {
-                    processJdiEvent(event, eventSet)
+                    val suspendsVm = processJdiEvent(event)
+                    if (suspendsVm) {
+                        shouldResume = false
+                    }
+                }
+                if (shouldResume && eventSet.suspendPolicy() != EventRequest.SUSPEND_NONE) {
+                    try {
+                        eventSet.resume()
+                    } catch (_: Throwable) {
+                        // Ignored if VM disconnected or already resumed
+                    }
                 }
             } catch (_: InterruptedException) {
                 break
@@ -1140,25 +1196,50 @@ class JdiSession(
         }
     }
 
-    private fun processJdiEvent(event: com.sun.jdi.event.Event, eventSet: com.sun.jdi.event.EventSet) {
-        when (event) {
-            is ClassPrepareEvent -> handleClassPrepareEvent(event, eventSet)
-            is BreakpointEvent -> handleBreakpointEvent(event)
-            is StepEvent -> handleStepEvent(event)
-            is ExceptionEvent -> handleExceptionEvent(event)
-            is AccessWatchpointEvent -> handleAccessWatchpointEvent(event)
-            is ModificationWatchpointEvent -> handleModificationWatchpointEvent(event)
-            is VMDeathEvent, is VMDisconnectEvent -> handleDisconnectEvent()
+    /**
+     * Processes an individual JDI event and returns whether this event should keep
+     * the target VM suspended (e.g. breakpoint, step, exception, watchpoint).
+     */
+    private fun processJdiEvent(event: Event): Boolean {
+        return when (event) {
+            is ClassPrepareEvent -> {
+                handleClassPrepareEvent(event)
+                false
+            }
+            is BreakpointEvent -> {
+                handleBreakpointEvent(event)
+                true
+            }
+            is StepEvent -> {
+                handleStepEvent(event)
+                true
+            }
+            is ExceptionEvent -> {
+                handleExceptionEvent(event)
+                true
+            }
+            is AccessWatchpointEvent -> {
+                handleAccessWatchpointEvent(event)
+                true
+            }
+            is ModificationWatchpointEvent -> {
+                handleModificationWatchpointEvent(event)
+                true
+            }
+            is VMDeathEvent, is VMDisconnectEvent -> {
+                handleDisconnectEvent()
+                true
+            }
+            else -> false
         }
     }
 
-    private fun handleClassPrepareEvent(event: ClassPrepareEvent, eventSet: com.sun.jdi.event.EventSet) {
+    private fun handleClassPrepareEvent(event: ClassPrepareEvent) {
         val preparedClass = event.referenceType()
         resolveDeferredWatchpointsForClass(preparedClass)
         resolveDeferredBreakpointsForClass(preparedClass)
         resolveDeferredExceptionBreakpointsForClass(preparedClass)
         maybeDisableClassPrepareRequest()
-        eventSet.resume()
     }
 
     private fun resolveDeferredExceptionBreakpointsForClass(preparedClass: ReferenceType) {
@@ -1192,7 +1273,13 @@ class JdiSession(
         val iter = deferredBreakpoints.entries.iterator()
         while (iter.hasNext()) {
             val (bpId, deferred) = iter.next()
-            if (isClassMatchForDeferredBreakpoint(preparedClass, preparedSimpleName, deferred.file)) {
+            if (isClassMatchForDeferredBreakpoint(
+                    preparedClass = preparedClass,
+                    preparedSimpleName = preparedSimpleName,
+                    deferredFile = deferred.file,
+                    deferredPackage = deferred.packageName
+                )
+            ) {
                 tryBindDeferredBreakpoint(bpId, deferred.line, preparedClass, iter)
             }
         }
@@ -1201,8 +1288,12 @@ class JdiSession(
     private fun isClassMatchForDeferredBreakpoint(
         preparedClass: ReferenceType,
         preparedSimpleName: String,
-        deferredFile: String
+        deferredFile: String,
+        deferredPackage: String? = null
     ): Boolean {
+        if (deferredPackage != null && !preparedClass.name().startsWith(deferredPackage)) {
+            return false
+        }
         val basename = deferredFile.substringAfterLast('/').substringAfterLast('\\').substringBeforeLast('.')
         val basenameKt = "${basename}Kt"
         val srcMatches = try {
@@ -1453,6 +1544,22 @@ class JdiSession(
         private const val MAX_STALLED_RESUME_ATTEMPTS = 5
         private const val PROP_BREAKPOINT_ID = "breakpointId"
         private const val PROP_CLASS_NAME = "className"
+
+        private val frameworkExclusionPatterns = listOf(
+            "android.*",
+            "androidx.*",
+            "java.*",
+            "javax.*",
+            "kotlin.*",
+            "kotlinx.*",
+            "sun.*",
+            "com.sun.*",
+            "dalvik.*",
+            "libcore.*",
+            "com.android.*",
+            "org.apache.*",
+            "org.json.*"
+        )
 
         @Suppress("ObjectPropertyNaming")
         private val TERMINAL_TYPES = setOf(
