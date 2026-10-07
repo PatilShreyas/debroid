@@ -78,6 +78,12 @@ class JdiSession(
     private val classPrepareRequest = AtomicReference<ClassPrepareRequest?>(null)
     private val activeExclusions = AtomicReference<Set<String>>(emptySet())
 
+    // One-shot STEP_OVER targets. Not user breakpoints: omitted from getPoints() and cleared
+    // locally on teardown without a JDWP EventRequest.Clear (see deleteAllEventRequests).
+    private val smartStepRequests = ConcurrentHashMap<String, SmartStepPair>()
+    private val stepOverSyntheticContinuations = ConcurrentHashMap<Long, Int>()
+    private val smartStepIdCounter = AtomicInteger(1)
+
     private data class DeferredBreakpoint(
         val id: String,
         val file: String,
@@ -95,6 +101,16 @@ class JdiSession(
         val notifyCaught: Boolean,
         val notifyUncaught: Boolean
     )
+    private data class SmartStepPair(
+        val threadId: Long,
+        val breakpointRequest: BreakpointRequest?,
+        val stepOutRequest: StepRequest?
+    )
+    private sealed class SmartStepTarget {
+        data object Fallback : SmartStepTarget()
+        data object StepOutOnly : SmartStepTarget()
+        data class NextLine(val location: Location) : SmartStepTarget()
+    }
 
     private val exceptionIdCounter = AtomicInteger(1)
     private val watchpointIdCounter = AtomicInteger(1)
@@ -575,29 +591,22 @@ class JdiSession(
 
         erm.stepRequests().filter { it.thread() == thread }.forEach { erm.deleteEventRequest(it) }
 
+        clearSmartStepBreakpoints(thread)
+
         when (action) {
             StepAction.STEP_OVER -> {
-                val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER)
-                // Use SUSPEND_ALL and resumeAll() to keep thread state consistent with breakpoints.
-                // If only the stepping thread is resumed while others stay suspended, Android ART
-                // can deadlock or freeze in JDWP event processing.
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-                stepReq.addCountFilter(1)
-                stepReq.enable()
+                stepOverSyntheticContinuations.remove(thread.uniqueID())
+                if (!armSmartStepOver(thread)) {
+                    armLineStep(thread, StepRequest.STEP_OVER)
+                }
                 resumeAll()
             }
             StepAction.STEP_INTO -> {
-                val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_INTO)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-                stepReq.addCountFilter(1)
-                stepReq.enable()
+                armLineStep(thread, StepRequest.STEP_INTO)
                 resumeAll()
             }
             StepAction.STEP_OUT -> {
-                val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-                stepReq.addCountFilter(1)
-                stepReq.enable()
+                armLineStep(thread, StepRequest.STEP_OUT)
                 resumeAll()
             }
             StepAction.RESUME_THREAD -> {
@@ -610,6 +619,172 @@ class JdiSession(
                 resumeAll()
             }
         }
+    }
+
+    /**
+     * On a suspended frame, arms a one-shot breakpoint on the next line in the same source file
+     * and a paired STEP_OUT. The last line of that method arms only STEP_OUT.
+     * Returns false when the frame cannot be read so the caller keeps a single STEP_OVER.
+     */
+    private fun armSmartStepOver(thread: ThreadReference): Boolean {
+        return when (val target = resolveSmartStepTarget(thread)) {
+            SmartStepTarget.Fallback -> false
+            SmartStepTarget.StepOutOnly -> {
+                registerSmartStep(thread, breakpoint = null)
+                true
+            }
+            is SmartStepTarget.NextLine -> {
+                val breakpoint = createSmartBreakpoint(thread, target.location)
+                registerSmartStep(thread, breakpoint)
+                true
+            }
+        }
+    }
+
+    private fun resolveSmartStepTarget(thread: ThreadReference): SmartStepTarget {
+        if (!thread.isSuspended) return SmartStepTarget.Fallback
+        val location = currentFrameLocation(thread) ?: return SmartStepTarget.Fallback
+        val sourceName = runCatching { location.sourceName() }.getOrNull() ?: return SmartStepTarget.Fallback
+        val lineLocations = runCatching { location.method().allLineLocations() }.getOrNull()
+            ?: return SmartStepTarget.Fallback
+        val nextLine = lowestLaterUserLine(lineLocations, sourceName, location.lineNumber())
+        return if (nextLine == null) SmartStepTarget.StepOutOnly else SmartStepTarget.NextLine(nextLine)
+    }
+
+    private fun currentFrameLocation(thread: ThreadReference): Location? {
+        return try {
+            thread.frame(0).location()
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun lowestLaterUserLine(
+        locations: List<Location>,
+        sourceName: String,
+        currentLine: Int
+    ): Location? {
+        var best: Location? = null
+        for (candidate in locations) {
+            val candidateLine = candidate.lineNumber()
+            if (candidateLine <= currentLine) continue
+            val candidateSource = runCatching { candidate.sourceName() }.getOrNull() ?: continue
+            if (candidateSource != sourceName) continue
+            if (best == null || candidateLine < best.lineNumber()) {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    private fun createSmartBreakpoint(thread: ThreadReference, location: Location): BreakpointRequest {
+        val bpReq = vm.eventRequestManager().createBreakpointRequest(location)
+        bpReq.addThreadFilter(thread)
+        bpReq.addCountFilter(1)
+        // Same ART deadlock constraint as step requests: SUSPEND_ALL, then resumeAll().
+        bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+        return bpReq
+    }
+
+    private fun registerSmartStep(thread: ThreadReference, breakpoint: BreakpointRequest?) {
+        val erm = vm.eventRequestManager()
+        val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT)
+        stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+        stepReq.addCountFilter(1)
+        val id = "$SMART_STEP_PREFIX${smartStepIdCounter.getAndIncrement()}"
+        stepReq.putProperty(PROP_SMART_STEP, id)
+        breakpoint?.putProperty(PROP_SMART_STEP, id)
+        smartStepRequests[id] = SmartStepPair(
+            threadId = thread.uniqueID(),
+            breakpointRequest = breakpoint,
+            stepOutRequest = stepReq
+        )
+        breakpoint?.enable()
+        stepReq.enable()
+    }
+
+    private fun armLineStep(thread: ThreadReference, depth: Int) {
+        val erm = vm.eventRequestManager()
+        erm.stepRequests().filter { it.thread() == thread }.forEach { request ->
+            runCatching { erm.deleteEventRequest(request) }
+        }
+        val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, depth)
+        // Use SUSPEND_ALL and resumeAll() to keep thread state consistent with breakpoints.
+        // If only the stepping thread is resumed while others stay suspended, Android ART
+        // can deadlock or freeze in JDWP event processing.
+        stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+        stepReq.addCountFilter(1)
+        stepReq.enable()
+    }
+
+    private fun clearSmartStepBreakpoints(thread: ThreadReference) {
+        val threadId = thread.uniqueID()
+        val erm = vm.eventRequestManager()
+        val staleIds = smartStepRequests.filterValues { it.threadId == threadId }.keys
+        for (id in staleIds) {
+            val pair = smartStepRequests.remove(id) ?: continue
+            pair.breakpointRequest?.let { request ->
+                runCatching { erm.deleteEventRequest(request) }
+            }
+        }
+    }
+
+    private fun isSmartStepRequest(request: EventRequest?): Boolean {
+        val id = request?.getProperty(PROP_SMART_STEP) as? String ?: return false
+        return id.startsWith(SMART_STEP_PREFIX)
+    }
+
+    private fun finishSmartStep(request: EventRequest, location: Location, thread: ThreadReference): Boolean {
+        val id = request.getProperty(PROP_SMART_STEP) as? String
+        val pair = id?.let { smartStepRequests.remove(it) }
+        if (pair == null) return true
+        deleteSmartStepSibling(request, pair)
+        if (isSyntheticStop(location)) {
+            return continuePastSyntheticFrame(thread, location)
+        }
+        stepOverSyntheticContinuations.remove(thread.uniqueID())
+        pushStepHit(location, thread)
+        return true
+    }
+
+    private fun deleteSmartStepSibling(request: EventRequest, pair: SmartStepPair) {
+        val sibling = if (request is BreakpointRequest) pair.stepOutRequest else pair.breakpointRequest
+        if (sibling == null) return
+        runCatching { vm.eventRequestManager().deleteEventRequest(sibling) }
+    }
+
+    private fun continuePastSyntheticFrame(thread: ThreadReference, location: Location): Boolean {
+        val seen = stepOverSyntheticContinuations.merge(thread.uniqueID(), 1, Int::plus) ?: 1
+        if (seen >= MAX_SYNTHETIC_STEP_OVERS) {
+            stepOverSyntheticContinuations.remove(thread.uniqueID())
+            pushStepHit(location, thread)
+            return true
+        }
+        armLineStep(thread, StepRequest.STEP_OVER)
+        return false
+    }
+
+    private fun isSyntheticStop(location: Location): Boolean {
+        val sourceName = runCatching { location.sourceName() }.getOrNull()
+        if (sourceName == SYNTHETIC_KOTLIN_SOURCE) return true
+        val typeName = runCatching { location.declaringType().name() }.getOrNull() ?: return false
+        if (typeName.contains(INLINED_MARKER)) return true
+        val method = runCatching { location.method() }.getOrNull() ?: return false
+        return method.name() == LAMBDA_INVOKE && method.isSynthetic && typeName.contains('$')
+    }
+
+    private fun pushStepHit(loc: Location, thread: ThreadReference) {
+        pushEvent(
+            DebugEventPayload(
+                eventType = EventType.STEP_HIT,
+                sessionId = sessionId,
+                threadId = thread.uniqueID().toString(),
+                threadName = thread.name(),
+                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
+                className = loc.declaringType().name(),
+                stacktrace = getFramesSafely(thread)
+            )
+        )
     }
 
     /**
@@ -1206,14 +1381,8 @@ class JdiSession(
                 handleClassPrepareEvent(event)
                 false
             }
-            is BreakpointEvent -> {
-                handleBreakpointEvent(event)
-                true
-            }
-            is StepEvent -> {
-                handleStepEvent(event)
-                true
-            }
+            is BreakpointEvent -> handleBreakpointEvent(event)
+            is StepEvent -> handleStepEvent(event)
             is ExceptionEvent -> {
                 handleExceptionEvent(event)
                 true
@@ -1337,10 +1506,14 @@ class JdiSession(
         }
     }
 
-    private fun handleBreakpointEvent(event: BreakpointEvent) {
+    private fun handleBreakpointEvent(event: BreakpointEvent): Boolean {
+        val request = event.request()
+        if (request != null && isSmartStepRequest(request)) {
+            return finishSmartStep(request, event.location(), event.thread())
+        }
         val loc = event.location()
-        val bpId = (event.request()?.getProperty(PROP_BREAKPOINT_ID) as? String)
-            ?: jdiBreakpointRequests.entries.firstOrNull { it.value.contains(event.request()) }?.key
+        val bpId = (request?.getProperty(PROP_BREAKPOINT_ID) as? String)
+            ?: jdiBreakpointRequests.entries.firstOrNull { it.value.contains(request) }?.key
         pushEvent(
             DebugEventPayload(
                 eventType = EventType.BREAKPOINT_HIT,
@@ -1353,21 +1526,23 @@ class JdiSession(
                 stacktrace = getFramesSafely(event.thread())
             )
         )
+        return true
     }
 
-    private fun handleStepEvent(event: StepEvent) {
-        val loc = event.location()
-        pushEvent(
-            DebugEventPayload(
-                eventType = EventType.STEP_HIT,
-                sessionId = sessionId,
-                threadId = event.thread().uniqueID().toString(),
-                threadName = event.thread().name(),
-                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
-                className = loc.declaringType().name(),
-                stacktrace = getFramesSafely(event.thread())
-            )
-        )
+    private fun handleStepEvent(event: StepEvent): Boolean {
+        val request = event.request()
+        if (request != null && isSmartStepRequest(request)) {
+            return finishSmartStep(request, event.location(), event.thread())
+        }
+        val depth = (request as? StepRequest)?.depth()
+        if (depth == StepRequest.STEP_OVER && isSyntheticStop(event.location())) {
+            return continuePastSyntheticFrame(event.thread(), event.location())
+        }
+        if (depth == StepRequest.STEP_OVER) {
+            stepOverSyntheticContinuations.remove(event.thread().uniqueID())
+        }
+        pushStepHit(event.location(), event.thread())
+        return true
     }
 
     private fun handleExceptionEvent(event: ExceptionEvent) {
@@ -1463,6 +1638,8 @@ class JdiSession(
         exceptionRequests.clear()
         watchpointRequests.clear()
         classPrepareRequest.set(null)
+        smartStepRequests.clear()
+        stepOverSyntheticContinuations.clear()
     }
 
     /**
@@ -1544,6 +1721,12 @@ class JdiSession(
         private const val MAX_STALLED_RESUME_ATTEMPTS = 5
         private const val PROP_BREAKPOINT_ID = "breakpointId"
         private const val PROP_CLASS_NAME = "className"
+        private const val PROP_SMART_STEP = "smartStep"
+        private const val SMART_STEP_PREFIX = "smart_"
+        private const val SYNTHETIC_KOTLIN_SOURCE = "fake.kt"
+        private const val INLINED_MARKER = "\$\$inlined"
+        private const val LAMBDA_INVOKE = "invoke"
+        private const val MAX_SYNTHETIC_STEP_OVERS = 16
 
         private val frameworkExclusionPatterns = listOf(
             "android.*",

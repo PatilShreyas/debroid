@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Fixed
+- **Step Over Past Kotlin Inline Functions:** `debroid step <session_id> <thread_id> STEP_OVER` now advances to the next line in the current source file instead of stopping inside compiler-generated inline expansions such as `sumOf` and `filter` (`fake.kt` or synthetic lambda frames) (#74).
 
 ### Changed
 
