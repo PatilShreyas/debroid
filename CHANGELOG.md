@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Fixed
+- **Sync `inspect` Command Flags in Skill Documentation:** Updated the command reference table in `SKILL.md` to include the `--include-static` and `--include-internal` flags and default field filtering behavior for `debroid inspect` (#112).
 
 ### Changed
 
