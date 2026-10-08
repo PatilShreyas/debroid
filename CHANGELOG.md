@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Sync `inspect` Command Flags in Skill Documentation:** Updated the command reference table in `SKILL.md` to include the `--include-static` and `--include-internal` flags and default field filtering behavior for `debroid inspect` (#112).
+- **Array Element Inspection in `debroid inspect`:** Fixed an issue where running `debroid inspect` on any JVM array (`IntArray`, `Object[]`, or collection backing arrays like `ArrayList.elementData`) returned an empty `fields` map. Array elements are now populated under indexed keys (`"[0]"`, `"[1]"`, ...) in `fields` and recursively inspected in `nested` when `--max-depth > 1` (#110).
 
 ### Changed
 

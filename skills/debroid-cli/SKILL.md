@@ -91,8 +91,9 @@ debroid pause-state <session_id> <thread_id>
 ```
 
 **Advanced Inspections:**
-- Drill into complex objects: `debroid inspect <session_id> <object_id> [OPTIONS]`
-  - `--max-depth N` recurses N levels deep into object fields. Responses include a `nested` map keyed by field name. Cycles are guarded automatically.
+- Drill into complex objects or arrays: `debroid inspect <session_id> <object_id> [OPTIONS]`
+  - `--max-depth N` recurses N levels deep into object fields and array elements. Responses include a `nested` map keyed by field name (or array index `"[0]"`, `"[1]"`, ...). Cycles are guarded automatically.
+  - **Array Inspection**: Inspecting an array `objectId` (or a collection's backing array) populates `fields` (and `nested` when `--max-depth > 1`) with indexed keys (`"[0]"`, `"[1]"`, ...).
   - **Important Filter Behavior**: By default, `inspect` explicitly filters out `static` fields, `synthetic` fields, and ART-specific internal fields (`shadow$_*`). It also prevents redundant recursion into well-known immutable terminal types (like `java.lang.String` and Enums) to save your context tokens.
   - `--include-static` and `--include-internal` can be passed to bypass these filters if you absolutely need to inspect Dalvik internals or static class constants.
 - Coroutine state: `debroid coroutine <session_id> <continuation_id>`
