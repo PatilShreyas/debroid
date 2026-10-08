@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Fixed
+- **Sync `inspect` Command Flags in Skill Documentation:** Updated the command reference table in `SKILL.md` to include the `--include-static` and `--include-internal` flags and default field filtering behavior for `debroid inspect` (#112).
 - **Variable Mutation After Method Calls, Subtype Assignment & Auto-Boxing (`set-var`):** Fixed an issue where `debroid set-var` failed with a `THREAD_NOT_SUSPENDED` error when the new value expression invoked a method on the target VM (such as a Kotlin property getter or helper method). Also added support for assigning subclass instances to superclass or interface-typed local variables, auto-boxing primitive values into wrapper or supertype variables (e.g., `Integer`, `Number`, `Object`), and auto-unboxing wrapper instances into primitive variables (#108).
 
 ### Changed
