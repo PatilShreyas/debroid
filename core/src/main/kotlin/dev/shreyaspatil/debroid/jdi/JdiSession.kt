@@ -1243,17 +1243,28 @@ class JdiSession(
     ): ObjectInspectionResult {
         val refType = objRef.referenceType()
 
-        val fields = refType.allFields()
-            .filter { f -> fieldsFilter == null || fieldsFilter.contains(f.name()) }
-            .filter { f -> includeStatic || !f.isStatic }
-            .filter { f -> includeInternal || (!f.isSynthetic && !f.name().startsWith("shadow\$_")) }
+        val entries: Map<String, Value?> = if (objRef is ArrayReference) {
+            buildMap {
+                objRef.getValues().forEachIndexed { index, value ->
+                    val key = "[$index]"
+                    if (fieldsFilter == null || fieldsFilter.contains(key)) {
+                        put(key, value)
+                    }
+                }
+            }
+        } else {
+            val fields = refType.allFields()
+                .filter { f -> fieldsFilter == null || fieldsFilter.contains(f.name()) }
+                .filter { f -> includeStatic || !f.isStatic }
+                .filter { f -> includeInternal || (!f.isSynthetic && !f.name().startsWith("shadow\$_")) }
+            objRef.getValues(fields).entries.associate { (f, valRef) -> f.name() to valRef }
+        }
 
-        val fieldValues = objRef.getValues(fields)
         val resultFields = mutableMapOf<String, VariableInfo>()
         val nested = mutableMapOf<String, ObjectInspectionResult>()
 
-        for ((f, valRef) in fieldValues) {
-            resultFields[f.name()] = formatValue(f.name(), valRef)
+        for ((name, valRef) in entries) {
+            resultFields[name] = formatValue(name, valRef)
             if (maxDepth <= 1) continue
             if (valRef !is ObjectReference) continue
 
@@ -1266,7 +1277,7 @@ class JdiSession(
             if (oid in visited) continue // cycle guard
             visited.add(oid)
             try {
-                nested[f.name()] = inspectRecursive(valRef, null, maxDepth - 1, visited, includeStatic, includeInternal)
+                nested[name] = inspectRecursive(valRef, null, maxDepth - 1, visited, includeStatic, includeInternal)
             } catch (e: Exception) {
                 // Best-effort: nested resolvers (e.g. findObjectReference) can recurse over
                 // suspended frames and may throw on transient state; silently skip such

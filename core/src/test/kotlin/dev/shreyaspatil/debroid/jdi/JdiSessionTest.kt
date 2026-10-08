@@ -1,5 +1,6 @@
 package dev.shreyaspatil.debroid.jdi
 
+import com.sun.jdi.ArrayReference
 import com.sun.jdi.DoubleValue
 import com.sun.jdi.Field
 import com.sun.jdi.FloatValue
@@ -2514,6 +2515,205 @@ class JdiSessionTest {
         assertTrue(r3.nested!!.containsKey("f1"))
         assertNotNull(r3.nested!!["f1"]!!.nested) // Child should have nested map
         assertTrue(r3.nested!!["f1"]!!.nested!!.containsKey("f2")) // Grandchild is there
+    }
+
+    @Test
+    fun `inspectObject on primitive ArrayReference populates indexed fields`() {
+        val arrayRef = mockk<ArrayReference>(relaxed = true)
+        val arrayType = mockk<ReferenceType>(relaxed = true)
+        every { arrayRef.uniqueID() } returns 100L
+        every { arrayRef.referenceType() } returns arrayType
+        every { arrayType.name() } returns "int[]"
+
+        val elem0 = mockk<PrimitiveValue>(relaxed = true)
+        every { elem0.type().name() } returns "int"
+        every { elem0.toString() } returns "10"
+
+        val elem1 = mockk<PrimitiveValue>(relaxed = true)
+        every { elem1.type().name() } returns "int"
+        every { elem1.toString() } returns "20"
+
+        every { arrayRef.getValues() } returns listOf(elem0, elem1)
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns arrayRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        val result = session.inspectObject("100", null, maxDepth = 2)
+
+        assertEquals("100", result.objectId)
+        assertEquals("int[]", result.type)
+        assertEquals(2, result.fields.size)
+        assertEquals("10", result.fields["[0]"]?.valuePreview)
+        assertEquals("int", result.fields["[0]"]?.type)
+        assertEquals(true, result.fields["[0]"]?.isPrimitive)
+        assertEquals("20", result.fields["[1]"]?.valuePreview)
+        assertNull(result.nested)
+    }
+
+    @Test
+    fun `inspectObject on empty ArrayReference returns empty fields`() {
+        val arrayRef = mockk<ArrayReference>(relaxed = true)
+        val arrayType = mockk<ReferenceType>(relaxed = true)
+        every { arrayRef.uniqueID() } returns 100L
+        every { arrayRef.referenceType() } returns arrayType
+        every { arrayType.name() } returns "java.lang.Object[]"
+        every { arrayRef.getValues() } returns emptyList()
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns arrayRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        val result = session.inspectObject("100", null, maxDepth = 1)
+
+        assertEquals("100", result.objectId)
+        assertEquals("java.lang.Object[]", result.type)
+        assertTrue(result.fields.isEmpty())
+        assertNull(result.nested)
+        verify(exactly = 1) { arrayRef.getValues() }
+        verify(exactly = 0) { arrayType.allFields() }
+    }
+
+    @Test
+    fun `inspectObject on ObjectReference array recurses into non-terminal elements when maxDepth greater than 1`() {
+        val arrayRef = mockk<ArrayReference>(relaxed = true)
+        val arrayType = mockk<ReferenceType>(relaxed = true)
+        every { arrayRef.uniqueID() } returns 100L
+        every { arrayRef.referenceType() } returns arrayType
+        every { arrayType.name() } returns "java.lang.Object[]"
+
+        val userRef = mockk<ObjectReference>(relaxed = true)
+        val userType = mockk<ReferenceType>(relaxed = true)
+        every { userRef.uniqueID() } returns 200L
+        every { userRef.referenceType() } returns userType
+        every { userType.name() } returns "com.example.User"
+
+        val nameField = mockk<Field>(relaxed = true)
+        every { nameField.name() } returns "name"
+        every { nameField.isStatic } returns false
+        every { nameField.isSynthetic } returns false
+
+        val nameVal = mockk<StringReference>(relaxed = true)
+        val stringType = mockk<ReferenceType>(relaxed = true)
+        every { nameVal.uniqueID() } returns 300L
+        every { nameVal.value() } returns "Alice"
+        every { nameVal.referenceType() } returns stringType
+        every { stringType.name() } returns "java.lang.String"
+
+        every { userType.allFields() } returns listOf(nameField)
+        every { userRef.getValues(any()) } returns mapOf(nameField to nameVal)
+
+        // Array contains: [0] = userRef, [1] = nameVal (terminal String), [2] = null, [3] = arrayRef (cycle)
+        every { arrayRef.getValues() } returns listOf(userRef, nameVal, null, arrayRef)
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns arrayRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        val depth1 = session.inspectObject("100", null, maxDepth = 1)
+        assertEquals(4, depth1.fields.size)
+        assertEquals("200", depth1.fields["[0]"]?.objectId)
+        assertEquals("\"Alice\"", depth1.fields["[1]"]?.valuePreview)
+        assertEquals("null", depth1.fields["[2]"]?.valuePreview)
+        assertEquals("100", depth1.fields["[3]"]?.objectId)
+        assertNull(depth1.nested)
+
+        val depth2 = session.inspectObject("100", null, maxDepth = 2)
+        assertNotNull(depth2.nested)
+        // Only [0] should be recursed into ([1] is terminal String, [2] is null, [3] is cyclic self-ref)
+        assertEquals(setOf("[0]"), depth2.nested!!.keys)
+        assertEquals("200", depth2.nested!!["[0]"]?.objectId)
+        assertEquals("\"Alice\"", depth2.nested!!["[0]"]?.fields?.get("name")?.valuePreview)
+    }
+
+    @Test
+    fun `inspectObject on object with ArrayReference field recurses into array and its elements`() {
+        val listRef = mockk<ObjectReference>(relaxed = true)
+        val listType = mockk<ReferenceType>(relaxed = true)
+        every { listRef.uniqueID() } returns 100L
+        every { listRef.referenceType() } returns listType
+        every { listType.name() } returns "java.util.ArrayList"
+
+        val elementDataField = mockk<Field>(relaxed = true)
+        every { elementDataField.name() } returns "elementData"
+        every { elementDataField.isStatic } returns false
+        every { elementDataField.isSynthetic } returns false
+
+        val backingArrayRef = mockk<ArrayReference>(relaxed = true)
+        val backingArrayType = mockk<ReferenceType>(relaxed = true)
+        every { backingArrayRef.uniqueID() } returns 200L
+        every { backingArrayRef.referenceType() } returns backingArrayType
+        every { backingArrayRef.type() } returns backingArrayType
+        every { backingArrayType.name() } returns "java.lang.Object[]"
+        every { backingArrayRef.length() } returns 1
+
+        val itemRef = mockk<ObjectReference>(relaxed = true)
+        val itemType = mockk<ReferenceType>(relaxed = true)
+        every { itemRef.uniqueID() } returns 300L
+        every { itemRef.referenceType() } returns itemType
+        every { itemType.name() } returns "com.example.Item"
+        every { itemType.allFields() } returns emptyList()
+        every { itemRef.getValues(any()) } returns emptyMap()
+
+        every { backingArrayRef.getValues() } returns listOf(itemRef)
+        every { listType.allFields() } returns listOf(elementDataField)
+        every { listRef.getValues(any()) } returns mapOf(elementDataField to backingArrayRef)
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns listRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        val result = session.inspectObject("100", null, maxDepth = 3)
+
+        assertEquals("Array(size=1)", result.fields["elementData"]?.valuePreview)
+        val nestedArray = result.nested?.get("elementData")
+        assertNotNull(nestedArray)
+        assertEquals("200", nestedArray!!.objectId)
+        assertEquals("300", nestedArray.fields["[0]"]?.objectId)
+        assertEquals("300", nestedArray.nested?.get("[0]")?.objectId)
+    }
+
+    @Test
+    fun `inspectObject on ArrayReference respects fieldsFilter`() {
+        val arrayRef = mockk<ArrayReference>(relaxed = true)
+        val arrayType = mockk<ReferenceType>(relaxed = true)
+        every { arrayRef.uniqueID() } returns 100L
+        every { arrayRef.referenceType() } returns arrayType
+        every { arrayType.name() } returns "int[]"
+
+        val elem0 = mockk<PrimitiveValue>(relaxed = true)
+        every { elem0.type().name() } returns "int"
+        every { elem0.toString() } returns "10"
+
+        val elem1 = mockk<PrimitiveValue>(relaxed = true)
+        every { elem1.type().name() } returns "int"
+        every { elem1.toString() } returns "20"
+
+        every { arrayRef.getValues() } returns listOf(elem0, elem1)
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        val frame = mockk<StackFrame>(relaxed = true)
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+        every { frame.thisObject() } returns arrayRef
+        every { vm.allThreads() } returns listOf(thread)
+
+        val result = session.inspectObject("100", fieldsFilter = listOf("[1]"), maxDepth = 1)
+
+        assertEquals(setOf("[1]"), result.fields.keys)
+        assertEquals("20", result.fields["[1]"]?.valuePreview)
     }
 
     @Test
