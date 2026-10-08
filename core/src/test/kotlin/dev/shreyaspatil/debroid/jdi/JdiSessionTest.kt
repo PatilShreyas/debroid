@@ -1193,6 +1193,364 @@ class JdiSessionTest {
     }
 
     @Test
+    fun `setVariable re-fetches top stack frame after expression evaluation invalidates initial frame`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val staleFrame = mockk<StackFrame>(relaxed = true)
+        val freshFrame = mockk<StackFrame>(relaxed = true)
+        val staleLocal = mockk<LocalVariable>(relaxed = true)
+        val freshLocal = mockk<LocalVariable>(relaxed = true)
+
+        every { thread.frame(0) } returnsMany listOf(staleFrame, freshFrame)
+        every { staleFrame.visibleVariables() } returns listOf(staleLocal)
+        every { freshFrame.visibleVariables() } returns listOf(freshLocal)
+        every { staleLocal.name() } returns "amount"
+        every { freshLocal.name() } returns "amount"
+
+        val doubleType = mockk<com.sun.jdi.DoubleType>(relaxed = true)
+        every { doubleType.name() } returns "double"
+        every { staleLocal.type() } returns doubleType
+        every { freshLocal.type() } returns doubleType
+
+        every {
+            staleFrame.setValue(any(), any())
+        } throws com.sun.jdi.InvalidStackFrameException("Thread has been resumed")
+
+        val evaluatedDouble = mockk<DoubleValue>(relaxed = true)
+        every { evaluatedDouble.type() } returns doubleType
+        every { evaluatedDouble.toString() } returns "150.0"
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("order.getAmount() + 50.0", vm, staleFrame) } returns evaluatedDouble
+
+        val result = session.setVariable(threadId = "1", varName = "amount", newValueStr = "order.getAmount() + 50.0")
+
+        verify(exactly = 0) { staleFrame.setValue(any(), any()) }
+        verify(exactly = 1) { freshFrame.setValue(freshLocal, evaluatedDouble) }
+        assertEquals("amount", result.name)
+        assertEquals("150.0", result.valuePreview)
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable allows assigning subclass instance to superclass variable`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "user"
+
+        val superClassType = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { superClassType.name() } returns "com.example.User"
+        every { local.type() } returns superClassType
+
+        val subClassType = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { subClassType.name() } returns "com.example.AdminUser"
+        every { subClassType.superclass() } returns superClassType
+        every { subClassType.allInterfaces() } returns emptyList()
+
+        val subInstance = mockk<ObjectReference>(relaxed = true)
+        every { subInstance.type() } returns subClassType
+        every { subInstance.referenceType() } returns subClassType
+        every { subInstance.uniqueID() } returns 501L
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("adminUser", vm, frame) } returns subInstance
+
+        val result = session.setVariable(threadId = "1", varName = "user", newValueStr = "adminUser")
+
+        verify { frame.setValue(local, subInstance) }
+        assertEquals("user", result.name)
+        assertEquals("com.example.AdminUser", result.type)
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable allows assigning interface implementation to interface variable`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "account"
+
+        val accountInterface = mockk<com.sun.jdi.InterfaceType>(relaxed = true)
+        every { accountInterface.name() } returns "com.example.Account"
+        every { local.type() } returns accountInterface
+
+        val guestAccountClass = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { guestAccountClass.name() } returns "com.example.GuestAccount"
+        every { guestAccountClass.superclass() } returns null
+        every { guestAccountClass.allInterfaces() } returns listOf(accountInterface)
+
+        val guestInstance = mockk<ObjectReference>(relaxed = true)
+        every { guestInstance.type() } returns guestAccountClass
+        every { guestInstance.referenceType() } returns guestAccountClass
+        every { guestInstance.uniqueID() } returns 502L
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("guestAccount", vm, frame) } returns guestInstance
+
+        val result = session.setVariable(threadId = "1", varName = "account", newValueStr = "guestAccount")
+
+        verify { frame.setValue(local, guestInstance) }
+        assertEquals("account", result.name)
+        assertEquals("com.example.GuestAccount", result.type)
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable rejects incompatible ObjectReference assignment with EVALUATION_FAILED`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "account"
+
+        val accountInterface = mockk<com.sun.jdi.InterfaceType>(relaxed = true)
+        every { accountInterface.name() } returns "com.example.Account"
+        every { local.type() } returns accountInterface
+
+        val unrelatedClass = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { unrelatedClass.name() } returns "com.example.User"
+        every { unrelatedClass.superclass() } returns null
+        every { unrelatedClass.allInterfaces() } returns emptyList()
+        every { unrelatedClass.interfaces() } returns emptyList()
+
+        val userInstance = mockk<ObjectReference>(relaxed = true)
+        every { userInstance.type() } returns unrelatedClass
+        every { userInstance.referenceType() } returns unrelatedClass
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("user", vm, frame) } returns userInstance
+
+        val ex = assertThrows<DebugException> {
+            session.setVariable(threadId = "1", varName = "account", newValueStr = "user")
+        }
+
+        assertEquals(ErrorCode.EVALUATION_FAILED, ex.code)
+        assertTrue(ex.message!!.contains("Type mismatch"))
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable unboxes wrapper ObjectReference when assigning to primitive variable`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "amount"
+
+        val doubleType = mockk<com.sun.jdi.DoubleType>(relaxed = true)
+        every { doubleType.name() } returns "double"
+        every { local.type() } returns doubleType
+
+        val unboxedDouble = mockk<DoubleValue>(relaxed = true)
+        every { unboxedDouble.type() } returns doubleType
+        every { unboxedDouble.doubleValue() } returns 250.0
+        every { unboxedDouble.toString() } returns "250.0"
+
+        val valueField = mockk<Field>(relaxed = true)
+        val boxedDoubleClass = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { boxedDoubleClass.name() } returns "java.lang.Double"
+        every { boxedDoubleClass.fieldByName("value") } returns valueField
+
+        val boxedDoubleObj = mockk<ObjectReference>(relaxed = true)
+        every { boxedDoubleObj.type() } returns boxedDoubleClass
+        every { boxedDoubleObj.referenceType() } returns boxedDoubleClass
+        every { boxedDoubleObj.getValue(valueField) } returns unboxedDouble
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("Double.valueOf(250.0)", vm, frame) } returns boxedDoubleObj
+
+        val result = session.setVariable(threadId = "1", varName = "amount", newValueStr = "Double.valueOf(250.0)")
+
+        verify { frame.setValue(local, unboxedDouble) }
+        verify(exactly = 0) { vm.mirrorOf(any<Double>()) }
+        assertEquals("amount", result.name)
+        assertEquals("250.0", result.valuePreview)
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable autoboxes primitive value when assigning to Object variable`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "rawObject"
+
+        val objectClassType = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { objectClassType.name() } returns "java.lang.Object"
+        every { local.type() } returns objectClassType
+
+        val intType = mockk<com.sun.jdi.IntegerType>(relaxed = true)
+        every { intType.name() } returns "int"
+        val intVal = mockk<IntegerValue>(relaxed = true)
+        every { intVal.type() } returns intType
+        every { intVal.intValue() } returns 42
+
+        val integerWrapperClass = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { integerWrapperClass.name() } returns "java.lang.Integer"
+        val valueOfMethod = mockk<Method>(relaxed = true)
+        every {
+            integerWrapperClass.methodsByName("valueOf", "(I)Ljava/lang/Integer;")
+        } returns listOf(valueOfMethod)
+        val boxedIntRef = mockk<ObjectReference>(relaxed = true)
+        every { boxedIntRef.type() } returns integerWrapperClass
+        every { boxedIntRef.referenceType() } returns integerWrapperClass
+        every { boxedIntRef.uniqueID() } returns 777L
+        every {
+            integerWrapperClass.invokeMethod(
+                thread,
+                valueOfMethod,
+                listOf(intVal),
+                com.sun.jdi.ClassType.INVOKE_SINGLE_THREADED
+            )
+        } returns boxedIntRef
+        every { vm.classesByName("java.lang.Integer") } returns listOf(integerWrapperClass)
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("42", vm, frame) } returns intVal
+
+        val result = session.setVariable(threadId = "1", varName = "rawObject", newValueStr = "42")
+
+        verify { frame.setValue(local, boxedIntRef) }
+        assertEquals("rawObject", result.name)
+        assertEquals("java.lang.Integer", result.type)
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable throws EVALUATION_FAILED when assigning numeric value to char variable`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "myChar"
+
+        val charType = mockk<com.sun.jdi.CharType>(relaxed = true)
+        every { charType.name() } returns "char"
+        every { local.type() } returns charType
+
+        val doubleType = mockk<com.sun.jdi.DoubleType>(relaxed = true)
+        every { doubleType.name() } returns "double"
+        val doubleVal = mockk<DoubleValue>(relaxed = true)
+        every { doubleVal.type() } returns doubleType
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("3.14", vm, frame) } returns doubleVal
+
+        val ex = assertThrows<DebugException> {
+            session.setVariable(threadId = "1", varName = "myChar", newValueStr = "3.14")
+        }
+
+        assertEquals(ErrorCode.EVALUATION_FAILED, ex.code)
+        assertTrue(ex.message.contains("Type mismatch: Cannot assign double to char"))
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable throws clear diagnostic when wrapper class is not loaded during autoboxing`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "rawObject"
+
+        val objectClassType = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { objectClassType.name() } returns "java.lang.Object"
+        every { local.type() } returns objectClassType
+
+        val intType = mockk<com.sun.jdi.IntegerType>(relaxed = true)
+        every { intType.name() } returns "int"
+        val intVal = mockk<IntegerValue>(relaxed = true)
+        every { intVal.type() } returns intType
+        every { vm.classesByName("java.lang.Integer") } returns emptyList()
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("42", vm, frame) } returns intVal
+
+        val ex = assertThrows<DebugException> {
+            session.setVariable(threadId = "1", varName = "rawObject", newValueStr = "42")
+        }
+
+        assertEquals(ErrorCode.EVALUATION_FAILED, ex.code)
+        assertTrue(ex.message.contains("Cannot auto-box int into java.lang.Integer"))
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable throws THREAD_NOT_SUSPENDED when thread frame throws IncompatibleThreadStateException`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+        every { thread.frame(0) } throws com.sun.jdi.IncompatibleThreadStateException("Thread resumed")
+
+        val ex = assertThrows<DebugException> {
+            session.setVariable(threadId = "1", varName = "myInt", newValueStr = "42")
+        }
+
+        assertEquals(ErrorCode.THREAD_NOT_SUSPENDED, ex.code)
+    }
+
+    @Test
+    fun `setVariable throws EVALUATION_FAILED when visibleVariables throws AbsentInformationException`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } throws com.sun.jdi.AbsentInformationException("No local variable table")
+
+        val ex = assertThrows<DebugException> {
+            session.setVariable(threadId = "1", varName = "myInt", newValueStr = "42")
+        }
+
+        assertEquals(ErrorCode.EVALUATION_FAILED, ex.code)
+    }
+
+    @Test
     fun `pollEvents returns empty initially`() {
         val result = session.pollEvents("0")
         assertEquals(0, result.events.size)
