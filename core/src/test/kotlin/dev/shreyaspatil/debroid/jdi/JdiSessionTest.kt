@@ -1371,7 +1371,6 @@ class JdiSessionTest {
         every { unboxedDouble.type() } returns doubleType
         every { unboxedDouble.doubleValue() } returns 250.0
         every { unboxedDouble.toString() } returns "250.0"
-        every { vm.mirrorOf(250.0) } returns unboxedDouble
 
         val valueField = mockk<Field>(relaxed = true)
         val boxedDoubleClass = mockk<com.sun.jdi.ClassType>(relaxed = true)
@@ -1389,6 +1388,7 @@ class JdiSessionTest {
         val result = session.setVariable(threadId = "1", varName = "amount", newValueStr = "Double.valueOf(250.0)")
 
         verify { frame.setValue(local, unboxedDouble) }
+        verify(exactly = 0) { vm.mirrorOf(any<Double>()) }
         assertEquals("amount", result.name)
         assertEquals("250.0", result.valuePreview)
         unmockkStatic(JdiExpressionEvaluator::class)
@@ -1445,6 +1445,75 @@ class JdiSessionTest {
         verify { frame.setValue(local, boxedIntRef) }
         assertEquals("rawObject", result.name)
         assertEquals("java.lang.Integer", result.type)
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable throws EVALUATION_FAILED when assigning numeric value to char variable`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "myChar"
+
+        val charType = mockk<com.sun.jdi.CharType>(relaxed = true)
+        every { charType.name() } returns "char"
+        every { local.type() } returns charType
+
+        val doubleType = mockk<com.sun.jdi.DoubleType>(relaxed = true)
+        every { doubleType.name() } returns "double"
+        val doubleVal = mockk<DoubleValue>(relaxed = true)
+        every { doubleVal.type() } returns doubleType
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("3.14", vm, frame) } returns doubleVal
+
+        val ex = assertThrows<DebugException> {
+            session.setVariable(threadId = "1", varName = "myChar", newValueStr = "3.14")
+        }
+
+        assertEquals(ErrorCode.EVALUATION_FAILED, ex.code)
+        assertTrue(ex.message.contains("Type mismatch: Cannot assign double to char"))
+        unmockkStatic(JdiExpressionEvaluator::class)
+    }
+
+    @Test
+    fun `setVariable throws clear diagnostic when wrapper class is not loaded during autoboxing`() {
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 1L
+        every { thread.isSuspended } returns true
+        every { vm.allThreads() } returns listOf(thread)
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val local = mockk<LocalVariable>(relaxed = true)
+        every { thread.frame(0) } returns frame
+        every { frame.visibleVariables() } returns listOf(local)
+        every { local.name() } returns "rawObject"
+
+        val objectClassType = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { objectClassType.name() } returns "java.lang.Object"
+        every { local.type() } returns objectClassType
+
+        val intType = mockk<com.sun.jdi.IntegerType>(relaxed = true)
+        every { intType.name() } returns "int"
+        val intVal = mockk<IntegerValue>(relaxed = true)
+        every { intVal.type() } returns intType
+        every { vm.classesByName("java.lang.Integer") } returns emptyList()
+
+        mockkStatic(JdiExpressionEvaluator::class)
+        every { JdiExpressionEvaluator.evaluate("42", vm, frame) } returns intVal
+
+        val ex = assertThrows<DebugException> {
+            session.setVariable(threadId = "1", varName = "rawObject", newValueStr = "42")
+        }
+
+        assertEquals(ErrorCode.EVALUATION_FAILED, ex.code)
+        assertTrue(ex.message.contains("Cannot auto-box int into java.lang.Integer"))
         unmockkStatic(JdiExpressionEvaluator::class)
     }
 

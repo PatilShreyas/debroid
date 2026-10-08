@@ -876,7 +876,7 @@ class JdiSession(
 
         return when {
             targetType is PrimitiveType && newJdiVal is PrimitiveValue ->
-                coercePrimitive(newJdiVal, targetType, valueType.name())
+                coercePrimitive(newJdiVal, targetType.name(), valueType.name(), targetType.name())
             targetType is PrimitiveType && newJdiVal is ObjectReference ->
                 unboxAndCoerce(newJdiVal, targetType)
             newJdiVal is PrimitiveValue ->
@@ -889,16 +889,23 @@ class JdiSession(
 
     private fun coercePrimitive(
         value: PrimitiveValue,
-        targetType: PrimitiveType,
-        sourceTypeName: String = value.type().name()
+        targetPrimName: String,
+        sourceTypeName: String = value.type().name(),
+        targetTypeName: String = targetPrimName
     ): PrimitiveValue {
-        val isSourceBoolean = value is com.sun.jdi.BooleanValue || value.type().name() == "boolean"
-        val isTargetBoolean = targetType.name() == "boolean"
-        if (isSourceBoolean != isTargetBoolean) {
-            throw typeMismatchError(sourceTypeName, targetType.name())
+        val actualPrimName = value.type().name()
+        val isSourceBoolean = value is com.sun.jdi.BooleanValue || actualPrimName == "boolean"
+        val isTargetBoolean = targetPrimName == "boolean"
+        val isSourceChar = value is com.sun.jdi.CharValue || actualPrimName == "char"
+        val isTargetChar = targetPrimName == "char"
+        if (isSourceBoolean != isTargetBoolean || isSourceChar != isTargetChar) {
+            throw typeMismatchError(sourceTypeName, targetTypeName)
         }
-        return coercePrimitiveByTargetName(value, targetType.name())
-            ?: throw typeMismatchError(sourceTypeName, targetType.name())
+        if (actualPrimName == targetPrimName) {
+            return value
+        }
+        return coercePrimitiveByTargetName(value, targetPrimName)
+            ?: throw typeMismatchError(sourceTypeName, targetTypeName)
     }
 
     private fun coercePrimitiveByTargetName(value: PrimitiveValue, targetTypeName: String): PrimitiveValue? {
@@ -925,7 +932,7 @@ class JdiSession(
         val unboxed = valueField?.let { runCatching { objRef.getValue(it) }.getOrNull() as? PrimitiveValue }
             ?: throw typeMismatchError(sourceTypeName, targetType.name())
 
-        return coercePrimitive(unboxed, targetType, sourceTypeName)
+        return coercePrimitive(unboxed, targetType.name(), sourceTypeName, targetType.name())
     }
 
     private fun autoboxPrimitive(
@@ -938,7 +945,7 @@ class JdiSession(
         val targetPrimName = wrapperToPrimitive[targetTypeName]
 
         if (targetPrimName != null) {
-            val coercedPrim = coercePrimitiveForWrapper(value, sourceTypeName, targetPrimName, targetTypeName)
+            val coercedPrim = coercePrimitive(value, targetPrimName, sourceTypeName, targetTypeName)
             return boxPrimitiveIntoWrapper(coercedPrim, targetTypeName, sourceTypeName, targetTypeName, thread)
         }
 
@@ -952,25 +959,6 @@ class JdiSession(
         throw typeMismatchError(sourceTypeName, targetTypeName)
     }
 
-    private fun coercePrimitiveForWrapper(
-        value: PrimitiveValue,
-        sourceTypeName: String,
-        targetPrimName: String,
-        targetTypeName: String
-    ): PrimitiveValue {
-        val isSourceBoolean = value is com.sun.jdi.BooleanValue || sourceTypeName == "boolean"
-        val isTargetBoolean = targetPrimName == "boolean"
-        if (isSourceBoolean != isTargetBoolean) {
-            throw typeMismatchError(sourceTypeName, targetTypeName)
-        }
-        return if (sourceTypeName == targetPrimName) {
-            value
-        } else {
-            coercePrimitiveByTargetName(value, targetPrimName)
-                ?: throw typeMismatchError(sourceTypeName, targetTypeName)
-        }
-    }
-
     private fun boxPrimitiveIntoWrapper(
         primitiveVal: PrimitiveValue,
         wrapperClassName: String,
@@ -978,7 +966,7 @@ class JdiSession(
         targetTypeName: String,
         thread: ThreadReference
     ): ObjectReference {
-        val (wrapperClass, valueOfMethod) = resolveWrapperValueOf(wrapperClassName, sourceTypeName, targetTypeName)
+        val (wrapperClass, valueOfMethod) = resolveWrapperValueOf(wrapperClassName, sourceTypeName)
         val boxedResult = try {
             wrapperClass.invokeMethod(
                 thread,
@@ -997,20 +985,26 @@ class JdiSession(
 
     private fun resolveWrapperValueOf(
         wrapperClassName: String,
-        sourceTypeName: String,
-        targetTypeName: String
+        sourceTypeName: String
     ): Pair<com.sun.jdi.ClassType, com.sun.jdi.Method> {
         val descriptor = wrapperToDescriptor[wrapperClassName]
+        val expectedPrimType = wrapperToPrimitive[wrapperClassName]
         val wrapperClass = vm.classesByName(wrapperClassName)
             .filterIsInstance<com.sun.jdi.ClassType>()
             .firstOrNull()
         val signature = descriptor?.let { "($it)L${wrapperClassName.replace('.', '/')};" }
         val valueOfMethod = wrapperClass?.let { cls ->
             signature?.let { sig -> cls.methodsByName("valueOf", sig).firstOrNull() }
-                ?: cls.methodsByName("valueOf").firstOrNull { it.argumentTypeNames().size == 1 }
+                ?: cls.methodsByName("valueOf").firstOrNull { method ->
+                    val argTypes = method.argumentTypeNames()
+                    argTypes.size == 1 && (expectedPrimType == null || argTypes[0] == expectedPrimType)
+                }
         }
         if (wrapperClass == null || valueOfMethod == null) {
-            throw typeMismatchError(sourceTypeName, targetTypeName)
+            throw DebugException(
+                ErrorCode.EVALUATION_FAILED,
+                "Cannot auto-box $sourceTypeName into $wrapperClassName: class or valueOf method not loaded in VM"
+            )
         }
         return wrapperClass to valueOfMethod
     }
@@ -1046,11 +1040,18 @@ class JdiSession(
     }
 
     private fun isClassAssignableTo(sourceType: com.sun.jdi.ClassType, targetType: com.sun.jdi.Type): Boolean {
-        val superclass = runCatching { sourceType.superclass() }.getOrNull()
-        if (superclass != null && isReferenceAssignable(superclass, targetType)) return true
+        var currentClass = runCatching { sourceType.superclass() }.getOrNull()
+        while (currentClass != null) {
+            if (currentClass == targetType || currentClass.name() == targetType.name()) return true
+            currentClass = runCatching { currentClass.superclass() }.getOrNull()
+        }
+
+        if (targetType is com.sun.jdi.ClassType) return false
 
         val allInterfaces = runCatching { sourceType.allInterfaces() }.getOrDefault(emptyList())
-        if (allInterfaces.any { isReferenceAssignable(it, targetType) }) return true
+        if (allInterfaces.isNotEmpty()) {
+            return allInterfaces.any { it == targetType || it.name() == targetType.name() }
+        }
 
         val directInterfaces = runCatching { sourceType.interfaces() }.getOrDefault(emptyList())
         return directInterfaces.any { isReferenceAssignable(it, targetType) }
