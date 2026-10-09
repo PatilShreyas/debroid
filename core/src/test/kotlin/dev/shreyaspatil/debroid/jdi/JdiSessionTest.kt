@@ -3134,111 +3134,63 @@ class JdiSessionTest {
     }
 
     @Test
-    fun `STEP_OVER on a suspended user line arms a one-shot breakpoint and STEP_OUT`() {
+    fun `STEP_OVER arms a single JDWP STEP_OVER and no breakpoint`() {
         val thread = suspendedThread()
-        val line16 = mockk<Location>(relaxed = true)
-        every { line16.sourceName() } returns "OrderPricingPipeline.kt"
-        every { line16.lineNumber() } returns 16
-        val line18 = mockk<Location>(relaxed = true)
-        every { line18.sourceName() } returns "OrderPricingPipeline.kt"
-        every { line18.lineNumber() } returns 18
-        val otherFile = mockk<Location>(relaxed = true)
-        every { otherFile.sourceName() } returns "Other.kt"
-        every { otherFile.lineNumber() } returns 16
-
-        val current = userFrame(thread, line = 15, locations = listOf(otherFile, line18, line16))
-        every { current.sourceName() } returns "OrderPricingPipeline.kt"
-        every { current.lineNumber() } returns 15
-
-        val bpReq = mockk<BreakpointRequest>(relaxed = true)
-        val stepOut = mockk<StepRequest>(relaxed = true)
-        every { erm.stepRequests() } returns emptyList()
-        every { erm.createBreakpointRequest(line16) } returns bpReq
-        every { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) } returns stepOut
+        plainStepOver(thread)
 
         session.stepExecution("1", StepAction.STEP_OVER)
 
-        verify { bpReq.addThreadFilter(thread) }
-        verify { bpReq.addCountFilter(1) }
-        verify { bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL) }
-        verify { bpReq.putProperty("smartStep", any()) }
-        verify { bpReq.enable() }
-        verify { stepOut.addCountFilter(1) }
-        verify { stepOut.setSuspendPolicy(EventRequest.SUSPEND_ALL) }
-        verify { stepOut.putProperty("smartStep", any()) }
-        verify { stepOut.enable() }
-        verify(exactly = 0) { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER) }
-        verify(exactly = 1) { erm.createBreakpointRequest(any()) }
-        assertTrue(session.getPoints().breakpoints.isEmpty())
+        verify(exactly = 1) { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER) }
+        verify(exactly = 0) { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) }
+        verify(exactly = 0) { erm.createBreakpointRequest(any()) }
         verify { vm.resume() }
     }
 
     @Test
-    fun `smart step breakpoint reports STEP_HIT and deletes paired STEP_OUT`() {
+    fun `STEP_OVER out of a taken if branch reports the line JDWP stops on`() {
         val thread = suspendedThread()
-        val line16 = userLocation("OrderPricingPipeline.kt", 16, "com.example.app.OrderPricingPipeline", "price")
-        userFrame(thread, line = 15, locations = listOf(line16))
-
-        val bpReq = mockk<BreakpointRequest>(relaxed = true)
-        val stepOut = mockk<StepRequest>(relaxed = true)
-        rememberSmartStepProperties(bpReq, stepOut)
-        every { erm.stepRequests() } returns emptyList()
-        every { erm.createBreakpointRequest(line16) } returns bpReq
-        every { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) } returns stepOut
-
+        val stepReq = plainStepOver(thread)
         session.stepExecution("1", StepAction.STEP_OVER)
 
-        val event = mockk<BreakpointEvent>(relaxed = true)
-        every { event.request() } returns bpReq
-        every { event.location() } returns line16
-        every { event.thread() } returns thread
-
-        val keepsSuspended = processEvent(event)
-        assertTrue(keepsSuspended)
+        // Paused on line 16 inside `if`; the untaken `else` is line 18 and the next executed
+        // line is 20. The step must report 20, not wait on a breakpoint at 18.
+        val next = stepEvent(
+            thread,
+            stepReq,
+            userLocation("OrderPricingPipeline.kt", 20, "com.example.app.OrderPricingPipeline", "finalizeOrder")
+        )
+        assertTrue(processEvent(next))
 
         val events = session.pollEvents("0").events
         assertEquals(1, events.size)
         assertEquals(EventType.STEP_HIT, events[0].eventType)
-        assertEquals("OrderPricingPipeline.kt:16", events[0].location)
-        verify { erm.deleteEventRequest(stepOut) }
-        verify(exactly = 0) { erm.deleteEventRequest(bpReq) }
+        assertEquals("OrderPricingPipeline.kt:20", events[0].location)
+        verify(exactly = 0) { erm.createBreakpointRequest(any()) }
     }
 
     @Test
-    fun `smart step STEP_OUT reports STEP_HIT and deletes the temporary breakpoint`() {
+    fun `STEP_OVER at the end of a loop body reports the loop header`() {
         val thread = suspendedThread()
-        val line16 = userLocation("OrderPricingPipeline.kt", 16, "com.example.app.OrderPricingPipeline", "price")
-        userFrame(thread, line = 15, locations = listOf(line16))
-
-        val bpReq = mockk<BreakpointRequest>(relaxed = true)
-        val stepOut = mockk<StepRequest>(relaxed = true)
-        rememberSmartStepProperties(bpReq, stepOut)
-        every { erm.stepRequests() } returns emptyList()
-        every { erm.createBreakpointRequest(line16) } returns bpReq
-        every { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) } returns stepOut
-
+        val stepReq = plainStepOver(thread)
         session.stepExecution("1", StepAction.STEP_OVER)
 
-        val caller = userLocation("CheckoutActivity.kt", 40, "com.example.app.CheckoutActivity", "onCreate")
-        val event = mockk<StepEvent>(relaxed = true)
-        every { event.request() } returns stepOut
-        every { event.location() } returns caller
-        every { event.thread() } returns thread
-
-        assertTrue(processEvent(event))
+        // The next executed line is the loop header, which is above the current line.
+        val header = stepEvent(
+            thread,
+            stepReq,
+            userLocation("OrderPricingPipeline.kt", 12, "com.example.app.OrderPricingPipeline", "price")
+        )
+        assertTrue(processEvent(header))
 
         val events = session.pollEvents("0").events
         assertEquals(1, events.size)
-        assertEquals(EventType.STEP_HIT, events[0].eventType)
-        assertEquals("CheckoutActivity.kt:40", events[0].location)
-        verify { erm.deleteEventRequest(bpReq) }
-        verify(exactly = 0) { erm.deleteEventRequest(stepOut) }
+        assertEquals("OrderPricingPipeline.kt:12", events[0].location)
+        verify(exactly = 0) { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) }
     }
 
     @Test
-    fun `fallback STEP_OVER skips synthetic frames then reports the user line`() {
+    fun `STEP_OVER skips synthetic frames then reports the user line`() {
         val thread = suspendedThread()
-        every { thread.isSuspended } returns false
         val stepReq = plainStepOver(thread)
 
         session.stepExecution("1", StepAction.STEP_OVER)
@@ -3290,34 +3242,8 @@ class JdiSessionTest {
     }
 
     @Test
-    fun `allLineLocations failure falls back to a single STEP_OVER`() {
-        val thread = suspendedThread()
-        val method = mockk<Method>(relaxed = true)
-        every { method.allLineLocations() } throws AbsentInformationException()
-        val current = mockk<Location>(relaxed = true)
-        every { current.sourceName() } returns "OrderPricingPipeline.kt"
-        every { current.lineNumber() } returns 15
-        every { current.method() } returns method
-        val frame = mockk<StackFrame>(relaxed = true)
-        every { frame.location() } returns current
-        every { thread.frame(0) } returns frame
-
-        val stepReq = mockk<StepRequest>(relaxed = true)
-        every { erm.stepRequests() } returns emptyList()
-        every { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER) } returns stepReq
-
-        session.stepExecution("1", StepAction.STEP_OVER)
-
-        verify(exactly = 1) { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER) }
-        verify(exactly = 0) { erm.createBreakpointRequest(any()) }
-        verify(exactly = 0) { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) }
-        verify { vm.resume() }
-    }
-
-    @Test
     fun `repeated synthetic STEP_OVER frames eventually report STEP_HIT`() {
         val thread = suspendedThread()
-        every { thread.isSuspended } returns false
         val stepReq = plainStepOver(thread)
         session.stepExecution("1", StepAction.STEP_OVER)
 
@@ -3346,33 +3272,6 @@ class JdiSessionTest {
         assertEquals("fake.kt:1", events[0].location)
     }
 
-    @Test
-    fun `STEP_OVER on the last user line arms only STEP_OUT`() {
-        val thread = suspendedThread()
-        val earlier = mockk<Location>(relaxed = true)
-        every { earlier.sourceName() } returns "OrderPricingPipeline.kt"
-        every { earlier.lineNumber() } returns 10
-        val syntheticLater = mockk<Location>(relaxed = true)
-        every { syntheticLater.sourceName() } returns "fake.kt"
-        every { syntheticLater.lineNumber() } returns 1
-        userFrame(thread, line = 15, locations = listOf(earlier, syntheticLater))
-
-        val stepOut = mockk<StepRequest>(relaxed = true)
-        every { erm.stepRequests() } returns emptyList()
-        every { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) } returns stepOut
-
-        session.stepExecution("1", StepAction.STEP_OVER)
-
-        verify(exactly = 1) { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT) }
-        verify(exactly = 0) { erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER) }
-        verify(exactly = 0) { erm.createBreakpointRequest(any()) }
-        verify { stepOut.setSuspendPolicy(EventRequest.SUSPEND_ALL) }
-        verify { stepOut.addCountFilter(1) }
-        verify { stepOut.enable() }
-        assertTrue(session.getPoints().breakpoints.isEmpty())
-        verify { vm.resume() }
-    }
-
     private fun suspendedThread(): ThreadReference {
         val thread = mockk<ThreadReference>(relaxed = true)
         every { thread.uniqueID() } returns 1L
@@ -3381,19 +3280,6 @@ class JdiSessionTest {
         every { thread.frames() } returns emptyList()
         every { vm.allThreads() } returns listOf(thread)
         return thread
-    }
-
-    private fun userFrame(thread: ThreadReference, line: Int, locations: List<Location>): Location {
-        val method = mockk<Method>(relaxed = true)
-        val current = mockk<Location>(relaxed = true)
-        every { current.sourceName() } returns "OrderPricingPipeline.kt"
-        every { current.lineNumber() } returns line
-        every { current.method() } returns method
-        every { method.allLineLocations() } returns listOf(current) + locations
-        val frame = mockk<StackFrame>(relaxed = true)
-        every { frame.location() } returns current
-        every { thread.frame(0) } returns frame
-        return current
     }
 
     private fun userLocation(
@@ -3414,16 +3300,6 @@ class JdiSessionTest {
         every { method.name() } returns methodName
         every { method.isSynthetic } returns synthetic
         return location
-    }
-
-    private fun rememberSmartStepProperties(vararg requests: EventRequest) {
-        val props = mutableMapOf<Any, Any?>()
-        requests.forEach { request ->
-            every { request.putProperty(any(), any()) } answers {
-                props[firstArg()] = secondArg()
-            }
-            every { request.getProperty(any()) } answers { props[firstArg()] }
-        }
     }
 
     private fun plainStepOver(thread: ThreadReference): StepRequest {
