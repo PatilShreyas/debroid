@@ -936,12 +936,11 @@ class JdiSession(
         if (!thread.isSuspended) {
             throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread $threadId is not suspended.")
         }
-        val frame = thread.frame(0)
-        val visVar = frame.visibleVariables().find { it.name() == varName }
-            ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "Variable $varName not found in current local scope.")
+        val initialFrame = getTopFrame(thread, threadId)
+        val initialVar = findVisibleVariable(initialFrame, varName)
 
         val newJdiVal: Value? = try {
-            JdiExpressionEvaluator.evaluate(newValueStr, vm, frame)
+            JdiExpressionEvaluator.evaluate(newValueStr, vm, initialFrame)
         } catch (e: Exception) {
             throw DebugException(
                 ErrorCode.EVALUATION_FAILED,
@@ -949,42 +948,316 @@ class JdiSession(
             )
         }
 
-        // Type checking and assignment
-        val targetType = visVar.type()
-        val finalJdiVal = if (newJdiVal == null) {
+        val targetType = resolveVariableType(initialVar)
+        val finalJdiVal = coerceValueForAssignment(newJdiVal, targetType, thread)
+
+        // Re-fetch the top frame and local variable right before setValue because any
+        // method invocation during expression evaluation or auto-boxing invalidates prior StackFrames.
+        val activeFrame = getTopFrame(thread, threadId)
+        val activeVar = findVisibleVariable(activeFrame, varName)
+        applyVariableValue(activeFrame, activeVar, finalJdiVal, newJdiVal, targetType, threadId)
+
+        return formatValue(varName, finalJdiVal)
+    }
+
+    private fun getTopFrame(thread: ThreadReference, threadId: String): StackFrame {
+        return try {
+            thread.frame(0)
+        } catch (e: IncompatibleThreadStateException) {
+            throw DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread $threadId is not suspended.")
+        } catch (e: IndexOutOfBoundsException) {
+            throw DebugException(ErrorCode.EVALUATION_FAILED, "No stack frame available on thread $threadId.")
+        }
+    }
+
+    private fun findVisibleVariable(frame: StackFrame, varName: String): com.sun.jdi.LocalVariable {
+        val visibleVars = try {
+            frame.visibleVariables()
+        } catch (e: Exception) {
+            throw when (e) {
+                is com.sun.jdi.AbsentInformationException -> DebugException(
+                    ErrorCode.EVALUATION_FAILED,
+                    "Local variable information is not available in current frame."
+                )
+                is com.sun.jdi.InvalidStackFrameException -> DebugException(
+                    ErrorCode.THREAD_NOT_SUSPENDED,
+                    "Stack frame is no longer valid."
+                )
+                else -> e
+            }
+        }
+        return visibleVars.find { it.name() == varName }
+            ?: throw DebugException(ErrorCode.INTERNAL_ERROR, "Variable $varName not found in current local scope.")
+    }
+
+    private fun resolveVariableType(variable: com.sun.jdi.LocalVariable): com.sun.jdi.Type {
+        return try {
+            variable.type()
+        } catch (e: com.sun.jdi.ClassNotLoadedException) {
+            throw DebugException(
+                ErrorCode.EVALUATION_FAILED,
+                "Target variable type '${variable.typeName()}' is not loaded: ${e.message}"
+            )
+        }
+    }
+
+    @Suppress("LongParameterList")
+    private fun applyVariableValue(
+        frame: StackFrame,
+        variable: com.sun.jdi.LocalVariable,
+        finalJdiVal: Value?,
+        originalVal: Value?,
+        targetType: com.sun.jdi.Type,
+        threadId: String
+    ) {
+        try {
+            frame.setValue(variable, finalJdiVal)
+        } catch (e: Exception) {
+            throw when (e) {
+                is IncompatibleThreadStateException,
+                is com.sun.jdi.InvalidStackFrameException ->
+                    DebugException(ErrorCode.THREAD_NOT_SUSPENDED, "Thread $threadId is not suspended.")
+                is com.sun.jdi.InvalidTypeException ->
+                    typeMismatchError(originalVal?.type()?.name() ?: "null", targetType.name())
+                is com.sun.jdi.ClassNotLoadedException ->
+                    DebugException(
+                        ErrorCode.EVALUATION_FAILED,
+                        "Target variable type '${targetType.name()}' is not loaded: ${e.message}"
+                    )
+                else -> e
+            }
+        }
+    }
+
+    private fun coerceValueForAssignment(
+        newJdiVal: Value?,
+        targetType: com.sun.jdi.Type,
+        thread: ThreadReference
+    ): Value? {
+        if (newJdiVal == null) {
             if (targetType is PrimitiveType) {
                 throw DebugException(
                     ErrorCode.EVALUATION_FAILED,
                     "Type mismatch: Cannot assign null to primitive ${targetType.name()}"
                 )
             }
-            null
-        } else if (newJdiVal.type() != targetType) {
-            // Attempt primitive coercion (e.g., float evaluated from '88.88' to target double)
-            if (newJdiVal is PrimitiveValue && targetType is PrimitiveType) {
-                when (targetType.name()) {
-                    "int" -> vm.mirrorOf(newJdiVal.intValue())
-                    "long" -> vm.mirrorOf(newJdiVal.longValue())
-                    "double" -> vm.mirrorOf(newJdiVal.doubleValue())
-                    "float" -> vm.mirrorOf(newJdiVal.floatValue())
-                    "boolean" -> vm.mirrorOf(newJdiVal.booleanValue())
-                    "short" -> vm.mirrorOf(newJdiVal.shortValue())
-                    "byte" -> vm.mirrorOf(newJdiVal.byteValue())
-                    "char" -> vm.mirrorOf(newJdiVal.charValue())
-                    else -> newJdiVal
-                }
-            } else {
-                throw DebugException(
-                    ErrorCode.EVALUATION_FAILED,
-                    "Type mismatch: Cannot assign ${newJdiVal.type().name()} to ${targetType.name()}"
-                )
-            }
-        } else {
-            newJdiVal
+            return null
         }
 
-        frame.setValue(visVar, finalJdiVal)
-        return formatValue(varName, finalJdiVal)
+        val valueType = newJdiVal.type()
+        if (valueType == targetType || valueType.name() == targetType.name()) {
+            return newJdiVal
+        }
+
+        return when {
+            targetType is PrimitiveType && newJdiVal is PrimitiveValue ->
+                coercePrimitive(newJdiVal, targetType.name(), valueType.name(), targetType.name())
+            targetType is PrimitiveType && newJdiVal is ObjectReference ->
+                unboxAndCoerce(newJdiVal, targetType)
+            newJdiVal is PrimitiveValue ->
+                autoboxPrimitive(newJdiVal, targetType, thread)
+            newJdiVal is ObjectReference ->
+                validateReferenceAssignment(newJdiVal, targetType)
+            else -> throw typeMismatchError(valueType.name(), targetType.name())
+        }
+    }
+
+    private fun coercePrimitive(
+        value: PrimitiveValue,
+        targetPrimName: String,
+        sourceTypeName: String = value.type().name(),
+        targetTypeName: String = targetPrimName
+    ): PrimitiveValue {
+        val actualPrimName = value.type().name()
+        val isSourceBoolean = value is com.sun.jdi.BooleanValue || actualPrimName == "boolean"
+        val isTargetBoolean = targetPrimName == "boolean"
+        val isSourceChar = value is com.sun.jdi.CharValue || actualPrimName == "char"
+        val isTargetChar = targetPrimName == "char"
+        if (isSourceBoolean != isTargetBoolean || isSourceChar != isTargetChar) {
+            throw typeMismatchError(sourceTypeName, targetTypeName)
+        }
+        if (actualPrimName == targetPrimName) {
+            return value
+        }
+        return coercePrimitiveByTargetName(value, targetPrimName)
+            ?: throw typeMismatchError(sourceTypeName, targetTypeName)
+    }
+
+    private fun coercePrimitiveByTargetName(value: PrimitiveValue, targetTypeName: String): PrimitiveValue? {
+        return when (targetTypeName) {
+            "int" -> vm.mirrorOf(value.intValue())
+            "long" -> vm.mirrorOf(value.longValue())
+            "double" -> vm.mirrorOf(value.doubleValue())
+            "float" -> vm.mirrorOf(value.floatValue())
+            "boolean" -> vm.mirrorOf(value.booleanValue())
+            "short" -> vm.mirrorOf(value.shortValue())
+            "byte" -> vm.mirrorOf(value.byteValue())
+            "char" -> vm.mirrorOf(value.charValue())
+            else -> null
+        }
+    }
+
+    private fun unboxAndCoerce(objRef: ObjectReference, targetType: PrimitiveType): PrimitiveValue {
+        val refType = resolveObjectReferenceType(objRef)
+        val sourceTypeName = refType.name().ifEmpty { objRef.type().name() }
+        if (sourceTypeName !in wrapperToPrimitive.keys) {
+            throw typeMismatchError(sourceTypeName, targetType.name())
+        }
+        val valueField = runCatching { refType.fieldByName("value") }.getOrNull()
+        val unboxed = valueField?.let { runCatching { objRef.getValue(it) }.getOrNull() as? PrimitiveValue }
+            ?: throw typeMismatchError(sourceTypeName, targetType.name())
+
+        return coercePrimitive(unboxed, targetType.name(), sourceTypeName, targetType.name())
+    }
+
+    private fun autoboxPrimitive(
+        value: PrimitiveValue,
+        targetType: com.sun.jdi.Type,
+        thread: ThreadReference
+    ): ObjectReference {
+        val sourceTypeName = value.type().name()
+        val targetTypeName = targetType.name()
+        val targetPrimName = wrapperToPrimitive[targetTypeName]
+
+        if (targetPrimName != null) {
+            val coercedPrim = coercePrimitive(value, targetPrimName, sourceTypeName, targetTypeName)
+            return boxPrimitiveIntoWrapper(coercedPrim, targetTypeName, sourceTypeName, targetTypeName, thread)
+        }
+
+        val canUseNaturalWrapper = targetTypeName in universalWrapperSupertypes ||
+            (targetTypeName == "java.lang.Number" && sourceTypeName in numericPrimitiveNames)
+        val naturalWrapper = if (canUseNaturalWrapper) primitiveToWrapper[sourceTypeName] else null
+        if (naturalWrapper != null) {
+            return boxPrimitiveIntoWrapper(value, naturalWrapper, sourceTypeName, targetTypeName, thread)
+        }
+
+        throw typeMismatchError(sourceTypeName, targetTypeName)
+    }
+
+    private fun boxPrimitiveIntoWrapper(
+        primitiveVal: PrimitiveValue,
+        wrapperClassName: String,
+        sourceTypeName: String,
+        targetTypeName: String,
+        thread: ThreadReference
+    ): ObjectReference {
+        val (wrapperClass, valueOfMethod) = resolveWrapperValueOf(wrapperClassName, sourceTypeName)
+        val boxedResult = try {
+            wrapperClass.invokeMethod(
+                thread,
+                valueOfMethod,
+                listOf(primitiveVal),
+                com.sun.jdi.ClassType.INVOKE_SINGLE_THREADED
+            )
+        } catch (e: Exception) {
+            throw DebugException(
+                ErrorCode.EVALUATION_FAILED,
+                "Failed to box primitive value into $wrapperClassName: ${e.message}"
+            )
+        }
+        return boxedResult as? ObjectReference ?: throw typeMismatchError(sourceTypeName, targetTypeName)
+    }
+
+    private fun resolveWrapperValueOf(
+        wrapperClassName: String,
+        sourceTypeName: String
+    ): Pair<com.sun.jdi.ClassType, com.sun.jdi.Method> {
+        val descriptor = wrapperToDescriptor[wrapperClassName]
+        val expectedPrimType = wrapperToPrimitive[wrapperClassName]
+        val wrapperClass = vm.classesByName(wrapperClassName)
+            .filterIsInstance<com.sun.jdi.ClassType>()
+            .firstOrNull()
+        val signature = descriptor?.let { "($it)L${wrapperClassName.replace('.', '/')};" }
+        val valueOfMethod = wrapperClass?.let { cls ->
+            signature?.let { sig -> cls.methodsByName("valueOf", sig).firstOrNull() }
+                ?: cls.methodsByName("valueOf").firstOrNull { method ->
+                    val argTypes = method.argumentTypeNames()
+                    argTypes.size == 1 && (expectedPrimType == null || argTypes[0] == expectedPrimType)
+                }
+        }
+        if (wrapperClass == null || valueOfMethod == null) {
+            throw DebugException(
+                ErrorCode.EVALUATION_FAILED,
+                "Cannot auto-box $sourceTypeName into $wrapperClassName: class or valueOf method not loaded in VM"
+            )
+        }
+        return wrapperClass to valueOfMethod
+    }
+
+    private fun validateReferenceAssignment(objRef: ObjectReference, targetType: com.sun.jdi.Type): ObjectReference {
+        val refType = resolveObjectReferenceType(objRef)
+        if (isReferenceAssignable(refType, targetType)) {
+            return objRef
+        }
+        val sourceName = refType.name().ifEmpty { objRef.type().name() }
+        throw typeMismatchError(sourceName, targetType.name())
+    }
+
+    private fun resolveObjectReferenceType(objRef: ObjectReference): ReferenceType {
+        val directRef = runCatching { objRef.referenceType() }.getOrNull()
+        if (directRef != null && directRef.name().isNotEmpty()) {
+            return directRef
+        }
+        return (runCatching { objRef.type() }.getOrNull() as? ReferenceType) ?: directRef
+            ?: throw DebugException(ErrorCode.EVALUATION_FAILED, "Unable to resolve reference type for $objRef")
+    }
+
+    private fun isReferenceAssignable(sourceType: ReferenceType, targetType: com.sun.jdi.Type): Boolean {
+        if (sourceType == targetType || sourceType.name() == targetType.name()) return true
+        if (targetType.name() == "java.lang.Object") return true
+
+        return when (sourceType) {
+            is com.sun.jdi.ClassType -> isClassAssignableTo(sourceType, targetType)
+            is com.sun.jdi.InterfaceType -> isInterfaceAssignableTo(sourceType, targetType)
+            is com.sun.jdi.ArrayType -> isArrayAssignableTo(sourceType, targetType)
+            else -> false
+        }
+    }
+
+    private fun isClassAssignableTo(sourceType: com.sun.jdi.ClassType, targetType: com.sun.jdi.Type): Boolean {
+        var currentClass = runCatching { sourceType.superclass() }.getOrNull()
+        while (currentClass != null) {
+            if (currentClass == targetType || currentClass.name() == targetType.name()) return true
+            currentClass = runCatching { currentClass.superclass() }.getOrNull()
+        }
+
+        if (targetType is com.sun.jdi.ClassType) return false
+
+        val allInterfaces = runCatching { sourceType.allInterfaces() }.getOrDefault(emptyList())
+        if (allInterfaces.isNotEmpty()) {
+            return allInterfaces.any { it == targetType || it.name() == targetType.name() }
+        }
+
+        val directInterfaces = runCatching { sourceType.interfaces() }.getOrDefault(emptyList())
+        return directInterfaces.any { isReferenceAssignable(it, targetType) }
+    }
+
+    private fun isInterfaceAssignableTo(
+        sourceType: com.sun.jdi.InterfaceType,
+        targetType: com.sun.jdi.Type
+    ): Boolean {
+        val superinterfaces = runCatching { sourceType.superinterfaces() }.getOrDefault(emptyList())
+        return superinterfaces.any { isReferenceAssignable(it, targetType) }
+    }
+
+    private fun isArrayAssignableTo(sourceType: com.sun.jdi.ArrayType, targetType: com.sun.jdi.Type): Boolean {
+        val targetName = targetType.name()
+        if (targetName == "java.lang.Cloneable" || targetName == "java.io.Serializable") return true
+        if (targetType is com.sun.jdi.ArrayType) {
+            val sourceComponent = runCatching { sourceType.componentType() }.getOrNull() as? ReferenceType
+            val targetComponent = runCatching { targetType.componentType() }.getOrNull()
+            if (sourceComponent != null && targetComponent != null) {
+                return isReferenceAssignable(sourceComponent, targetComponent)
+            }
+        }
+        return false
+    }
+
+    private fun typeMismatchError(sourceTypeName: String, targetTypeName: String): DebugException {
+        return DebugException(
+            ErrorCode.EVALUATION_FAILED,
+            "Type mismatch: Cannot assign $sourceTypeName to $targetTypeName"
+        )
     }
 
     fun getStackFrames(threadId: String): List<StackFrameInfo> {
@@ -1146,17 +1419,28 @@ class JdiSession(
     ): ObjectInspectionResult {
         val refType = objRef.referenceType()
 
-        val fields = refType.allFields()
-            .filter { f -> fieldsFilter == null || fieldsFilter.contains(f.name()) }
-            .filter { f -> includeStatic || !f.isStatic }
-            .filter { f -> includeInternal || (!f.isSynthetic && !f.name().startsWith("shadow\$_")) }
+        val entries: Map<String, Value?> = if (objRef is ArrayReference) {
+            buildMap {
+                objRef.getValues().forEachIndexed { index, value ->
+                    val key = "[$index]"
+                    if (fieldsFilter == null || fieldsFilter.contains(key)) {
+                        put(key, value)
+                    }
+                }
+            }
+        } else {
+            val fields = refType.allFields()
+                .filter { f -> fieldsFilter == null || fieldsFilter.contains(f.name()) }
+                .filter { f -> includeStatic || !f.isStatic }
+                .filter { f -> includeInternal || (!f.isSynthetic && !f.name().startsWith("shadow\$_")) }
+            objRef.getValues(fields).entries.associate { (f, valRef) -> f.name() to valRef }
+        }
 
-        val fieldValues = objRef.getValues(fields)
         val resultFields = mutableMapOf<String, VariableInfo>()
         val nested = mutableMapOf<String, ObjectInspectionResult>()
 
-        for ((f, valRef) in fieldValues) {
-            resultFields[f.name()] = formatValue(f.name(), valRef)
+        for ((name, valRef) in entries) {
+            resultFields[name] = formatValue(name, valRef)
             if (maxDepth <= 1) continue
             if (valRef !is ObjectReference) continue
 
@@ -1169,7 +1453,7 @@ class JdiSession(
             if (oid in visited) continue // cycle guard
             visited.add(oid)
             try {
-                nested[f.name()] = inspectRecursive(valRef, null, maxDepth - 1, visited, includeStatic, includeInternal)
+                nested[name] = inspectRecursive(valRef, null, maxDepth - 1, visited, includeStatic, includeInternal)
             } catch (e: Exception) {
                 // Best-effort: nested resolvers (e.g. findObjectReference) can recurse over
                 // suspended frames and may throw on transient state; silently skip such
@@ -1755,6 +2039,37 @@ class JdiSession(
             "java.lang.Byte",
             "java.lang.Character",
             "java.lang.Short"
+        )
+
+        private val wrapperToPrimitive = mapOf(
+            "java.lang.Integer" to "int",
+            "java.lang.Long" to "long",
+            "java.lang.Double" to "double",
+            "java.lang.Float" to "float",
+            "java.lang.Short" to "short",
+            "java.lang.Byte" to "byte",
+            "java.lang.Character" to "char",
+            "java.lang.Boolean" to "boolean"
+        )
+
+        private val primitiveToWrapper = wrapperToPrimitive.entries.associate { (k, v) -> v to k }
+
+        private val wrapperToDescriptor = mapOf(
+            "java.lang.Integer" to "I",
+            "java.lang.Long" to "J",
+            "java.lang.Double" to "D",
+            "java.lang.Float" to "F",
+            "java.lang.Short" to "S",
+            "java.lang.Byte" to "B",
+            "java.lang.Character" to "C",
+            "java.lang.Boolean" to "Z"
+        )
+
+        private val numericPrimitiveNames = setOf("int", "long", "double", "float", "short", "byte")
+        private val universalWrapperSupertypes = setOf(
+            "java.lang.Object",
+            "java.io.Serializable",
+            "java.lang.Comparable"
         )
     }
 }

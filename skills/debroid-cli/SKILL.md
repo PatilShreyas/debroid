@@ -91,8 +91,9 @@ debroid pause-state <session_id> <thread_id>
 ```
 
 **Advanced Inspections:**
-- Drill into complex objects: `debroid inspect <session_id> <object_id> [OPTIONS]`
-  - `--max-depth N` recurses N levels deep into object fields. Responses include a `nested` map keyed by field name. Cycles are guarded automatically.
+- Drill into complex objects or arrays: `debroid inspect <session_id> <object_id> [OPTIONS]`
+  - `--max-depth N` recurses N levels deep into object fields and array elements. Responses include a `nested` map keyed by field name (or array index `"[0]"`, `"[1]"`, ...). Cycles are guarded automatically.
+  - **Array Inspection**: Inspecting an array `objectId` (or a collection's backing array) populates `fields` (and `nested` when `--max-depth > 1`) with indexed keys (`"[0]"`, `"[1]"`, ...).
   - **Important Filter Behavior**: By default, `inspect` explicitly filters out `static` fields, `synthetic` fields, and ART-specific internal fields (`shadow$_*`). It also prevents redundant recursion into well-known immutable terminal types (like `java.lang.String` and Enums) to save your context tokens.
   - `--include-static` and `--include-internal` can be passed to bypass these filters if you absolutely need to inspect Dalvik internals or static class constants.
 - Coroutine state: `debroid coroutine <session_id> <continuation_id>`
@@ -207,6 +208,6 @@ Here is the full list of commands and their signatures (note: all commands suppo
 | `poll` | `debroid poll <session_id> [cursor=0] [--with-stacktrace] [--pretty]` | Polls for asynchronous debugger events |
 | `frames` | `debroid frames <session_id> <thread_id> [--pretty]` | Retrieves thread stack frames |
 | `coroutine` | `debroid coroutine <session_id> <continuation_id> [--pretty]` | Retrieves locals from a Continuation object |
-| `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>] [--pretty]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`) |
+| `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>] [--include-static] [--include-internal] [--pretty]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`; excludes static and `$` internal fields by default) |
 | `step` | `debroid step <session_id> <thread_id> <action> [--pretty]` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
 | `update` | `debroid update [--check-only] [--pretty]` | Checks for CLI updates or performs an in-place self-update to the latest release |
