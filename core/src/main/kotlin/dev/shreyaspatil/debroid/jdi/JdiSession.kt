@@ -78,6 +78,9 @@ class JdiSession(
     private val classPrepareRequest = AtomicReference<ClassPrepareRequest?>(null)
     private val activeExclusions = AtomicReference<Set<String>>(emptySet())
 
+    // Synthetic Kotlin frames skipped so far by the current STEP_OVER on each thread.
+    private val stepOverSyntheticContinuations = ConcurrentHashMap<Long, Int>()
+
     private data class DeferredBreakpoint(
         val id: String,
         val file: String,
@@ -577,27 +580,16 @@ class JdiSession(
 
         when (action) {
             StepAction.STEP_OVER -> {
-                val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER)
-                // Use SUSPEND_ALL and resumeAll() to keep thread state consistent with breakpoints.
-                // If only the stepping thread is resumed while others stay suspended, Android ART
-                // can deadlock or freeze in JDWP event processing.
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-                stepReq.addCountFilter(1)
-                stepReq.enable()
+                stepOverSyntheticContinuations.remove(thread.uniqueID())
+                armLineStep(thread, StepRequest.STEP_OVER)
                 resumeAll()
             }
             StepAction.STEP_INTO -> {
-                val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_INTO)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-                stepReq.addCountFilter(1)
-                stepReq.enable()
+                armLineStep(thread, StepRequest.STEP_INTO)
                 resumeAll()
             }
             StepAction.STEP_OUT -> {
-                val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, StepRequest.STEP_OUT)
-                stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-                stepReq.addCountFilter(1)
-                stepReq.enable()
+                armLineStep(thread, StepRequest.STEP_OUT)
                 resumeAll()
             }
             StepAction.RESUME_THREAD -> {
@@ -610,6 +602,54 @@ class JdiSession(
                 resumeAll()
             }
         }
+    }
+
+    private fun armLineStep(thread: ThreadReference, depth: Int) {
+        val erm = vm.eventRequestManager()
+        erm.stepRequests().filter { it.thread() == thread }.forEach { request ->
+            runCatching { erm.deleteEventRequest(request) }
+        }
+        val stepReq = erm.createStepRequest(thread, StepRequest.STEP_LINE, depth)
+        // Use SUSPEND_ALL and resumeAll() to keep thread state consistent with breakpoints.
+        // If only the stepping thread is resumed while others stay suspended, Android ART
+        // can deadlock or freeze in JDWP event processing.
+        stepReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
+        stepReq.addCountFilter(1)
+        stepReq.enable()
+    }
+
+    private fun continuePastSyntheticFrame(thread: ThreadReference, location: Location): Boolean {
+        val seen = stepOverSyntheticContinuations.merge(thread.uniqueID(), 1, Int::plus) ?: 1
+        if (seen >= MAX_SYNTHETIC_STEP_OVERS) {
+            stepOverSyntheticContinuations.remove(thread.uniqueID())
+            pushStepHit(location, thread)
+            return true
+        }
+        armLineStep(thread, StepRequest.STEP_OVER)
+        return false
+    }
+
+    private fun isSyntheticStop(location: Location): Boolean {
+        val sourceName = runCatching { location.sourceName() }.getOrNull()
+        if (sourceName == SYNTHETIC_KOTLIN_SOURCE) return true
+        val typeName = runCatching { location.declaringType().name() }.getOrNull() ?: return false
+        if (typeName.contains(INLINED_MARKER)) return true
+        val method = runCatching { location.method() }.getOrNull() ?: return false
+        return method.name() == LAMBDA_INVOKE && method.isSynthetic && typeName.contains('$')
+    }
+
+    private fun pushStepHit(loc: Location, thread: ThreadReference) {
+        pushEvent(
+            DebugEventPayload(
+                eventType = EventType.STEP_HIT,
+                sessionId = sessionId,
+                threadId = thread.uniqueID().toString(),
+                threadName = thread.name(),
+                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
+                className = loc.declaringType().name(),
+                stacktrace = getFramesSafely(thread)
+            )
+        )
     }
 
     /**
@@ -1490,14 +1530,8 @@ class JdiSession(
                 handleClassPrepareEvent(event)
                 false
             }
-            is BreakpointEvent -> {
-                handleBreakpointEvent(event)
-                true
-            }
-            is StepEvent -> {
-                handleStepEvent(event)
-                true
-            }
+            is BreakpointEvent -> handleBreakpointEvent(event)
+            is StepEvent -> handleStepEvent(event)
             is ExceptionEvent -> {
                 handleExceptionEvent(event)
                 true
@@ -1621,10 +1655,11 @@ class JdiSession(
         }
     }
 
-    private fun handleBreakpointEvent(event: BreakpointEvent) {
+    private fun handleBreakpointEvent(event: BreakpointEvent): Boolean {
+        val request = event.request()
         val loc = event.location()
-        val bpId = (event.request()?.getProperty(PROP_BREAKPOINT_ID) as? String)
-            ?: jdiBreakpointRequests.entries.firstOrNull { it.value.contains(event.request()) }?.key
+        val bpId = (request?.getProperty(PROP_BREAKPOINT_ID) as? String)
+            ?: jdiBreakpointRequests.entries.firstOrNull { it.value.contains(request) }?.key
         pushEvent(
             DebugEventPayload(
                 eventType = EventType.BREAKPOINT_HIT,
@@ -1637,21 +1672,20 @@ class JdiSession(
                 stacktrace = getFramesSafely(event.thread())
             )
         )
+        return true
     }
 
-    private fun handleStepEvent(event: StepEvent) {
-        val loc = event.location()
-        pushEvent(
-            DebugEventPayload(
-                eventType = EventType.STEP_HIT,
-                sessionId = sessionId,
-                threadId = event.thread().uniqueID().toString(),
-                threadName = event.thread().name(),
-                location = "${safeSourceName(loc)}:${loc.lineNumber()}",
-                className = loc.declaringType().name(),
-                stacktrace = getFramesSafely(event.thread())
-            )
-        )
+    private fun handleStepEvent(event: StepEvent): Boolean {
+        val request = event.request()
+        val depth = (request as? StepRequest)?.depth()
+        if (depth == StepRequest.STEP_OVER && isSyntheticStop(event.location())) {
+            return continuePastSyntheticFrame(event.thread(), event.location())
+        }
+        if (depth == StepRequest.STEP_OVER) {
+            stepOverSyntheticContinuations.remove(event.thread().uniqueID())
+        }
+        pushStepHit(event.location(), event.thread())
+        return true
     }
 
     private fun handleExceptionEvent(event: ExceptionEvent) {
@@ -1747,6 +1781,7 @@ class JdiSession(
         exceptionRequests.clear()
         watchpointRequests.clear()
         classPrepareRequest.set(null)
+        stepOverSyntheticContinuations.clear()
     }
 
     /**
@@ -1828,6 +1863,10 @@ class JdiSession(
         private const val MAX_STALLED_RESUME_ATTEMPTS = 5
         private const val PROP_BREAKPOINT_ID = "breakpointId"
         private const val PROP_CLASS_NAME = "className"
+        private const val SYNTHETIC_KOTLIN_SOURCE = "fake.kt"
+        private const val INLINED_MARKER = "\$\$inlined"
+        private const val LAMBDA_INVOKE = "invoke"
+        private const val MAX_SYNTHETIC_STEP_OVERS = 16
 
         private val frameworkExclusionPatterns = listOf(
             "android.*",
