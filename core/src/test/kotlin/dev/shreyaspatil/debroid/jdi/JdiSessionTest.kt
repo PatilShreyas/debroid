@@ -1787,22 +1787,28 @@ class JdiSessionTest {
     }
 
     @Test
-    fun `setBreakpoint midway on already loaded class binds immediately and never arms ClassPrepareRequest`() {
+    fun `setBreakpoint on loaded class binds immediately and keeps ClassPrepareRequest armed`() {
         val refType = mockk<ReferenceType>(relaxed = true)
         val location = mockk<Location>(relaxed = true)
         val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
 
         every { refType.name() } returns "com.example.MainActivity"
         every { refType.sourceName() } returns "MainActivity.kt"
         every { refType.locationsOfLine(15) } returns listOf(location)
         every { vm.allClasses() } returns listOf(refType)
         every { erm.createBreakpointRequest(location) } returns bpReq
+        every { erm.createClassPrepareRequest() } returns classPrepReq
 
         val info = session.setBreakpoint(file = "MainActivity.kt", line = 15)
 
         assertTrue(info.verified)
         verify(exactly = 1) { bpReq.enable() }
-        verify(exactly = 0) { erm.createClassPrepareRequest() }
+        verify(exactly = 1) { erm.createClassPrepareRequest() }
+
+        assertTrue(session.removeBreakpoint(info.id))
+        verify(exactly = 1) { erm.deleteEventRequest(bpReq) }
+        verify(exactly = 1) { erm.deleteEventRequest(classPrepReq) }
     }
 
     @Test
@@ -1902,6 +1908,231 @@ class JdiSessionTest {
         verify(exactly = 1) { erm.createBreakpointRequest(loc) }
         verify { bpReq.putProperty("breakpointId", info.id) }
         verify { bpReq.enable() }
+    }
+
+    @Test
+    fun `deferred breakpoint binds to both outer class and subsequently prepared inner lambda class on same line`() {
+        every { vm.allClasses() } returns emptyList()
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val info = session.setBreakpoint(file = "MainActivity.kt", line = 42, packageName = "com.example.app")
+        assertFalse(info.verified)
+
+        val outerClass = mockk<ReferenceType>(relaxed = true)
+        val outerLoc = mockk<Location>(relaxed = true)
+        val outerBpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { outerClass.name() } returns "com.example.app.MainActivity"
+        every { outerClass.sourceName() } returns "MainActivity.kt"
+        every { outerClass.locationsOfLine(42) } returns listOf(outerLoc)
+        every { outerBpReq.location() } returns outerLoc
+        every { erm.createBreakpointRequest(outerLoc) } returns outerBpReq
+
+        val innerLambdaClass = mockk<ReferenceType>(relaxed = true)
+        val innerLoc = mockk<Location>(relaxed = true)
+        val innerBpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { innerLambdaClass.name() } returns "com.example.app.MainActivity\$onCreate\$1"
+        every { innerLambdaClass.sourceName() } returns "MainActivity.kt"
+        every { innerLambdaClass.locationsOfLine(42) } returns listOf(innerLoc)
+        every { innerBpReq.location() } returns innerLoc
+        every { erm.createBreakpointRequest(innerLoc) } returns innerBpReq
+
+        val handleClassPrep = JdiSession::class.java.getDeclaredMethod(
+            "handleClassPrepareEvent",
+            ClassPrepareEvent::class.java
+        )
+        handleClassPrep.isAccessible = true
+
+        val outerPrepEvent = mockk<ClassPrepareEvent>(relaxed = true)
+        every { outerPrepEvent.referenceType() } returns outerClass
+        handleClassPrep.invoke(session, outerPrepEvent)
+
+        assertTrue(session.getPoints().breakpoints.first { it.id == info.id }.verified)
+        verify(exactly = 1) { erm.createBreakpointRequest(outerLoc) }
+        verify(exactly = 0) { erm.deleteEventRequest(classPrepReq) }
+
+        val innerPrepEvent = mockk<ClassPrepareEvent>(relaxed = true)
+        every { innerPrepEvent.referenceType() } returns innerLambdaClass
+        handleClassPrep.invoke(session, innerPrepEvent)
+
+        verify(exactly = 1) { erm.createBreakpointRequest(innerLoc) }
+        verify { innerBpReq.putProperty("breakpointId", info.id) }
+        verify { innerBpReq.enable() }
+
+        // Duplicate class prepare event for the same location should not create a duplicate BreakpointRequest
+        handleClassPrep.invoke(session, innerPrepEvent)
+        verify(exactly = 1) { erm.createBreakpointRequest(innerLoc) }
+
+        // Removing the breakpoint should delete both requests and disarm ClassPrepareRequest
+        assertTrue(session.removeBreakpoint(info.id))
+        verify(exactly = 1) { erm.deleteEventRequest(outerBpReq) }
+        verify(exactly = 1) { erm.deleteEventRequest(innerBpReq) }
+        verify(exactly = 1) { erm.deleteEventRequest(classPrepReq) }
+    }
+
+    @Test
+    fun `already loaded outer class breakpoint also binds to inner lambda class prepared later on same line`() {
+        val outerClass = mockk<ReferenceType>(relaxed = true)
+        val outerLoc = mockk<Location>(relaxed = true)
+        val outerBpReq = mockk<BreakpointRequest>(relaxed = true)
+        val classPrepReq = mockk<ClassPrepareRequest>(relaxed = true)
+
+        every { outerClass.name() } returns "com.example.app.OrderScreenKt"
+        every { outerClass.sourceName() } returns "OrderScreen.kt"
+        every { outerClass.locationsOfLine(88) } returns listOf(outerLoc)
+        every { outerBpReq.location() } returns outerLoc
+        every { vm.allClasses() } returns listOf(outerClass)
+        every { erm.createBreakpointRequest(outerLoc) } returns outerBpReq
+        every { erm.createClassPrepareRequest() } returns classPrepReq
+
+        val info = session.setBreakpoint(file = "OrderScreen.kt", line = 88)
+        assertTrue(info.verified)
+        verify(exactly = 1) { erm.createBreakpointRequest(outerLoc) }
+
+        val lambdaClass = mockk<ReferenceType>(relaxed = true)
+        val lambdaLoc = mockk<Location>(relaxed = true)
+        val lambdaBpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { lambdaClass.name() } returns "com.example.app.OrderScreenKt\$OrderScreen\$2\$1"
+        every { lambdaClass.sourceName() } returns "OrderScreen.kt"
+        every { lambdaClass.locationsOfLine(88) } returns listOf(lambdaLoc)
+        every { lambdaBpReq.location() } returns lambdaLoc
+        every { erm.createBreakpointRequest(lambdaLoc) } returns lambdaBpReq
+
+        val handleClassPrep = JdiSession::class.java.getDeclaredMethod(
+            "handleClassPrepareEvent",
+            ClassPrepareEvent::class.java
+        )
+        handleClassPrep.isAccessible = true
+
+        val lambdaPrepEvent = mockk<ClassPrepareEvent>(relaxed = true)
+        every { lambdaPrepEvent.referenceType() } returns lambdaClass
+        handleClassPrep.invoke(session, lambdaPrepEvent)
+
+        verify(exactly = 1) { erm.createBreakpointRequest(lambdaLoc) }
+        verify { lambdaBpReq.putProperty("breakpointId", info.id) }
+
+        assertTrue(session.removeBreakpoint(info.id))
+        verify(exactly = 1) { erm.deleteEventRequest(outerBpReq) }
+        verify(exactly = 1) { erm.deleteEventRequest(lambdaBpReq) }
+    }
+
+    @Test
+    fun `setBreakpoint retries unverified breakpoint when called again with packageName`() {
+        every { vm.allClasses() } returns emptyList()
+        val req1 = mockk<ClassPrepareRequest>(relaxed = true)
+        val req2 = mockk<ClassPrepareRequest>(relaxed = true)
+        every { erm.createClassPrepareRequest() } returns req1 andThen req2
+
+        // Initial call without packageName fails to bind and defers with packageName = null
+        val initial = session.setBreakpoint(file = "ComponentActivity.kt", line = 55)
+        assertFalse(initial.verified)
+        verify { req1.addClassExclusionFilter("androidx.*") }
+
+        // Follow-up call with --package androidx.activity upgrades the existing breakpoint
+        val targetClass = mockk<ReferenceType>(relaxed = true)
+        val targetLoc = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+        every { vm.classesByName("androidx.activity.ComponentActivity") } returns listOf(targetClass)
+        every { vm.classesByName("androidx.activity.ComponentActivityKt") } returns emptyList()
+        every { targetClass.locationsOfLine(55) } returns listOf(targetLoc)
+        every { bpReq.location() } returns targetLoc
+        every { erm.createBreakpointRequest(targetLoc) } returns bpReq
+
+        val retried = session.setBreakpoint(
+            file = "ComponentActivity.kt",
+            line = 55,
+            packageName = "androidx.activity"
+        )
+
+        assertEquals(initial.id, retried.id)
+        assertTrue(retried.verified)
+        assertEquals(1, session.getPoints().breakpoints.size)
+        verify(exactly = 1) { erm.createBreakpointRequest(targetLoc) }
+        // Framework exclusion for androidx.* should also be removed when upgraded to androidx.activity
+        verify(exactly = 1) { erm.deleteEventRequest(req1) }
+        verify(exactly = 0) { req2.addClassExclusionFilter("androidx.*") }
+    }
+
+    @Test
+    fun `setBreakpoint creates distinct breakpoints for same file and line in different packages`() {
+        val repoA = mockk<ReferenceType>(relaxed = true)
+        val locA = mockk<Location>(relaxed = true)
+        val bpReqA = mockk<BreakpointRequest>(relaxed = true)
+        every { vm.classesByName("com.example.featureA.Repository") } returns listOf(repoA)
+        every { vm.classesByName("com.example.featureA.RepositoryKt") } returns emptyList()
+        every { repoA.locationsOfLine(30) } returns listOf(locA)
+        every { bpReqA.location() } returns locA
+        every { erm.createBreakpointRequest(locA) } returns bpReqA
+
+        val repoB = mockk<ReferenceType>(relaxed = true)
+        val locB = mockk<Location>(relaxed = true)
+        val bpReqB = mockk<BreakpointRequest>(relaxed = true)
+        every { vm.classesByName("com.example.featureB.Repository") } returns listOf(repoB)
+        every { vm.classesByName("com.example.featureB.RepositoryKt") } returns emptyList()
+        every { repoB.locationsOfLine(30) } returns listOf(locB)
+        every { bpReqB.location() } returns locB
+        every { erm.createBreakpointRequest(locB) } returns bpReqB
+
+        val bpA = session.setBreakpoint(file = "Repository.kt", line = 30, packageName = "com.example.featureA")
+        val bpB = session.setBreakpoint(file = "Repository.kt", line = 30, packageName = "com.example.featureB")
+
+        assertNotEquals(bpA.id, bpB.id)
+        assertTrue(bpA.verified)
+        assertTrue(bpB.verified)
+        assertEquals(2, session.getPoints().breakpoints.size)
+        verify(exactly = 1) { erm.createBreakpointRequest(locA) }
+        verify(exactly = 1) { erm.createBreakpointRequest(locB) }
+    }
+
+    @Test
+    fun `setBreakpoint with packageName binds both outer class and already loaded nestedTypes on same line`() {
+        val outerClass = mockk<ReferenceType>(relaxed = true)
+        val nestedLambdaClass = mockk<ReferenceType>(relaxed = true)
+        val outerLoc = mockk<Location>(relaxed = true)
+        val nestedLoc = mockk<Location>(relaxed = true)
+        val outerBpReq = mockk<BreakpointRequest>(relaxed = true)
+        val nestedBpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { vm.classesByName("com.example.app.MainScreen") } returns emptyList()
+        every { vm.classesByName("com.example.app.MainScreenKt") } returns listOf(outerClass)
+        every { outerClass.nestedTypes() } returns listOf(nestedLambdaClass)
+        every { outerClass.locationsOfLine(57) } returns listOf(outerLoc)
+        every { nestedLambdaClass.locationsOfLine(57) } returns listOf(nestedLoc)
+        every { outerBpReq.location() } returns outerLoc
+        every { nestedBpReq.location() } returns nestedLoc
+        every { erm.createBreakpointRequest(outerLoc) } returns outerBpReq
+        every { erm.createBreakpointRequest(nestedLoc) } returns nestedBpReq
+
+        val bp = session.setBreakpoint(file = "MainScreen.kt", line = 57, packageName = "com.example.app")
+
+        assertTrue(bp.verified)
+        verify(exactly = 1) { erm.createBreakpointRequest(outerLoc) }
+        verify(exactly = 1) { erm.createBreakpointRequest(nestedLoc) }
+        verify(exactly = 0) { vm.allClasses() }
+    }
+
+    @Test
+    fun `setBreakpoint with packageName reuses already verified package-less breakpoint in matching package`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        val location = mockk<Location>(relaxed = true)
+        val bpReq = mockk<BreakpointRequest>(relaxed = true)
+
+        every { refType.name() } returns "com.example.app.MainActivity"
+        every { refType.sourceName() } returns "MainActivity.kt"
+        every { refType.locationsOfLine(42) } returns listOf(location)
+        every { location.declaringType() } returns refType
+        every { bpReq.location() } returns location
+        every { vm.allClasses() } returns listOf(refType)
+        every { vm.classesByName("com.example.app.MainActivity") } returns listOf(refType)
+        every { vm.classesByName("com.example.app.MainActivityKt") } returns emptyList()
+        every { erm.createBreakpointRequest(location) } returns bpReq
+
+        val first = session.setBreakpoint(file = "MainActivity.kt", line = 42)
+        val second = session.setBreakpoint(file = "MainActivity.kt", line = 42, packageName = "com.example.app")
+
+        assertEquals(first.id, second.id)
+        assertEquals(1, session.getPoints().breakpoints.size)
+        verify(exactly = 1) { erm.createBreakpointRequest(location) }
     }
 
     @Test

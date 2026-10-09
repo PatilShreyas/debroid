@@ -168,31 +168,70 @@ class JdiSession(
     }
 
     fun setBreakpoint(file: String, line: Int, packageName: String? = null): BreakpointInfo {
-        val existing = activeBreakpoints.values.find { it.file == file && it.line == line }
-        if (existing != null) {
-            return existing
-        }
+        findExistingOrUpgradeableBreakpoint(file, line, packageName)?.let { return it }
+
         val id = "bp_${breakpointIdCounter.getAndIncrement()}"
+        val verified = bindBreakpointLocation(id = id, file = file, line = line, packageName = packageName)
         val info = BreakpointInfo(
             id = id,
             sessionId = sessionId,
             file = file,
             line = line,
-            verified = false
+            verified = verified
         )
         activeBreakpoints[id] = info
+        // Keep class-prepare tracking active even when initially verified so lazily-loaded
+        // inner/lambda classes ($onCreate$1, Compose lambdas) on the same line also bind.
+        deferredBreakpoints[id] = DeferredBreakpoint(id, file, line, packageName)
+        ensureClassPrepareRequest()
 
-        val verified = bindBreakpointLocation(id = id, file = file, line = line, packageName = packageName)
-        if (verified) {
-            activeBreakpoints[id] = info.copy(verified = true)
+        return info
+    }
+
+    private fun findExistingOrUpgradeableBreakpoint(
+        file: String,
+        line: Int,
+        packageName: String?
+    ): BreakpointInfo? {
+        val candidates = activeBreakpoints.values.filter { it.file == file && it.line == line }
+        val exactMatch = candidates.find { bp ->
+            val existingPkg = deferredBreakpoints[bp.id]?.packageName
+            existingPkg == packageName || packageName == null
+        }
+        val upgradeCandidate = if (exactMatch == null && packageName != null) {
+            candidates.find { bp -> canUpgradeBreakpointPackage(bp, packageName) }
         } else {
-            // Defer: arm a ClassPrepareRequest (once) and remember this breakpoint
-            // so that when the class is later loaded we can bind it (B1).
-            deferredBreakpoints[id] = DeferredBreakpoint(id, file, line, packageName)
-            ensureClassPrepareRequest()
+            null
         }
 
-        return activeBreakpoints[id]!!
+        return when {
+            exactMatch != null -> exactMatch
+            upgradeCandidate != null && packageName != null -> {
+                val id = upgradeCandidate.id
+                deferredBreakpoints[id] = DeferredBreakpoint(id, file, line, packageName)
+                val verified = bindBreakpointLocation(id = id, file = file, line = line, packageName = packageName)
+                val updated = if (verified) upgradeCandidate.copy(verified = true) else upgradeCandidate
+                activeBreakpoints[id] = updated
+                ensureClassPrepareRequest()
+                updated
+            }
+            else -> null
+        }
+    }
+
+    private fun canUpgradeBreakpointPackage(bp: BreakpointInfo, packageName: String): Boolean {
+        if (deferredBreakpoints[bp.id]?.packageName != null) return false
+        if (!bp.verified) return true
+        return jdiBreakpointRequests[bp.id].orEmpty().any { req ->
+            val declaringName = try { req.location().declaringType().name() } catch (_: Throwable) { null }
+            declaringName != null && matchesPackagePrefix(declaringName, packageName)
+        }
+    }
+
+    private fun matchesPackagePrefix(className: String, packageName: String?): Boolean {
+        if (packageName == null) return true
+        val normalized = packageName.trimEnd('.')
+        return className == normalized || className.startsWith("$normalized.")
     }
 
     private fun bindBreakpointLocation(id: String, file: String, line: Int, packageName: String? = null): Boolean {
@@ -203,7 +242,11 @@ class JdiSession(
             try {
                 val classMatches = vm.classesByName("$pkg.$classBasename")
                 val kotlinFacadeMatches = vm.classesByName("$pkg.$classBasenameKt")
-                (classMatches + kotlinFacadeMatches).distinct()
+                val topLevel = (classMatches + kotlinFacadeMatches).distinct()
+                val nested = topLevel.flatMap { ref ->
+                    try { ref.nestedTypes() } catch (_: Throwable) { emptyList() }
+                }
+                (topLevel + nested).distinct()
             } catch (_: Throwable) {
                 emptyList()
             }
@@ -215,7 +258,7 @@ class JdiSession(
             val matchingClasses = vm.allClasses().filter { ref ->
                 val name = try { ref.name() } catch (_: Throwable) { return@filter false }
 
-                if (packageName != null && !name.startsWith(packageName)) {
+                if (!matchesPackagePrefix(name, packageName)) {
                     return@filter false
                 }
 
@@ -242,23 +285,23 @@ class JdiSession(
             requests = bindLocationsForClasses(id, matchingClasses, line)
         }
 
-        if (requests.isNotEmpty()) {
-            jdiBreakpointRequests[id] = requests
-            return true
-        }
-        return false
+        return requests.isNotEmpty() || !jdiBreakpointRequests[id].isNullOrEmpty()
     }
 
     private fun bindLocationsForClasses(
         id: String,
         classes: List<ReferenceType>,
         line: Int
-    ): MutableList<BreakpointRequest> {
+    ): List<BreakpointRequest> {
+        val existingLocations = jdiBreakpointRequests[id].orEmpty().mapNotNull { req ->
+            try { req.location() } catch (_: Throwable) { null }
+        }.toMutableSet()
         val requests = mutableListOf<BreakpointRequest>()
         for (ref in classes) {
             try {
                 val locations = ref.locationsOfLine(line)
                 for (loc in locations) {
+                    if (!existingLocations.add(loc)) continue
                     val bpReq = vm.eventRequestManager().createBreakpointRequest(loc)
                     bpReq.putProperty(PROP_BREAKPOINT_ID, id)
                     bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
@@ -268,6 +311,9 @@ class JdiSession(
             } catch (_: Throwable) {
                 // Class line info not available yet, or locationsOfLine threw unexpectedly.
             }
+        }
+        if (requests.isNotEmpty()) {
+            jdiBreakpointRequests.computeIfAbsent(id) { java.util.concurrent.CopyOnWriteArrayList() }.addAll(requests)
         }
         return requests
     }
@@ -1554,9 +1600,7 @@ class JdiSession(
 
     private fun resolveDeferredBreakpointsForClass(preparedClass: ReferenceType) {
         val preparedSimpleName = preparedClass.name().substringAfterLast('.')
-        val iter = deferredBreakpoints.entries.iterator()
-        while (iter.hasNext()) {
-            val (bpId, deferred) = iter.next()
+        for ((bpId, deferred) in deferredBreakpoints) {
             if (isClassMatchForDeferredBreakpoint(
                     preparedClass = preparedClass,
                     preparedSimpleName = preparedSimpleName,
@@ -1564,7 +1608,7 @@ class JdiSession(
                     deferredPackage = deferred.packageName
                 )
             ) {
-                tryBindDeferredBreakpoint(bpId, deferred.line, preparedClass, iter)
+                tryBindDeferredBreakpoint(bpId, deferred.line, preparedClass)
             }
         }
     }
@@ -1575,49 +1619,35 @@ class JdiSession(
         deferredFile: String,
         deferredPackage: String? = null
     ): Boolean {
-        if (deferredPackage != null && !preparedClass.name().startsWith(deferredPackage)) {
+        val className = preparedClass.name()
+        if (!matchesPackagePrefix(className, deferredPackage)) {
             return false
         }
         val basename = deferredFile.substringAfterLast('/').substringAfterLast('\\').substringBeforeLast('.')
         val basenameKt = "${basename}Kt"
-        val srcMatches = try {
+        val nameMatchesHeuristic = preparedSimpleName == basename ||
+            preparedSimpleName == basenameKt ||
+            preparedSimpleName.startsWith("$basename$") ||
+            preparedSimpleName.startsWith("$basenameKt$")
+        if (nameMatchesHeuristic) return true
+        if (deferredPackage == null && isFrameworkClass(className)) return false
+        return try {
             preparedClass.sourceName() == deferredFile
         } catch (_: Throwable) {
             false
         }
-        if (srcMatches) return true
-        return preparedSimpleName == basename ||
-            preparedSimpleName == basenameKt ||
-            preparedSimpleName.startsWith("$basename$") ||
-            preparedSimpleName.startsWith("$basenameKt$")
     }
 
     private fun tryBindDeferredBreakpoint(
         bpId: String,
         line: Int,
-        preparedClass: ReferenceType,
-        iter: MutableIterator<MutableMap.MutableEntry<String, DeferredBreakpoint>>
+        preparedClass: ReferenceType
     ) {
-        try {
-            val locations = preparedClass.locationsOfLine(line)
-            if (locations.isNotEmpty()) {
-                val reqs = mutableListOf<BreakpointRequest>()
-                for (loc in locations) {
-                    val bpReq = vm.eventRequestManager().createBreakpointRequest(loc)
-                    bpReq.putProperty(PROP_BREAKPOINT_ID, bpId)
-                    bpReq.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-                    bpReq.enable()
-                    reqs.add(bpReq)
-                }
-                jdiBreakpointRequests[bpId] = reqs
-                val existing = activeBreakpoints[bpId]
-                if (existing != null) {
-                    activeBreakpoints[bpId] = existing.copy(verified = true)
-                }
-                iter.remove()
+        val newRequests = bindLocationsForClasses(bpId, listOf(preparedClass), line)
+        if (newRequests.isNotEmpty()) {
+            activeBreakpoints.computeIfPresent(bpId) { _, existing ->
+                existing.copy(verified = true)
             }
-        } catch (_: Throwable) {
-            // Keep deferred and try on next class load
         }
     }
 
