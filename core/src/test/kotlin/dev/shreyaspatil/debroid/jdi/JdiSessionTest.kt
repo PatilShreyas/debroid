@@ -2286,7 +2286,7 @@ class JdiSessionTest {
     }
 
     @Test
-    fun `client side exception filter ignores unrelated exceptions`() {
+    fun `client side exception filter ignores unrelated exceptions and returns false without calling vm resume`() {
         val req = mockk<ExceptionRequest>(relaxed = true)
         every { req.getProperty("className") } returns "com.example.ExpectedException"
 
@@ -2303,17 +2303,268 @@ class JdiSessionTest {
         every { event.exception() } returns exceptionObj
         every { event.virtualMachine() } returns vm
 
-        // Use reflection to invoke private handleExceptionEvent method
-        val handleMethod = JdiSession::class.java.getDeclaredMethod(
-            "handleExceptionEvent",
-            com.sun.jdi.event.ExceptionEvent::class.java
+        val processMethod = JdiSession::class.java.getDeclaredMethod(
+            "processJdiEvent",
+            Event::class.java
         )
-        handleMethod.isAccessible = true
-        handleMethod.invoke(session, event)
+        processMethod.isAccessible = true
+        val suspendsVm = processMethod.invoke(session, event) as Boolean
 
-        // Event should have been ignored and VM resumed
-        verify { vm.resume() }
+        // Filtered exception should return false so runEventListener calls eventSet.resume()
+        assertFalse(suspendsVm)
+        verify(exactly = 0) { vm.resume() }
         assertEquals(0, session.pollEvents("0").events.size)
+    }
+
+    @Test
+    fun `handleExceptionEvent formats exceptionMessage with detailMessage when present`() {
+        val req = mockk<ExceptionRequest>(relaxed = true)
+        every { req.getProperty("className") } returns "java.lang.IllegalArgumentException"
+
+        val detailField = mockk<Field>(relaxed = true)
+        val detailValue = mockk<StringReference>(relaxed = true)
+        every { detailValue.value() } returns "User ID must not be blank"
+
+        val thrownClass = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { thrownClass.name() } returns "java.lang.IllegalArgumentException"
+        every { thrownClass.fieldByName("detailMessage") } returns detailField
+
+        val exceptionObj = mockk<ObjectReference>(relaxed = true)
+        every { exceptionObj.referenceType() } returns thrownClass
+        every { exceptionObj.getValue(detailField) } returns detailValue
+
+        val loc = mockk<Location>(relaxed = true)
+        val declaringType = mockk<ReferenceType>(relaxed = true)
+        every { declaringType.name() } returns "com.example.UserService"
+        every { loc.declaringType() } returns declaringType
+        every { loc.sourceName() } returns "UserService.kt"
+        every { loc.lineNumber() } returns 27
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        val method = mockk<Method>(relaxed = true)
+        every { method.name() } returns "validateUser"
+        every { loc.method() } returns method
+        every { frame.location() } returns loc
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 11L
+        every { thread.name() } returns "main"
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+
+        val event = mockk<ExceptionEvent>(relaxed = true)
+        every { event.request() } returns req
+        every { event.exception() } returns exceptionObj
+        every { event.location() } returns loc
+        every { event.thread() } returns thread
+
+        val processMethod = JdiSession::class.java.getDeclaredMethod(
+            "processJdiEvent",
+            Event::class.java
+        )
+        processMethod.isAccessible = true
+        val suspendsVm = processMethod.invoke(session, event) as Boolean
+
+        assertTrue(suspendsVm)
+        val pollResult = session.pollEvents("0", withStacktrace = true)
+        assertEquals(1, pollResult.events.size)
+        val emitted = pollResult.events.first()
+        assertEquals(EventType.EXCEPTION_HIT, emitted.eventType)
+        assertEquals("java.lang.IllegalArgumentException: User ID must not be blank", emitted.exceptionMessage)
+        assertNotNull(emitted.stacktrace)
+        assertEquals(1, emitted.stacktrace?.size)
+        assertEquals("validateUser", emitted.stacktrace?.first()?.methodName)
+    }
+
+    @Test
+    fun `handleExceptionEvent formats exceptionMessage as className only when detailMessage is null`() {
+        val detailField = mockk<Field>(relaxed = true)
+        val thrownClass = mockk<com.sun.jdi.ClassType>(relaxed = true)
+        every { thrownClass.name() } returns "java.lang.IllegalStateException"
+        every { thrownClass.fieldByName("detailMessage") } returns detailField
+
+        val exceptionObj = mockk<ObjectReference>(relaxed = true)
+        every { exceptionObj.referenceType() } returns thrownClass
+        every { exceptionObj.getValue(detailField) } returns null
+
+        val loc = mockk<Location>(relaxed = true)
+        val declaringType = mockk<ReferenceType>(relaxed = true)
+        every { declaringType.name() } returns "com.example.UserService"
+        every { loc.declaringType() } returns declaringType
+        every { loc.sourceName() } returns "UserService.kt"
+        every { loc.lineNumber() } returns 30
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 11L
+        every { thread.name() } returns "main"
+        every { thread.isSuspended } returns false
+
+        val event = mockk<ExceptionEvent>(relaxed = true)
+        every { event.request() } returns null
+        every { event.exception() } returns exceptionObj
+        every { event.location() } returns loc
+        every { event.thread() } returns thread
+
+        val processMethod = JdiSession::class.java.getDeclaredMethod(
+            "processJdiEvent",
+            Event::class.java
+        )
+        processMethod.isAccessible = true
+        val suspendsVm = processMethod.invoke(session, event) as Boolean
+
+        assertTrue(suspendsVm)
+        val pollResult = session.pollEvents("0")
+        assertEquals(1, pollResult.events.size)
+        assertEquals("java.lang.IllegalStateException", pollResult.events.first().exceptionMessage)
+    }
+
+    @Test
+    fun `handleAccessWatchpointEvent and handleModificationWatchpointEvent populate stacktrace`() {
+        val loc = mockk<Location>(relaxed = true)
+        val declaringType = mockk<ReferenceType>(relaxed = true)
+        val method = mockk<Method>(relaxed = true)
+        every { declaringType.name() } returns "com.example.CartViewModel"
+        every { method.name() } returns "applyCoupon"
+        every { loc.declaringType() } returns declaringType
+        every { loc.method() } returns method
+        every { loc.sourceName() } returns "CartViewModel.kt"
+        every { loc.lineNumber() } returns 64
+
+        val frame = mockk<StackFrame>(relaxed = true)
+        every { frame.location() } returns loc
+        every { frame.thisObject() } returns null
+
+        val thread = mockk<ThreadReference>(relaxed = true)
+        every { thread.uniqueID() } returns 7L
+        every { thread.name() } returns "main"
+        every { thread.isSuspended } returns true
+        every { thread.frames() } returns listOf(frame)
+
+        val field = mockk<Field>(relaxed = true)
+        every { field.name() } returns "couponInput"
+
+        val accessEvent = mockk<AccessWatchpointEvent>(relaxed = true)
+        every { accessEvent.location() } returns loc
+        every { accessEvent.thread() } returns thread
+        every { accessEvent.field() } returns field
+
+        val newVal = mockk<StringReference>(relaxed = true)
+        every { newVal.toString() } returns "\"AUDIO20\""
+        val modifyEvent = mockk<ModificationWatchpointEvent>(relaxed = true)
+        every { modifyEvent.location() } returns loc
+        every { modifyEvent.thread() } returns thread
+        every { modifyEvent.field() } returns field
+        every { modifyEvent.valueToBe() } returns newVal
+
+        val processMethod = JdiSession::class.java.getDeclaredMethod(
+            "processJdiEvent",
+            Event::class.java
+        )
+        processMethod.isAccessible = true
+        assertTrue(processMethod.invoke(session, accessEvent) as Boolean)
+        assertTrue(processMethod.invoke(session, modifyEvent) as Boolean)
+
+        val withoutTrace = session.pollEvents("0", withStacktrace = false)
+        assertEquals(2, withoutTrace.events.size)
+        assertNull(withoutTrace.events[0].stacktrace)
+        assertNull(withoutTrace.events[1].stacktrace)
+
+        val withTrace = session.pollEvents("0", withStacktrace = true)
+        assertEquals(2, withTrace.events.size)
+
+        val accessPayload = withTrace.events[0]
+        assertEquals(EventType.WATCHPOINT_ACCESS_HIT, accessPayload.eventType)
+        assertEquals("CartViewModel.kt:64", accessPayload.location)
+        assertEquals("com.example.CartViewModel", accessPayload.className)
+        assertNotNull(accessPayload.stacktrace)
+        assertEquals(1, accessPayload.stacktrace?.size)
+        assertEquals("applyCoupon", accessPayload.stacktrace?.first()?.methodName)
+
+        val modifyPayload = withTrace.events[1]
+        assertEquals(EventType.WATCHPOINT_MODIFY_HIT, modifyPayload.eventType)
+        assertEquals("CartViewModel.kt:64", modifyPayload.location)
+        assertEquals("com.example.CartViewModel", modifyPayload.className)
+        assertNotNull(modifyPayload.stacktrace)
+        assertEquals(1, modifyPayload.stacktrace?.size)
+        assertEquals("applyCoupon", modifyPayload.stacktrace?.first()?.methodName)
+    }
+
+    @Test
+    fun `setWatchpoint throws INVALID_ARGUMENT when class is loaded and field does not exist`() {
+        val refType = mockk<ReferenceType>(relaxed = true)
+        every { refType.name() } returns "com.example.CartViewModel"
+        every { refType.fieldByName("nonExistentField") } returns null
+        every { vm.classesByName("com.example.CartViewModel") } returns listOf(refType)
+
+        val ex = assertThrows<DebugException> {
+            session.setWatchpoint("com.example.CartViewModel", "nonExistentField")
+        }
+
+        assertEquals(ErrorCode.INVALID_ARGUMENT, ex.code)
+        assertTrue(ex.message.contains("Field 'nonExistentField' not found in class 'com.example.CartViewModel'"))
+        assertTrue(session.getPoints().watchpoints.isEmpty())
+    }
+
+    @Test
+    fun `setWatchpoint binds across all loaded ReferenceTypes from multiple ClassLoaders`() {
+        val refType1 = mockk<ReferenceType>(relaxed = true)
+        val refType2 = mockk<ReferenceType>(relaxed = true)
+        val field1 = mockk<Field>(relaxed = true)
+        val field2 = mockk<Field>(relaxed = true)
+        every { field1.name() } returns "count"
+        every { field1.declaringType().name() } returns "com.example.Counter"
+        every { field2.name() } returns "count"
+        every { field2.declaringType().name() } returns "com.example.Counter"
+        every { refType1.fieldByName("count") } returns field1
+        every { refType2.fieldByName("count") } returns field2
+        every { vm.classesByName("com.example.Counter") } returns listOf(refType1, refType2)
+
+        val accessReq1 = mockk<AccessWatchpointRequest>(relaxed = true)
+        val accessReq2 = mockk<AccessWatchpointRequest>(relaxed = true)
+        every { accessReq1.field() } returns field1
+        every { accessReq2.field() } returns field2
+        every { erm.createAccessWatchpointRequest(field1) } returns accessReq1
+        every { erm.createAccessWatchpointRequest(field2) } returns accessReq2
+
+        val wpId = session.setWatchpoint("com.example.Counter", "count", access = true, modify = false)
+
+        verify(exactly = 1) { erm.createAccessWatchpointRequest(field1) }
+        verify(exactly = 1) { erm.createAccessWatchpointRequest(field2) }
+        assertEquals(1, session.getPoints().watchpoints.size)
+        assertEquals(wpId, session.getPoints().watchpoints.first().id)
+
+        assertTrue(session.removeWatchpoint(wpId))
+        verify(exactly = 1) { erm.deleteEventRequest(accessReq1) }
+        verify(exactly = 1) { erm.deleteEventRequest(accessReq2) }
+    }
+
+    @Test
+    fun `setExceptionBreakpoint binds across all loaded ReferenceTypes from multiple ClassLoaders`() {
+        val refType1 = mockk<ReferenceType>(relaxed = true)
+        val refType2 = mockk<ReferenceType>(relaxed = true)
+        every { vm.classesByName("com.example.CustomException") } returns listOf(refType1, refType2)
+
+        val exReq1 = mockk<ExceptionRequest>(relaxed = true)
+        val exReq2 = mockk<ExceptionRequest>(relaxed = true)
+        every { exReq1.getProperty("className") } returns "com.example.CustomException"
+        every { exReq2.getProperty("className") } returns "com.example.CustomException"
+        every { erm.createExceptionRequest(refType1, true, true) } returns exReq1
+        every { erm.createExceptionRequest(refType2, true, true) } returns exReq2
+
+        val exBpId = session.setExceptionBreakpoint(
+            "com.example.CustomException",
+            notifyCaught = true,
+            notifyUncaught = true
+        )
+
+        verify(exactly = 1) { erm.createExceptionRequest(refType1, true, true) }
+        verify(exactly = 1) { erm.createExceptionRequest(refType2, true, true) }
+        assertEquals(1, session.getPoints().exceptionBreakpoints.size)
+        assertEquals(exBpId, session.getPoints().exceptionBreakpoints.first().id)
+
+        assertTrue(session.removeExceptionBreakpoint(exBpId))
+        verify(exactly = 1) { erm.deleteEventRequest(exReq1) }
+        verify(exactly = 1) { erm.deleteEventRequest(exReq2) }
     }
 
     @Test
