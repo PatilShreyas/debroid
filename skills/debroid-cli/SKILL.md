@@ -69,7 +69,7 @@ Set your breakpoints or watchpoints *before* polling. **Save the returned IDs.**
   - Remove with `remove-catch-exception <session_id> <exception_breakpoint_id>`.
 - **Watchpoint**: `debroid watch <session_id> <com.pkg.Class> <fieldName> [--access] [--modify]`
   - Defaults: BOTH access and modify ON. Pass `--no-access` or `--no-modify` to disable either.
-  - Returns `{ "watchpointId": "wp_1" }`.
+  - Returns `{ "watchpointId": "wp_1" }` (or an `INVALID_ARGUMENT` error if the target class is already loaded and `<fieldName>` does not exist on it).
   - Remove with `remove-watch <session_id> <watchpoint_id>`.
 
 ### Step 4: Poll for Events
@@ -81,7 +81,7 @@ debroid poll <session_id> <cursor> --with-stacktrace
 * **Subsequent Cursors:** Use the `nextCursor` value from the previous JSON response.
 * **Buffer Overflow & Stale Cursors:** Inspect `droppedEventsSinceLastPoll` (omitted from JSON when 0). If present and > 0, events were evicted from the buffer before they could be polled (e.g. due to high event volume or delayed polling). If an expected breakpoint or exception event is not present in `events`, it may have been among the dropped events.
 * **Waiting:** If `events` is empty, ask the user to trigger the action in the app, then poll again.
-* **Event types you may see:** `BREAKPOINT_HIT` (includes `breakpointId`), `STEP_HIT`, `EXCEPTION_HIT`, `WATCHPOINT_ACCESS_HIT`, `WATCHPOINT_MODIFY_HIT`, `DISCONNECT`.
+* **Event types you may see:** `BREAKPOINT_HIT` (includes `breakpointId`), `STEP_HIT`, `EXCEPTION_HIT` (`exceptionMessage` includes `<ExceptionClass>: <detailMessage>`), `WATCHPOINT_ACCESS_HIT` (includes `stacktrace` when `--with-stacktrace` is set), `WATCHPOINT_MODIFY_HIT` (includes `stacktrace` when `--with-stacktrace` is set), `DISCONNECT`.
 
 ### Step 5: Inspect the Pause State
 Once `poll` returns an event (e.g., `BREAKPOINT_HIT`), extract the `threadId`.
