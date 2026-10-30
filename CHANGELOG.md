@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Step Over Past Kotlin Inline Functions:** `debroid step <session_id> <thread_id> STEP_OVER` now advances to the next line in the current source file instead of stopping inside compiler-generated inline expansions such as `sumOf` and `filter` (`fake.kt` or synthetic lambda frames) (#74).
+
+### Changed
+
+## [v0.3.3] - 2026-10-26
+
+### Added
+
+### Fixed
+- **Watchpoint Stacktraces, Exception Messages & Field Validation (`watch`, `catch-exception`, `poll`):** Fixed `WATCHPOINT_ACCESS_HIT` and `WATCHPOINT_MODIFY_HIT` events omitting stack frames when polling with `debroid poll --with-stacktrace`. Enriched `EXCEPTION_HIT` events to include the exception's `detailMessage` alongside its class name (`"<ExceptionClass>: <detailMessage>"`). Fixed `debroid watch` silently succeeding when given a non-existent field name on a loaded class (now returns an `INVALID_ARGUMENT` error), bound watchpoints and exception breakpoints across all loaded `ClassLoader` instances of a target class, and coordinated filtered exception resume behavior with the event loop (#111).
 - **Breakpoints in Lazily-Loaded Kotlin Lambdas & Package-Aware Deduplication (`break`):** Fixed an issue where line breakpoints set on lines spanning both an enclosing class and a lazily-loaded inner or lambda class (such as click listeners, coroutines, or Jetpack Compose lambdas) missed execution when the lambda class loaded after the outer class. Also fixed `debroid break` deduplication to respect `--package`, allowing unverified breakpoints to be retried with `--package` and supporting breakpoints at the same filename and line number across distinct packages (#109).
 - **Sync `inspect` Command Flags in Skill Documentation:** Updated the command reference table in `SKILL.md` to include the `--include-static` and `--include-internal` flags and default field filtering behavior for `debroid inspect` (#112).
 - **Array Element Inspection in `debroid inspect`:** Fixed an issue where running `debroid inspect` on any JVM array (`IntArray`, `Object[]`, or collection backing arrays like `ArrayList.elementData`) returned an empty `fields` map. Array elements are now populated under indexed keys (`"[0]"`, `"[1]"`, ...) in `fields` and recursively inspected in `nested` when `--max-depth > 1` (#110).

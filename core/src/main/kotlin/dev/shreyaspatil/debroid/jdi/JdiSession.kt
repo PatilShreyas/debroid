@@ -73,7 +73,7 @@ class JdiSession(
     private val deferredBreakpoints = ConcurrentHashMap<String, DeferredBreakpoint>()
     private val deferredWatchpoints = ConcurrentHashMap<String, MutableList<DeferredWatchpoint>>()
     private val deferredExceptionBreakpoints = ConcurrentHashMap<String, MutableList<DeferredExceptionBreakpoint>>()
-    private val exceptionRequests = ConcurrentHashMap<String, ExceptionRequest>()
+    private val exceptionRequests = ConcurrentHashMap<String, MutableList<ExceptionRequest>>()
     private val watchpointRequests = ConcurrentHashMap<String, MutableList<WatchpointRequest>>()
     private val classPrepareRequest = AtomicReference<ClassPrepareRequest?>(null)
     private val activeExclusions = AtomicReference<Set<String>>(emptySet())
@@ -327,7 +327,6 @@ class JdiSession(
             removeExceptionBreakpoint(existing.id)
         }
 
-        val erm = vm.eventRequestManager()
         val id = "ex_bp_${exceptionIdCounter.getAndIncrement()}"
 
         if (className != null) {
@@ -339,7 +338,9 @@ class JdiSession(
                 ensureClassPrepareRequest()
                 return id
             }
-            bindExceptionBreakpointForRefType(id, refTypes.first(), className, notifyCaught, notifyUncaught)
+            for (refType in refTypes) {
+                bindExceptionBreakpointForRefType(id, refType, className, notifyCaught, notifyUncaught)
+            }
             return id
         }
 
@@ -361,17 +362,23 @@ class JdiSession(
         }
         req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
         req.enable()
-        exceptionRequests[id] = req
+        exceptionRequests.computeIfAbsent(id) { mutableListOf() }.add(req)
     }
 
     fun setWatchpoint(className: String, fieldName: String, access: Boolean = true, modify: Boolean = true): String {
+        val refTypes = vm.classesByName(className)
+        if (refTypes.isNotEmpty() && refTypes.none { it.fieldByName(fieldName) != null }) {
+            throw DebugException(
+                ErrorCode.INVALID_ARGUMENT,
+                "Field '$fieldName' not found in class '$className'"
+            )
+        }
+
         val existing = listWatchpoints().find { it.className == className && it.fieldName == fieldName }
         if (existing != null) {
             removeWatchpoint(existing.id)
         }
 
-        val erm = vm.eventRequestManager()
-        val refTypes = vm.classesByName(className)
         val id = "wp_${watchpointIdCounter.getAndIncrement()}"
 
         if (refTypes.isEmpty()) {
@@ -383,13 +390,15 @@ class JdiSession(
             return id
         }
 
-        bindWatchpointForRefType(
-            id = id,
-            refType = refTypes.first(),
-            fieldName = fieldName,
-            access = access,
-            modify = modify
-        )
+        for (refType in refTypes) {
+            bindWatchpointForRefType(
+                id = id,
+                refType = refType,
+                fieldName = fieldName,
+                access = access,
+                modify = modify
+            )
+        }
         return id
     }
 
@@ -480,13 +489,14 @@ class JdiSession(
     }
 
     fun removeExceptionBreakpoint(id: String): Boolean {
-        var removed = false
-        val req = exceptionRequests.remove(id)
-        if (req != null) {
-            try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
-            removed = true
+        val requests = exceptionRequests.remove(id)
+        val removed = if (!requests.isNullOrEmpty()) {
+            requests.forEach { req ->
+                try { vm.eventRequestManager().deleteEventRequest(req) } catch (_: Exception) {}
+            }
+            true
         } else {
-            removed = removeFromDeferredExceptionBreakpoints(id)
+            removeFromDeferredExceptionBreakpoints(id)
         }
         maybeDisableClassPrepareRequest()
         return removed
@@ -550,7 +560,8 @@ class JdiSession(
     private fun listBreakpoints(): List<BreakpointInfo> = activeBreakpoints.values.toList()
 
     private fun listExceptionBreakpoints(): List<ExceptionBreakpointInfo> {
-        val active = exceptionRequests.map { (id, req) ->
+        val active = exceptionRequests.mapNotNull { (id, reqs) ->
+            val req = reqs.firstOrNull() ?: return@mapNotNull null
             ExceptionBreakpointInfo(
                 id = id,
                 className = req.getProperty(PROP_CLASS_NAME) as? String,
@@ -1580,7 +1591,6 @@ class JdiSession(
             is StepEvent -> handleStepEvent(event)
             is ExceptionEvent -> {
                 handleExceptionEvent(event)
-                true
             }
             is AccessWatchpointEvent -> {
                 handleAccessWatchpointEvent(event)
@@ -1718,32 +1728,14 @@ class JdiSession(
         return true
     }
 
-    private fun handleExceptionEvent(event: ExceptionEvent) {
+    private fun handleExceptionEvent(event: ExceptionEvent): Boolean {
         // Client-side filtering because JDWP ExceptionOnly filters can sometimes be buggy/too-broad
         val expectedClassName = event.request()?.getProperty(PROP_CLASS_NAME) as? String
-        if (expectedClassName != null) {
-            val thrownClass = event.exception().referenceType()
-            var matches = false
-            var currentClass: com.sun.jdi.ClassType? = thrownClass as? com.sun.jdi.ClassType
-            while (currentClass != null) {
-                if (currentClass.name() == expectedClassName) {
-                    matches = true
-                    break
-                }
-                currentClass = currentClass.superclass()
-            }
-            if (!matches) {
-                // Also check if it's an interface (less common for exceptions, but possible)
-                if (thrownClass is com.sun.jdi.ClassType) {
-                    if (thrownClass.allInterfaces().any { it.name() == expectedClassName }) {
-                        matches = true
-                    }
-                }
-                if (!matches) {
-                    event.virtualMachine().resume()
-                    return
-                }
-            }
+        if (
+            expectedClassName != null &&
+            !matchesExpectedExceptionClass(event.exception().referenceType(), expectedClassName)
+        ) {
+            return false
         }
 
         val loc = event.location()
@@ -1755,10 +1747,42 @@ class JdiSession(
                 threadName = event.thread().name(),
                 location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                 className = loc.declaringType().name(),
-                exceptionMessage = event.exception().referenceType().name(),
+                exceptionMessage = formatExceptionMessage(event.exception()),
                 stacktrace = getFramesSafely(event.thread())
             )
         )
+        return true
+    }
+
+    private fun matchesExpectedExceptionClass(thrownClass: ReferenceType, expectedClassName: String): Boolean {
+        var currentClass: com.sun.jdi.ClassType? = thrownClass as? com.sun.jdi.ClassType
+        while (currentClass != null) {
+            if (currentClass.name() == expectedClassName) {
+                return true
+            }
+            currentClass = currentClass.superclass()
+        }
+        return thrownClass is com.sun.jdi.ClassType &&
+            thrownClass.allInterfaces().any { it.name() == expectedClassName }
+    }
+
+    private fun formatExceptionMessage(exception: ObjectReference): String {
+        val className = exception.referenceType().name()
+        val detailMessage = try {
+            val field = exception.referenceType().fieldByName("detailMessage")
+            if (field != null) {
+                (exception.getValue(field) as? StringReference)?.value()
+            } else {
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+        return if (detailMessage != null) {
+            "$className: $detailMessage"
+        } else {
+            className
+        }
     }
 
     private fun handleAccessWatchpointEvent(event: AccessWatchpointEvent) {
@@ -1771,7 +1795,8 @@ class JdiSession(
                 threadName = event.thread().name(),
                 location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                 className = loc.declaringType().name(),
-                exceptionMessage = "Field ${event.field().name()} accessed"
+                exceptionMessage = "Field ${event.field().name()} accessed",
+                stacktrace = getFramesSafely(event.thread())
             )
         )
     }
@@ -1786,7 +1811,8 @@ class JdiSession(
                 threadName = event.thread().name(),
                 location = "${safeSourceName(loc)}:${loc.lineNumber()}",
                 className = loc.declaringType().name(),
-                exceptionMessage = "Field ${event.field().name()} modified to ${event.valueToBe()}"
+                exceptionMessage = "Field ${event.field().name()} modified to ${event.valueToBe()}",
+                stacktrace = getFramesSafely(event.thread())
             )
         )
     }
