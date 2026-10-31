@@ -190,6 +190,26 @@ class AdbManager(
         }
     }
 
+    fun pushFile(localPath: String, remotePath: String): Result<String> = runAdb("push", localPath, remotePath)
+
+    fun runShell(vararg args: String): Result<String> = runAdb("shell", *args)
+
+    fun runAs(appId: String, vararg args: String): Result<String> = runAdb("shell", "run-as", appId, *args)
+
+    fun restartApp(appId: String): Result<Unit> {
+        val stopResult = runAdb("shell", "am", "force-stop", appId)
+        if (stopResult.isFailure) {
+            return Result.failure(stopResult.exceptionOrNull() ?: Exception("Failed to force-stop $appId"))
+        }
+        val component = getMainActivity(appId)
+        val startResult = if (component != null) {
+            runAdb("shell", "am", "start", "-n", component)
+        } else {
+            runAdb("shell", "monkey", "-p", appId, "-c", "android.intent.category.LAUNCHER", "1")
+        }
+        return startResult.map { }
+    }
+
     fun removePortForward(localPort: Int) {
         runAdb("forward", "--remove", "tcp:$localPort")
     }

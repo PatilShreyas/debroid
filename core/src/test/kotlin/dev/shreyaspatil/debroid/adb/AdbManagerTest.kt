@@ -262,4 +262,92 @@ class AdbManagerTest {
         assertTrue(result.isSuccess)
         assertEquals(12345, result.getOrNull())
     }
+
+    @Test
+    fun `pushFile runs adb push`() {
+        val pushCmd = listOf("adb", "push", "/local/path", "/remote/path")
+        every { commandRunner.runCommand(pushCmd, any()) } returns Result.success("pushed")
+
+        val result = adbManager.pushFile("/local/path", "/remote/path")
+
+        assertTrue(result.isSuccess)
+        assertEquals("pushed", result.getOrNull())
+    }
+
+    @Test
+    fun `runShell runs adb shell with given args`() {
+        val shellCmd = listOf("adb", "shell", "echo", "hello")
+        every { commandRunner.runCommand(shellCmd, any()) } returns Result.success("hello\n")
+
+        val result = adbManager.runShell("echo", "hello")
+
+        assertTrue(result.isSuccess)
+        assertEquals("hello\n", result.getOrNull())
+    }
+
+    @Test
+    fun `runAs runs adb shell run-as with given appId and args`() {
+        val runAsCmd = listOf("adb", "shell", "run-as", "com.test.app", "cat", "file.txt")
+        every { commandRunner.runCommand(runAsCmd, any()) } returns Result.success("content")
+
+        val result = adbManager.runAs("com.test.app", "cat", "file.txt")
+
+        assertTrue(result.isSuccess)
+        assertEquals("content", result.getOrNull())
+    }
+
+    @Test
+    fun `restartApp force stops and restarts main activity`() {
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "am", "force-stop", "com.test.app"), any())
+        } returns Result.success("")
+
+        val resolveCmd = listOf(
+            "adb", "shell", "cmd", "package", "resolve-activity",
+            "--brief", "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER", "com.test.app"
+        )
+        val resolveOutput = "com.test.app/com.test.app.MainActivity\n"
+        every { commandRunner.runCommand(resolveCmd, any()) } returns Result.success(resolveOutput)
+
+        val amStartCmd = listOf("adb", "shell", "am", "start", "-n", "com.test.app/com.test.app.MainActivity")
+        every { commandRunner.runCommand(amStartCmd, any()) } returns Result.success("Starting: Intent")
+
+        val result = adbManager.restartApp("com.test.app")
+
+        assertTrue(result.isSuccess)
+    }
+
+    @Test
+    fun `restartApp falls back to monkey when activity is not found`() {
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "am", "force-stop", "com.test.app"), any())
+        } returns Result.success("")
+
+        val resolveCmd = listOf(
+            "adb", "shell", "cmd", "package", "resolve-activity",
+            "--brief", "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER", "com.test.app"
+        )
+        every { commandRunner.runCommand(resolveCmd, any()) } returns Result.success("")
+        every {
+            commandRunner.runCommand(listOf("adb", "shell", "pm", "dump", "com.test.app"), any())
+        } returns Result.success("")
+
+        val monkeyCmd = listOf(
+            "adb",
+            "shell",
+            "monkey",
+            "-p",
+            "com.test.app",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1"
+        )
+        every { commandRunner.runCommand(monkeyCmd, any()) } returns Result.success("Events injected: 1")
+
+        val result = adbManager.restartApp("com.test.app")
+
+        assertTrue(result.isSuccess)
+    }
 }
