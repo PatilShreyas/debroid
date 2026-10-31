@@ -38,6 +38,8 @@ import dev.shreyaspatil.debroid.cli.models.DaemonIpcRequest
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
 import dev.shreyaspatil.debroid.cli.models.JsonSchemaGenerator
 import dev.shreyaspatil.debroid.cli.update.AutoUpdateManager
+import dev.shreyaspatil.debroid.hotreload.HotReloadConfig
+import dev.shreyaspatil.debroid.hotreload.HotReloadSession
 import dev.shreyaspatil.debroid.models.StepAction
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
@@ -669,8 +671,63 @@ object CliRunner {
                 CoroutineCommand(),
                 InspectCommand(),
                 StepCommand(),
-                UpdateCommand()
+                UpdateCommand(),
+                HotReloadCommand()
             )
+    }
+
+    class HotReloadCommand(
+        private val sessionFactory: (HotReloadConfig) -> HotReloadSession = { HotReloadSession(it) }
+    ) : CliktCommand(
+        name = "hot-reload",
+        help = "Watches project source files and automatically hot-reloads Kotlin/Java and Compose UI changes " +
+            "onto the running device via JVMTI.",
+        epilog = "Streams single-line [STATUS] plain-text events " +
+            "(WATCHING, RELOADING, RELOADED, COMPILE_ERROR, FALLBACK_REINSTALL, ERROR, STOPPED)."
+    ) {
+        private val appId by argument(
+            "app_id",
+            help = "The Android Application ID (e.g., com.example.app) to hot-reload."
+        )
+        private val projectDir by option(
+            "-d",
+            "--project-dir",
+            help = "Root directory of the Android Gradle project (default: current directory)."
+        ).default(".")
+        private val variant by option(
+            "-v",
+            "--variant",
+            help = "Build variant to compile (default: debug)."
+        ).default("debug")
+        private val intervalMs by option(
+            "--interval-ms",
+            help = "Polling interval in milliseconds for source change detection (default: 1000)."
+        ).int().default(1000)
+        private val once by option(
+            "--once",
+            help = "Perform a single check/reload pass and exit."
+        ).flag(default = false)
+        private val noFallback by option(
+            "--no-fallback",
+            help = "Disable automatic fallback to full installDebug on resource or incompatible structural changes."
+        ).flag(default = false)
+
+        override fun run() {
+            val config = HotReloadConfig(
+                appId = appId,
+                projectDir = File(projectDir),
+                variant = variant,
+                intervalMs = intervalMs.toLong(),
+                once = once,
+                allowFallback = !noFallback
+            )
+            val session = sessionFactory(config)
+            Runtime.getRuntime().addShutdownHook(Thread { session.stop() })
+            session.run { event ->
+                println(event.formatPlainText())
+                System.out.flush()
+            }
+        }
     }
 
     class UpdateCommand : BaseJsonCommand(

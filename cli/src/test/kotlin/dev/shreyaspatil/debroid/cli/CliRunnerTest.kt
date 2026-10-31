@@ -4,6 +4,11 @@ import com.github.ajalt.clikt.core.context
 import dev.shreyaspatil.debroid.cli.models.CliDebugError
 import dev.shreyaspatil.debroid.cli.models.CliErrorCode
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
+import dev.shreyaspatil.debroid.hotreload.HotReloadConfig
+import dev.shreyaspatil.debroid.hotreload.HotReloadEvent
+import dev.shreyaspatil.debroid.hotreload.HotReloadSession
+import io.mockk.every
+import io.mockk.mockk
 import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -427,5 +432,75 @@ class CliRunnerTest {
             error.message.contains("/non/existent/path/to/java_binary") ||
                 error.message.contains("Cannot run program")
         )
+    }
+
+    @Test
+    fun `execute with hot-reload --help flag exits with status code 0`() {
+        var exitCode: Int? = null
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            CliRunner.execute(arrayOf("hot-reload", "--help"), exit = { exitCode = it })
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        assertEquals(0, exitCode)
+        val output = outContent.toString()
+        assertTrue(output.contains("hot-reload"))
+        assertTrue(output.contains("--project-dir"))
+        assertTrue(output.contains("--variant"))
+        assertTrue(output.contains("--interval-ms"))
+        assertTrue(output.contains("--once"))
+        assertTrue(output.contains("--no-fallback"))
+    }
+
+    @Test
+    fun `HotReloadCommand parses flags and streams plain-text events`() {
+        var capturedConfig: HotReloadConfig? = null
+        val mockSession = mockk<HotReloadSession>(relaxed = true)
+        every { mockSession.run(any()) } answers {
+            val callback = firstArg<(HotReloadEvent) -> Unit>()
+            callback(HotReloadEvent.Watching("com.example.app", 1234, 2, 500L))
+            callback(HotReloadEvent.Stopped("com.example.app"))
+        }
+
+        val command = CliRunner.HotReloadCommand(sessionFactory = { cfg ->
+            capturedConfig = cfg
+            mockSession
+        })
+
+        val originalOut = System.out
+        val outContent = java.io.ByteArrayOutputStream()
+        System.setOut(java.io.PrintStream(outContent))
+
+        try {
+            command.parse(
+                listOf(
+                    "com.example.app",
+                    "-d", "/tmp/project",
+                    "-v", "stagingDebug",
+                    "--interval-ms", "500",
+                    "--once",
+                    "--no-fallback"
+                )
+            )
+        } finally {
+            System.setOut(originalOut)
+        }
+
+        assertEquals("com.example.app", capturedConfig?.appId)
+        assertEquals(File("/tmp/project"), capturedConfig?.projectDir)
+        assertEquals("stagingDebug", capturedConfig?.variant)
+        assertEquals(500L, capturedConfig?.intervalMs)
+        assertEquals(true, capturedConfig?.once)
+        assertEquals(false, capturedConfig?.allowFallback)
+
+        val lines = outContent.toString().lines().filter { it.isNotBlank() }
+        assertEquals(2, lines.size)
+        assertEquals("[WATCHING] app=com.example.app pid=1234 modules=2 interval=500ms", lines[0])
+        assertEquals("[STOPPED] app=com.example.app", lines[1])
     }
 }

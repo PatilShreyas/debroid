@@ -16,6 +16,7 @@ Activate this skill whenever the user or task involves:
 - Stepping through Kotlin/Java code execution (`debroid step`)
 - Monitoring field access or modifications with watchpoints (`debroid watch`)
 - Evaluating expressions or mutating variable values in runtime memory (`debroid eval`, `set-var`)
+- Hot-reloading Kotlin/Java source changes or Compose UI live onto running devices without full app rebuilds (`debroid hot-reload`)
 
 ## ⚠️ Critical Agent Rules (DO NOT IGNORE)
 1. **Always use `--with-stacktrace`** when polling to get immediate context.
@@ -134,6 +135,27 @@ debroid detach <session_id>
 ```
 > If the session was opened with `launch`, `detach` automatically runs `adb shell am clear-debug-app` so the user's app resumes normal behavior. You do **not** need to clear it manually.
 
+### ⚡ Live Code & Compose Hot Reload
+To continuously watch project source files and hot-reload changes on a running device:
+```bash
+debroid hot-reload <app_id> [-d/--project-dir <path>] [-v/--variant <variant>] [--interval-ms <ms>] [--once] [--no-fallback]
+```
+- **Flags:**
+  - `-d, --project-dir <path>`: Root directory of the Android Gradle project (default: current directory `.`).
+  - `-v, --variant <variant>`: Build variant to compile and watch (default: `debug`).
+  - `--interval-ms <ms>`: Polling interval in milliseconds for detecting file changes (default: `1000`).
+  - `--once`: Perform a single check/reload pass and immediately exit.
+  - `--no-fallback`: Disable automatic fallback to `installDebug` when resource or structurally incompatible changes occur.
+- **Output Format:**
+  Outputs streaming, single-line, human-readable plain-text `[STATUS]` events:
+  - `[WATCHING] app=<appId> pid=<pid> modules=<count> interval=<ms>ms` - Initialized watcher.
+  - `[RELOADING] modules=[<modules>] files=[<files>]` - Changes detected and compilation underway.
+  - `[RELOADED] mode=<mode> classes=<count> new_classes=<count> ui=<uiRefresh> duration=<ms>ms` - Classes redefined via JVMTI and UI recomposed.
+  - `[COMPILE_ERROR] module=<module> <diagnostic>` - Incremental compilation failure with error details.
+  - `[FALLBACK_REINSTALL] reason=<reason> files=[<files>] duration=<ms>ms` - Triggered fallback APK reinstall on resource changes or structural incompatibilities.
+  - `[ERROR] code=<code> message=<msg>` - Runtime or device communication error.
+  - `[STOPPED] app=<appId>` - Session terminated cleanly.
+
 ## 🚨 Common Pitfalls & Error Recovery
 - **Error: "Failed to communicate with daemon"**: The daemon isn't running. Run `debroid daemon &`.
 - **Error: "AbsentInformationException"**: The app is not debuggable or was obfuscated by ProGuard. Ensure `android:debuggable="true"` in the Manifest.
@@ -211,3 +233,4 @@ Here is the full list of commands and their signatures (note: all commands suppo
 | `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>] [--include-static] [--include-internal] [--pretty]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`; excludes static and `$` internal fields by default) |
 | `step` | `debroid step <session_id> <thread_id> <action> [--pretty]` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
 | `update` | `debroid update [--check-only] [--pretty]` | Checks for CLI updates or performs an in-place self-update to the latest release |
+| `hot-reload` | `debroid hot-reload <app_id> [-d/--project-dir=<path>] [-v/--variant=<variant>] [--interval-ms=<ms>] [--once] [--no-fallback]` | Watches project sources and hot-reloads bytecode and Compose UI via JVMTI (streams plain-text `[STATUS]` events) |

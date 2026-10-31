@@ -37,6 +37,7 @@ sourceSets {
 
 dependencies {
     implementation(project(":core"))
+    implementation(project(":hot-reload"))
 
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.clikt)
