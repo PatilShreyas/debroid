@@ -123,4 +123,29 @@ class SourceChangeTrackerTest {
         assertTrue(detected.codeChangesByModule.isEmpty())
         assertEquals(listOf(manifest.canonicalFile), detected.resourceFiles)
     }
+
+    @Test
+    fun `detects deleted files and cleans them from baseline on commitChanges`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+
+        val helperKt = File(appDir, "src/main/kotlin/com/example/Helper.kt").apply {
+            parentFile.mkdirs()
+            writeText("package com.example\nclass Helper")
+        }
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        val tracker = SourceChangeTracker(layout)
+        tracker.initializeBaseline()
+
+        assertTrue(helperKt.delete())
+
+        val detected = tracker.pollChanges()
+        assertFalse(detected.isEmpty())
+        assertEquals(listOf(helperKt.canonicalFile), detected.codeChangesByModule.values.flatten())
+
+        tracker.commitChanges(detected)
+        assertTrue(tracker.pollChanges().isEmpty())
+    }
 }

@@ -54,7 +54,7 @@ class IncrementalDexCompilerTest {
 
         every { runner.runCommand(capture(commands), any()) } answers {
             val cmd = firstArg<List<String>>()
-            if (cmd.first().endsWith("gradlew") || cmd.first().endsWith("gradlew.bat")) {
+            if (cmd.first() == "gradle" || cmd.first().endsWith("gradlew") || cmd.first().endsWith("gradlew.bat")) {
                 // Simulate Kotlin compiler updating HomeScreenKt.class and adding a new lambda class
                 modifiedClass.writeBytes(byteArrayOf(4, 5, 6, 7))
                 File(classesDir, "HomeScreenKt\$HomeScreen\$1.class").writeBytes(byteArrayOf(9, 9, 9))

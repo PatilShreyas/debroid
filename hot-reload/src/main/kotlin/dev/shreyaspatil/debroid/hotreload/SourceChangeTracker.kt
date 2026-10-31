@@ -14,13 +14,16 @@ class SourceChangeTracker(
     )
 
     private val baseline = mutableMapOf<File, FileFingerprint>()
+    private val fileModules = mutableMapOf<File, GradleModule>()
     private val pendingSnapshots = mutableMapOf<File, FileFingerprint>()
 
     fun initializeBaseline() {
         baseline.clear()
+        fileModules.clear()
         pendingSnapshots.clear()
-        for ((_, file) in scanAllTrackedFiles()) {
+        for ((module, file) in scanAllTrackedFiles()) {
             baseline[file] = fingerprint(file)
+            fileModules[file] = module
         }
     }
 
@@ -28,8 +31,11 @@ class SourceChangeTracker(
         pendingSnapshots.clear()
         val codeChanges = mutableMapOf<GradleModule, MutableList<File>>()
         val resourceChanges = mutableListOf<File>()
+        val seenFiles = mutableSetOf<File>()
 
         for ((module, file) in scanAllTrackedFiles()) {
+            seenFiles.add(file)
+            fileModules[file] = module
             val previous = baseline[file]
             val currentModified = file.lastModified()
             val currentLength = file.length()
@@ -46,10 +52,13 @@ class SourceChangeTracker(
             }
 
             pendingSnapshots[file] = currentFp
-            if (isCodeFile(file)) {
-                codeChanges.computeIfAbsent(module) { mutableListOf() }.add(file)
-            } else if (isResourceOrManifestFile(file)) {
-                resourceChanges.add(file)
+            recordChangedFile(module, file, codeChanges, resourceChanges)
+        }
+
+        for (deletedFile in baseline.keys - seenFiles) {
+            val module = fileModules[deletedFile]
+            if (module != null) {
+                recordChangedFile(module, deletedFile, codeChanges, resourceChanges)
             }
         }
 
@@ -59,6 +68,19 @@ class SourceChangeTracker(
         )
     }
 
+    private fun recordChangedFile(
+        module: GradleModule,
+        file: File,
+        codeChanges: MutableMap<GradleModule, MutableList<File>>,
+        resourceChanges: MutableList<File>
+    ) {
+        if (isCodeFile(file)) {
+            codeChanges.computeIfAbsent(module) { mutableListOf() }.add(file)
+        } else if (isResourceOrManifestFile(file)) {
+            resourceChanges.add(file)
+        }
+    }
+
     fun commitChanges(changes: DetectedChanges) {
         val allFiles = changes.codeChangesByModule.values.flatten() + changes.resourceFiles
         for (file in allFiles) {
@@ -66,6 +88,9 @@ class SourceChangeTracker(
             val fp = pendingSnapshots[canonical] ?: if (canonical.exists()) fingerprint(canonical) else null
             if (fp != null) {
                 baseline[canonical] = fp
+            } else {
+                baseline.remove(canonical)
+                fileModules.remove(canonical)
             }
         }
     }

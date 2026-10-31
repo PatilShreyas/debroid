@@ -240,9 +240,9 @@ class IncrementalDexCompiler(
     }
 
     private fun resolveGradleWrapper(): String {
-        val isWin = System.getProperty("os.name").lowercase().contains("win")
+        val isWin = System.getProperty("os.name").lowercase(Locale.US).contains("win")
         val wrapper = File(projectRoot, if (isWin) "gradlew.bat" else "gradlew")
-        return wrapper.absolutePath
+        return if (wrapper.exists()) wrapper.absolutePath else "gradle"
     }
 
     private fun extractDiagnostic(rawError: String): String {
