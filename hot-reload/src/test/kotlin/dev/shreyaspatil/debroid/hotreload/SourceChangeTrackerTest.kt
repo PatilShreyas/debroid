@@ -52,11 +52,18 @@ class SourceChangeTrackerTest {
         assertEquals(":feature:home", changedModule.gradlePath)
         assertEquals(listOf(homeKt.canonicalFile), detected.codeChangesByModule[changedModule])
 
-        // Before commitChanges, polling again still reports the uncommitted change
-        assertFalse(tracker.pollChanges().isEmpty())
+        // Before commitChanges, polling again with identical uncommitted content is skipped
+        // so uncompilable edits do not trigger infinite recompilation loops
+        assertTrue(tracker.pollChanges().isEmpty())
+
+        // Editing the uncommitted file again (e.g. fixing a compile error) triggers a new change poll
+        homeKt.writeText("package com.example\nfun HomeScreen() { println(\"fixed\") }")
+        homeKt.setLastModified(homeKt.lastModified() + 10_000L)
+        val fixedDetected = tracker.pollChanges()
+        assertFalse(fixedDetected.isEmpty())
 
         // Commit changes -> next poll is empty
-        tracker.commitChanges(detected)
+        tracker.commitChanges(fixedDetected)
         assertTrue(tracker.pollChanges().isEmpty())
 
         // Add a resource XML file

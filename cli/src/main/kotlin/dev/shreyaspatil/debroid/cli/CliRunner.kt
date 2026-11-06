@@ -701,8 +701,8 @@ object CliRunner {
         ).default("debug")
         private val intervalMs by option(
             "--interval-ms",
-            help = "Polling interval in milliseconds for source change detection (default: 1000)."
-        ).int().default(1000)
+            help = "Polling interval in milliseconds for source change detection (default: 300)."
+        ).int().default(300)
         private val once by option(
             "--once",
             help = "Perform a single check/reload pass and exit."

@@ -136,25 +136,11 @@ debroid detach <session_id>
 > If the session was opened with `launch`, `detach` automatically runs `adb shell am clear-debug-app` so the user's app resumes normal behavior. You do **not** need to clear it manually.
 
 ### ⚡ Live Code & Compose Hot Reload
-To continuously watch project source files and hot-reload changes on a running device:
+To watch project source files and hot-reload Kotlin/Java code or Jetpack Compose UI changes onto a running device:
 ```bash
 debroid hot-reload <app_id> [-d/--project-dir <path>] [-v/--variant <variant>] [--interval-ms <ms>] [--once] [--no-fallback]
 ```
-- **Flags:**
-  - `-d, --project-dir <path>`: Root directory of the Android Gradle project (default: current directory `.`).
-  - `-v, --variant <variant>`: Build variant to compile and watch (default: `debug`).
-  - `--interval-ms <ms>`: Polling interval in milliseconds for detecting file changes (default: `1000`).
-  - `--once`: Perform a single check/reload pass and immediately exit.
-  - `--no-fallback`: Disable automatic fallback to `installDebug` when resource or structurally incompatible changes occur.
-- **Output Format:**
-  Outputs streaming, single-line, human-readable plain-text `[STATUS]` events:
-  - `[WATCHING] app=<appId> pid=<pid> modules=<count> interval=<ms>ms` - Initialized watcher.
-  - `[RELOADING] modules=[<modules>] files=[<files>]` - Changes detected and compilation underway.
-  - `[RELOADED] mode=<mode> classes=<count> new_classes=<count> ui=<uiRefresh> duration=<ms>ms` - Classes redefined via JVMTI and UI recomposed.
-  - `[COMPILE_ERROR] module=<module> <diagnostic>` - Incremental compilation failure with error details.
-  - `[FALLBACK_REINSTALL] reason=<reason> files=[<files>] duration=<ms>ms` - Triggered fallback APK reinstall on resource changes or structural incompatibilities.
-  - `[ERROR] code=<code> message=<msg>` - Runtime or device communication error.
-  - `[STOPPED] app=<appId>` - Session terminated cleanly.
+> 📖 **MANDATORY REFERENCE FOR HOT RELOAD:** Whenever you use `debroid hot-reload`, **read [`references/hot-reload.md`](./references/hot-reload.md) first** (also available at `~/.debroid/skills/debroid-cli/references/hot-reload.md`) for the required workflow, status event parsing, state preservation rules, Dos & Don'ts, and troubleshooting. Never run `javap` or inspect `.class`/`.dex`/`build/` internals—only edit source files, watch `debroid hot-reload` status lines, and verify on device.
 
 ## 🚨 Common Pitfalls & Error Recovery
 - **Error: "Failed to communicate with daemon"**: The daemon isn't running. Run `debroid daemon &`.

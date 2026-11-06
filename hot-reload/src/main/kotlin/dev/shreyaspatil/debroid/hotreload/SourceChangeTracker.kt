@@ -16,11 +16,18 @@ class SourceChangeTracker(
     private val baseline = mutableMapOf<File, FileFingerprint>()
     private val fileModules = mutableMapOf<File, GradleModule>()
     private val pendingSnapshots = mutableMapOf<File, FileFingerprint>()
+    private val failedAttemptHashes = mutableMapOf<File, String>()
+    private val canonicalFileCache = mutableMapOf<File, File>()
+
+    companion object {
+        private const val DELETED_SENTINEL = "<DELETED>"
+    }
 
     fun initializeBaseline() {
         baseline.clear()
         fileModules.clear()
         pendingSnapshots.clear()
+        failedAttemptHashes.clear()
         for ((module, file) in scanAllTrackedFiles()) {
             baseline[file] = fingerprint(file)
             fileModules[file] = module
@@ -41,6 +48,7 @@ class SourceChangeTracker(
             val currentLength = file.length()
 
             if (previous != null && previous.lastModified == currentModified && previous.length == currentLength) {
+                failedAttemptHashes.remove(file)
                 continue
             }
 
@@ -48,6 +56,7 @@ class SourceChangeTracker(
             if (previous != null && previous.sha256 == currentFp.sha256) {
                 // Only timestamp changed; update baseline timestamp silently
                 baseline[file] = currentFp
+                failedAttemptHashes.remove(file)
                 continue
             }
 
@@ -60,6 +69,26 @@ class SourceChangeTracker(
             if (module != null) {
                 recordChangedFile(module, deletedFile, codeChanges, resourceChanges)
             }
+        }
+
+        val allChangedFiles = codeChanges.values.flatten() + resourceChanges
+        if (allChangedFiles.isEmpty()) {
+            failedAttemptHashes.clear()
+            return DetectedChanges(emptyMap(), emptyList())
+        }
+
+        val hasNewChangeSinceLastAttempt = allChangedFiles.any { file ->
+            val currentHash = pendingSnapshots[file]?.sha256 ?: DELETED_SENTINEL
+            failedAttemptHashes[file] != currentHash
+        } || (failedAttemptHashes.keys - allChangedFiles.toSet()).isNotEmpty()
+
+        if (!hasNewChangeSinceLastAttempt) {
+            return DetectedChanges(emptyMap(), emptyList())
+        }
+
+        failedAttemptHashes.clear()
+        for (file in allChangedFiles) {
+            failedAttemptHashes[file] = pendingSnapshots[file]?.sha256 ?: DELETED_SENTINEL
         }
 
         return DetectedChanges(
@@ -84,14 +113,16 @@ class SourceChangeTracker(
     fun commitChanges(changes: DetectedChanges) {
         val allFiles = changes.codeChangesByModule.values.flatten() + changes.resourceFiles
         for (file in allFiles) {
-            val canonical = file.canonicalFile
+            val canonical = canonicalFileCache.getOrPut(file) { file.canonicalFile }
             val fp = pendingSnapshots[canonical] ?: if (canonical.exists()) fingerprint(canonical) else null
             if (fp != null) {
                 baseline[canonical] = fp
             } else {
                 baseline.remove(canonical)
                 fileModules.remove(canonical)
+                canonicalFileCache.remove(file)
             }
+            failedAttemptHashes.remove(canonical)
         }
     }
 
@@ -104,7 +135,8 @@ class SourceChangeTracker(
                 .onEnter { dir -> !isIgnoredSourceSet(dir, srcDir) }
                 .filter { it.isFile && (isCodeFile(it) || isResourceOrManifestFile(it)) }
                 .forEach { file ->
-                    results.add(module to file.canonicalFile)
+                    val canonical = canonicalFileCache.getOrPut(file) { file.canonicalFile }
+                    results.add(module to canonical)
                 }
         }
         return results

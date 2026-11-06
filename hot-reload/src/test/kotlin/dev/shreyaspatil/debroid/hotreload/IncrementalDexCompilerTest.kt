@@ -129,4 +129,55 @@ class IncrementalDexCompilerTest {
         assertEquals(":feature:home", failure.module)
         assertEquals("HomeScreen.kt:42:17 Unresolved reference 'foo'", failure.diagnostic)
     }
+
+    @Test
+    fun `extracts Gradle What went wrong block and resolves per-module debug fallback for unflavored libraries`() {
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build/intermediates/built_in_kotlinc/demoDebug").mkdirs()
+        val designDir = File(tempDir, "core/designsystem").apply { mkdirs() }
+        File(designDir, "build/intermediates/built_in_kotlinc/debug").mkdirs()
+
+        val appModule = GradleModule(":app", appDir, ModuleType.ANDROID_APP)
+        val designModule = GradleModule(":core:designsystem", designDir, ModuleType.ANDROID_LIBRARY)
+
+        val compiler = IncrementalDexCompiler(projectRoot = tempDir, variant = "demoDebug")
+        assertEquals("demoDebug", compiler.resolveModuleVariant(appModule))
+        assertEquals("debug", compiler.resolveModuleVariant(designModule))
+
+        val tasks = compiler.buildGradleTasksForModules(
+            mapOf(
+                appModule to listOf(File("MainActivity.kt")),
+                designModule to listOf(File("Button.kt"))
+            )
+        )
+        assertEquals(
+            listOf(":app:compileDemoDebugKotlin", ":core:designsystem:compileDebugKotlin"),
+            tasks
+        )
+
+        val gradleError = """
+            FAILURE: Build failed with an exception.
+
+            * What went wrong:
+            Task 'compileDebugKotlin' not found in project ':feature:foryou:impl'.
+
+            * Try:
+            > Run gradlew tasks
+        """.trimIndent()
+        assertEquals(
+            "Task 'compileDebugKotlin' not found in project ':feature:foryou:impl'.",
+            compiler.extractDiagnostic(gradleError)
+        )
+
+        val candidateError = """
+            Task 'compileDemoDebugKotlin' not found in project ':core:designsystem'. Some candidates are: 'compileDebugKotlin', 'compileReleaseKotlin'.
+        """.trimIndent()
+        assertEquals(
+            listOf(":core:designsystem:compileDebugKotlin"),
+            compiler.resolveFallbackTasksOnTaskNotFound(
+                listOf(":core:designsystem:compileDemoDebugKotlin"),
+                candidateError
+            )
+        )
+    }
 }

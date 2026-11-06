@@ -310,4 +310,84 @@ class HotReloadSessionTest {
         assertEquals(1, events.size)
         assertTrue(events[0] is HotReloadEvent.Watching)
     }
+
+    @Test
+    fun `skips repeated compilation on uncompilable raw edit and hot-reloads next compilable edit`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+        val mainKt = File(appDir, "src/main/kotlin/MainScreen.kt").apply {
+            parentFile.mkdirs()
+            writeText("fun MainScreen() = 1")
+        }
+
+        val adbManager = mockk<AdbManager>(relaxed = true)
+        every { adbManager.isAppDebuggable("com.example.app") } returns Result.success(true)
+        every { adbManager.findPid("com.example.app") } returns Result.success(9999)
+
+        val dexFile = File(tempDir, "redefine_0.dex").apply { writeBytes(byteArrayOf(1)) }
+        val compiler = mockk<IncrementalDexCompiler>(relaxed = true)
+        var compileCallCount = 0
+        every { compiler.compileAndDex(any(), any()) } answers {
+            compileCallCount++
+            if (compileCallCount == 1) {
+                CompilationOutcome.Failure(
+                    module = ":app",
+                    diagnostic = "MainScreen.kt:1:20 Unresolved reference 'brokenRawEdit'"
+                )
+            } else {
+                CompilationOutcome.Success(
+                    classPayloads = listOf(ClassDexPayload("MainScreenKt", dexFile)),
+                    combinedDexFile = dexFile
+                )
+            }
+        }
+
+        val installer = mockk<JvmtiAgentInstaller>()
+        every { installer.applyHotReload("com.example.app", any(), any()) } returns AgentExecutionResult.Success(
+            mode = ReloadMode.JVMTI_STRUCTURAL_SWAP,
+            redefinedCount = 1,
+            newClassesCount = 0,
+            uiRefresh = UiRefreshMode.COMPOSE_HOT_RELOAD
+        )
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        val tracker = SourceChangeTracker(layout).apply { initializeBaseline() }
+
+        // Step 1: Write uncompilable raw edit before session starts
+        mainKt.writeText("fun MainScreen() = brokenRawEdit(")
+        mainKt.setLastModified(mainKt.lastModified() + 5000L)
+
+        lateinit var session: HotReloadSession
+        session = HotReloadSession(
+            config = HotReloadConfig(
+                appId = "com.example.app",
+                projectDir = tempDir,
+                once = false,
+                intervalMs = 20L
+            ),
+            adbManager = adbManager,
+            layout = layout,
+            tracker = tracker,
+            compiler = compiler,
+            agentInstaller = installer
+        )
+
+        val events = mutableListOf<HotReloadEvent>()
+        session.run { event ->
+            events.add(event)
+            if (event is HotReloadEvent.CompileError) {
+                // Let one idle poll pass with the same broken file (should be skipped), then write compilable code
+                Thread.sleep(30L)
+                mainKt.writeText("fun MainScreen() = 2")
+                mainKt.setLastModified(mainKt.lastModified() + 10_000L)
+            } else if (event is HotReloadEvent.Reloaded) {
+                session.stop()
+            }
+        }
+
+        assertEquals(2, compileCallCount)
+        assertEquals(1, events.count { it is HotReloadEvent.CompileError })
+        assertEquals(1, events.count { it is HotReloadEvent.Reloaded })
+    }
 }

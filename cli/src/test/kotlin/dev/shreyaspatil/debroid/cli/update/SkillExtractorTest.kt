@@ -45,6 +45,7 @@ class SkillExtractorTest {
         extractor.extractSkillsToMaster()
 
         val targetFile = File(targetDir, "SKILL.md")
+        val hotReloadRefFile = File(targetDir, "references/hot-reload.md")
         val resourceStream = SkillExtractor::class.java.getResourceAsStream("/SKILL.md")
 
         if (resourceStream == null) {
@@ -52,6 +53,8 @@ class SkillExtractorTest {
         } else {
             assertTrue(targetFile.exists())
             assertTrue(targetFile.length() > 0)
+            assertTrue(hotReloadRefFile.exists())
+            assertTrue(hotReloadRefFile.length() > 0)
         }
     }
 

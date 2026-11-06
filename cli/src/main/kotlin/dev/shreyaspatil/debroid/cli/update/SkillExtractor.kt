@@ -21,8 +21,12 @@ class SkillExtractor(
                 masterSkillDir.mkdirs()
             }
 
-            // Extract the main SKILL.md
-            extractResource("/SKILL.md", File(masterSkillDir, "SKILL.md"))
+            // Extract the main SKILL.md and reference guides
+            skillResources.forEach { relativePath ->
+                val targetFile = File(masterSkillDir, relativePath)
+                targetFile.parentFile?.mkdirs()
+                extractResource("/$relativePath", targetFile)
+            }
         } catch (e: Exception) {
             // Silently fail if extraction fails; don't break the CLI execution
             System.err.println(
@@ -40,5 +44,13 @@ class SkillExtractor(
         } else {
             System.err.println("Warning: Embedded resource $resourcePath was not found in JAR.")
         }
+    }
+
+    companion object {
+        private val skillResources = listOf(
+            "SKILL.md",
+            "references/hot-reload.md",
+            "references/reporting-feedback.md"
+        )
     }
 }

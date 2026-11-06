@@ -12,7 +12,7 @@ data class HotReloadConfig(
     val appId: String,
     val projectDir: File,
     val variant: String = "debug",
-    val intervalMs: Long = 1000L,
+    val intervalMs: Long = 300L,
     val once: Boolean = false,
     val allowFallback: Boolean = true
 )
@@ -26,12 +26,17 @@ class HotReloadSession(
     private val tracker: SourceChangeTracker = SourceChangeTracker(layout).apply { initializeBaseline() },
     private val compiler: IncrementalDexCompiler = IncrementalDexCompiler(
         projectRoot = layout.rootDir,
-        variant = config.variant,
+        variant = layout.resolveVariant(config.appId, config.variant),
         commandRunner = commandRunner
     ).apply { snapshotModuleClasses(layout.modules) },
     private val agentInstaller: JvmtiAgentInstaller = JvmtiAgentInstaller(adbManager),
     private val fallbackInstaller: (GradleModule) -> Result<Unit> = { appModule ->
-        runFallbackGradleInstall(layout.rootDir, appModule, config.variant, commandRunner)
+        runFallbackGradleInstall(
+            layout.rootDir,
+            appModule,
+            layout.resolveVariant(config.appId, config.variant),
+            commandRunner
+        )
     }
 ) {
     private val isRunning = AtomicBoolean(true)
@@ -223,6 +228,8 @@ class HotReloadSession(
         }
 
         adbManager.restartApp(config.appId)
+        runCatching { agentInstaller.invalidateInstalledAgent(config.appId) }
+        compiler.snapshotModuleClasses(layout.modules)
         tracker.commitChanges(changes)
         val durationMs = System.currentTimeMillis() - startMs
         onEvent(HotReloadEvent.FallbackReinstall(reason = reason, files = files, durationMs = durationMs))
