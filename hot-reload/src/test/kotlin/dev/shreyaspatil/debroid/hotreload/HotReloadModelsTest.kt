@@ -51,6 +51,14 @@ class HotReloadModelsTest {
             compileError.formatPlainText()
         )
 
+        val runtimeError = HotReloadEvent.RuntimeError(
+            error = "IllegalStateException: Boom (HomeScreen.kt:45)"
+        )
+        assertEquals(
+            "[RUNTIME_ERROR] IllegalStateException: Boom (HomeScreen.kt:45)",
+            runtimeError.formatPlainText()
+        )
+
         val fallback = HotReloadEvent.FallbackReinstall(
             reason = "RESOURCE_CHANGE",
             files = listOf("activity_main.xml"),

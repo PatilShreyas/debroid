@@ -390,4 +390,120 @@ class HotReloadSessionTest {
         assertEquals(1, events.count { it is HotReloadEvent.CompileError })
         assertEquals(1, events.count { it is HotReloadEvent.Reloaded })
     }
+
+    @Test
+    fun `emits RuntimeError event when agent reports Compose recomposition exception`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+        val mainKt = File(appDir, "src/main/kotlin/MainScreen.kt").apply {
+            parentFile.mkdirs()
+            writeText("fun MainScreen() = 1")
+        }
+
+        val adbManager = mockk<AdbManager>(relaxed = true)
+        every { adbManager.isAppDebuggable("com.example.app") } returns Result.success(true)
+        every { adbManager.findPid("com.example.app") } returns Result.success(9999)
+
+        val compiler = mockk<IncrementalDexCompiler>(relaxed = true)
+        val dexFile = File(tempDir, "redefine_0.dex").apply { writeBytes(byteArrayOf(1)) }
+        every { compiler.compileAndDex(any(), any()) } returns CompilationOutcome.Success(
+            classPayloads = listOf(ClassDexPayload("MainScreenKt", dexFile)),
+            combinedDexFile = dexFile
+        )
+
+        val installer = mockk<JvmtiAgentInstaller>()
+        every { installer.applyHotReload("com.example.app", any(), any()) } returns AgentExecutionResult.Success(
+            mode = ReloadMode.JVMTI_HOT_SWAP,
+            redefinedCount = 1,
+            newClassesCount = 0,
+            uiRefresh = UiRefreshMode.COMPOSE_HOT_RELOAD,
+            runtimeError = "IllegalStateException: Boom during recomposition (MainScreen.kt:12)"
+        )
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        val tracker = SourceChangeTracker(layout).apply { initializeBaseline() }
+        mainKt.writeText("fun MainScreen() { error(\"Boom during recomposition\") }")
+        mainKt.setLastModified(mainKt.lastModified() + 5000L)
+
+        val session = HotReloadSession(
+            config = HotReloadConfig(appId = "com.example.app", projectDir = tempDir, once = true),
+            adbManager = adbManager,
+            layout = layout,
+            tracker = tracker,
+            compiler = compiler,
+            agentInstaller = installer
+        )
+
+        val events = mutableListOf<HotReloadEvent>()
+        session.run { events.add(it) }
+
+        assertEquals(4, events.size)
+        assertTrue(events[0] is HotReloadEvent.Watching)
+        assertTrue(events[1] is HotReloadEvent.Reloading)
+        assertTrue(events[2] is HotReloadEvent.Reloaded)
+        assertEquals(
+            HotReloadEvent.RuntimeError("IllegalStateException: Boom during recomposition (MainScreen.kt:12)"),
+            events[3]
+        )
+    }
+
+    @Test
+    fun `parseCrashLogForPid extracts main-thread uncaught exception and changed file line`() {
+        val session = HotReloadSession(
+            config = HotReloadConfig(appId = "com.example.app", projectDir = tempDir, once = true),
+            adbManager = mockk(relaxed = true),
+            layout = GradleProjectLayout(tempDir, emptyList()),
+            tracker = mockk(relaxed = true),
+            compiler = mockk(relaxed = true),
+            agentInstaller = mockk(relaxed = true)
+        )
+
+        val logcat = """
+            11-06 15:10:00.100 9999 9999 E AndroidRuntime: FATAL EXCEPTION: main
+            11-06 15:10:00.100 9999 9999 E AndroidRuntime: Process: com.example.app, PID: 9999
+            11-06 15:10:00.100 9999 9999 E AndroidRuntime: java.lang.RuntimeException: Unable to start activity
+            11-06 15:10:00.100 9999 9999 E AndroidRuntime: 	at android.app.ActivityThread.performLaunchActivity(ActivityThread.java:4000)
+            11-06 15:10:00.100 9999 9999 E AndroidRuntime: Caused by: java.lang.IllegalArgumentException: Invalid bookmark id
+            11-06 15:10:00.100 9999 9999 E AndroidRuntime: 	at kotlin.PreconditionsKt.require(Preconditions.kt:50)
+            11-06 15:10:00.100 9999 9999 E AndroidRuntime: 	at com.example.app.BookmarksScreenKt.BookmarksScreen(BookmarksScreen.kt:88)
+        """.trimIndent()
+
+        val parsed = session.parseCrashLogForPid(logcat, pid = 9999, changedFileNames = setOf("BookmarksScreen.kt"))
+        assertEquals("IllegalArgumentException: Invalid bookmark id (BookmarksScreen.kt:88)", parsed)
+
+        // Calling again with identical crash log returns null (deduplicated)
+        assertEquals(
+            null,
+            session.parseCrashLogForPid(logcat, pid = 9999, changedFileNames = setOf("BookmarksScreen.kt"))
+        )
+    }
+
+    @Test
+    fun `parseCrashLogForPid prioritizes ComposeInternal composition error over downstream Scaffold crash`() {
+        val session = HotReloadSession(
+            config = HotReloadConfig(appId = "com.example.app", projectDir = tempDir, once = true),
+            adbManager = mockk(relaxed = true),
+            layout = GradleProjectLayout(tempDir, emptyList()),
+            tracker = mockk(relaxed = true),
+            compiler = mockk(relaxed = true),
+            agentInstaller = mockk(relaxed = true)
+        )
+
+        val logcat = """
+            11-06 16:24:55.830  3485  3485 E ComposeInternal: Error was captured in composition while live edit was enabled.
+            11-06 16:24:55.830  3485  3485 E ComposeInternal: java.lang.IllegalStateException: Saved vault sync failed: invalid streak=3
+            11-06 16:24:55.830  3485  3485 E ComposeInternal: 	at com.google.samples.apps.nowinandroid.feature.bookmarks.impl.BookmarksScreenKt.EmptyState(BookmarksScreen.kt:222)
+            11-06 16:24:55.835  3485  3485 E AndroidRuntime: FATAL EXCEPTION: main
+            11-06 16:24:55.835  3485  3485 E AndroidRuntime: Process: com.example.app, PID: 3485
+            11-06 16:24:55.835  3485  3485 E AndroidRuntime: java.util.NoSuchElementException: List is empty.
+            11-06 16:24:55.835  3485  3485 E AndroidRuntime: 	at androidx.compose.material3.ScaffoldKt.ScaffoldLayout(Scaffold.kt:275)
+        """.trimIndent()
+
+        val parsed = session.parseCrashLogForPid(logcat, pid = 3485, changedFileNames = setOf("BookmarksScreen.kt"))
+        assertEquals(
+            "IllegalStateException: Saved vault sync failed: invalid streak=3 (BookmarksScreen.kt:222)",
+            parsed
+        )
+    }
 }

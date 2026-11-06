@@ -40,9 +40,24 @@ class HotReloadSession(
     }
 ) {
     private val isRunning = AtomicBoolean(true)
+    private var lastReportedCrashBlock: String? = null
 
     companion object {
         private const val INSTALL_TIMEOUT_SECONDS = 180L
+        private const val CRASH_LOG_TAIL_LINES = "150"
+        private const val COMPOSE_ERROR_PREFIX = "Error was captured in composition"
+        private val stackFrameRegex = Regex("""^at\s+([\w.$]+)\.[\w$<>]+\(([^():]+):(\d+)\)$""")
+        private val frameworkPrefixes = listOf(
+            "androidx.",
+            "android.",
+            "java.",
+            "javax.",
+            "kotlin.",
+            "kotlinx.",
+            "dalvik.",
+            "com.android.",
+            "sun."
+        )
 
         private fun runFallbackGradleInstall(
             rootDir: File,
@@ -89,11 +104,13 @@ class HotReloadSession(
             )
             return
         }
+        val initialPid = initialPidRes.getOrThrow()
+        seedExistingCrashBaseline(initialPid)
 
         onEvent(
             HotReloadEvent.Watching(
                 appId = config.appId,
-                pid = initialPidRes.getOrThrow(),
+                pid = initialPid,
                 moduleCount = layout.modules.size,
                 intervalMs = config.intervalMs
             )
@@ -101,19 +118,25 @@ class HotReloadSession(
 
         val stagingDir = Files.createTempDirectory("debroid_dex_stage").toFile()
         try {
+            var isFirstPass = true
             while (isRunning.get()) {
-                val changes = tracker.pollChanges()
+                val changes = if (isFirstPass || config.once) {
+                    isFirstPass = false
+                    tracker.pollChanges()
+                } else {
+                    tracker.awaitChanges(config.intervalMs)
+                }
                 if (!changes.isEmpty()) {
                     processDetectedChanges(changes, stagingDir, onEvent)
                 }
                 if (config.once) {
                     break
                 }
-                Thread.sleep(config.intervalMs)
             }
         } catch (_: InterruptedException) {
             onEvent(HotReloadEvent.Stopped(config.appId))
         } finally {
+            runCatching { tracker.close() }
             stagingDir.deleteRecursively()
         }
     }
@@ -138,6 +161,7 @@ class HotReloadSession(
             onEvent(HotReloadEvent.Error("APP_NOT_RUNNING", "App ${config.appId} is not running"))
             return
         }
+        val pid = pidRes.getOrThrow()
 
         val modulePaths = changes.codeChangesByModule.keys.map { it.gradlePath }
         val fileNames = changes.codeChangesByModule.values.flatten().map { it.name }
@@ -153,7 +177,7 @@ class HotReloadSession(
                     tracker.commitChanges(changes)
                     return
                 }
-                applyDexToDevice(compileOutcome, changes, fileNames, startMs, onEvent)
+                applyDexToDevice(compileOutcome, changes, fileNames, pid, startMs, onEvent)
             }
         }
     }
@@ -162,6 +186,7 @@ class HotReloadSession(
         compileOutcome: CompilationOutcome.Success,
         changes: DetectedChanges,
         fileNames: List<String>,
+        pid: Int,
         startMs: Long,
         onEvent: (HotReloadEvent) -> Unit
     ) {
@@ -184,6 +209,10 @@ class HotReloadSession(
                         durationMs = durationMs
                     )
                 )
+                val runtimeError = agentRes.runtimeError ?: checkUncaughtProcessCrash(pid, fileNames.toSet())
+                if (runtimeError != null) {
+                    onEvent(HotReloadEvent.RuntimeError(runtimeError))
+                }
             }
             is AgentExecutionResult.StructuralIncompatible -> {
                 handleFallback(
@@ -194,9 +223,163 @@ class HotReloadSession(
                 )
             }
             is AgentExecutionResult.Error -> {
-                onEvent(HotReloadEvent.Error(agentRes.code, agentRes.message))
+                val crashError = checkUncaughtProcessCrash(pid, fileNames.toSet())
+                if (crashError != null) {
+                    tracker.commitChanges(changes)
+                    onEvent(HotReloadEvent.RuntimeError(crashError))
+                } else {
+                    onEvent(HotReloadEvent.Error(agentRes.code, agentRes.message))
+                }
             }
         }
+    }
+
+    private fun seedExistingCrashBaseline(pid: Int) {
+        lastReportedCrashBlock = extractLatestCrashBlockForPid(readCrashLogTail(), pid)
+    }
+
+    private fun checkUncaughtProcessCrash(pid: Int, changedFileNames: Set<String>): String? {
+        return parseCrashLogForPid(readCrashLogTail(), pid, changedFileNames)
+    }
+
+    private fun readCrashLogTail(): String = runCatching {
+        val rawResult: Any? = adbManager.runShell("logcat", "-b", "main,crash", "-d", "-t", CRASH_LOG_TAIL_LINES)
+            .getOrNull()
+        rawResult as? String ?: ""
+    }.getOrDefault("")
+
+    internal fun parseCrashLogForPid(
+        logcatOutput: String,
+        pid: Int,
+        changedFileNames: Set<String>
+    ): String? {
+        val block = extractLatestCrashBlockForPid(logcatOutput, pid) ?: return null
+        if (block == lastReportedCrashBlock) return null
+        lastReportedCrashBlock = block
+
+        val lines = block.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val sectionLines = splitIntoCausalSections(lines).lastOrNull() ?: lines
+
+        val headerLine = sectionLines.firstOrNull { line ->
+            !line.startsWith("FATAL EXCEPTION:") &&
+                !line.startsWith(COMPOSE_ERROR_PREFIX) &&
+                !line.startsWith("Process:") &&
+                !line.startsWith("at ") &&
+                !line.startsWith("...")
+        }?.removePrefix("Caused by:")?.trim() ?: return null
+
+        val formattedHeader = simplifyExceptionHeader(headerLine)
+        val location = selectBestFrameLocation(sectionLines, changedFileNames)
+            ?: selectBestFrameLocation(lines, changedFileNames)
+
+        return if (location != null) {
+            "$formattedHeader ($location)"
+        } else {
+            formattedHeader
+        }
+    }
+
+    private fun extractLatestCrashBlockForPid(logcatOutput: String, pid: Int): String? {
+        if (logcatOutput.isBlank()) return null
+        return extractLatestComposeErrorBlockForPid(logcatOutput, pid)
+            ?: extractLatestAndroidRuntimeBlockForPid(logcatOutput, pid)
+    }
+
+    private fun extractLatestComposeErrorBlockForPid(logcatOutput: String, pid: Int): String? {
+        val pidRegex = Regex("""\b$pid\b""")
+        val composeLines = logcatOutput.lineSequence()
+            .mapNotNull { line ->
+                val markerIdx = line.indexOf("ComposeInternal:")
+                if (markerIdx >= 0) {
+                    val prefix = line.substring(0, markerIdx)
+                    if (prefix.isBlank() || pidRegex.containsMatchIn(prefix)) {
+                        line.substring(markerIdx + "ComposeInternal:".length).trim()
+                    } else {
+                        null
+                    }
+                } else {
+                    null
+                }
+            }
+            .toList()
+        if (composeLines.isEmpty()) return null
+
+        val blocks = mutableListOf<MutableList<String>>()
+        for (line in composeLines) {
+            if (line.startsWith(COMPOSE_ERROR_PREFIX)) {
+                blocks.add(mutableListOf(line))
+            } else if (blocks.isNotEmpty()) {
+                blocks.last().add(line)
+            }
+        }
+        return blocks.lastOrNull()?.joinToString("\n")
+    }
+
+    private fun extractLatestAndroidRuntimeBlockForPid(logcatOutput: String, pid: Int): String? {
+        val runtimeLines = logcatOutput.lineSequence()
+            .mapNotNull { line ->
+                val markerIdx = line.indexOf("AndroidRuntime:")
+                if (markerIdx >= 0) {
+                    line.substring(markerIdx + "AndroidRuntime:".length).trim()
+                } else {
+                    null
+                }
+            }
+            .toList()
+        if (runtimeLines.isEmpty()) return null
+
+        val blocks = mutableListOf<MutableList<String>>()
+        for (line in runtimeLines) {
+            if (line.startsWith("FATAL EXCEPTION:")) {
+                blocks.add(mutableListOf(line))
+            } else if (blocks.isNotEmpty()) {
+                blocks.last().add(line)
+            }
+        }
+
+        val pidToken = "PID: $pid"
+        return blocks.lastOrNull { block ->
+            block.any { it.contains(pidToken) }
+        }?.joinToString("\n")
+    }
+
+    private fun splitIntoCausalSections(lines: List<String>): List<List<String>> {
+        val sections = mutableListOf<MutableList<String>>()
+        for (line in lines) {
+            if (line.startsWith("Caused by:") || sections.isEmpty()) {
+                sections.add(mutableListOf(line))
+            } else {
+                sections.last().add(line)
+            }
+        }
+        return sections
+    }
+
+    private fun simplifyExceptionHeader(headerLine: String): String {
+        val colonIdx = headerLine.indexOf(':')
+        val fqcn = if (colonIdx > 0) headerLine.substring(0, colonIdx).trim() else headerLine.trim()
+        val message = if (colonIdx > 0) headerLine.substring(colonIdx + 1).trim() else ""
+        val simpleName = fqcn.substringAfterLast('.').substringAfterLast('$').ifEmpty { fqcn }
+        return if (message.isNotEmpty()) "$simpleName: $message" else simpleName
+    }
+
+    private fun selectBestFrameLocation(lines: List<String>, changedFileNames: Set<String>): String? {
+        val parsedFrames = lines.mapNotNull { line ->
+            val match = stackFrameRegex.matchEntire(line) ?: return@mapNotNull null
+            val className = match.groupValues[1]
+            val fileName = match.groupValues[2]
+            val lineNum = match.groupValues[3]
+            Triple(className, fileName, "$fileName:$lineNum")
+        }
+        if (parsedFrames.isEmpty()) return null
+
+        val changedMatch = parsedFrames.firstOrNull { (_, fileName, _) -> fileName in changedFileNames }
+        if (changedMatch != null) return changedMatch.third
+
+        val appMatch = parsedFrames.firstOrNull { (className, _, _) ->
+            frameworkPrefixes.none { className.startsWith(it) }
+        }
+        return (appMatch ?: parsedFrames.first()).third
     }
 
     private fun handleFallback(

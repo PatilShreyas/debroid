@@ -154,5 +154,51 @@ class SourceChangeTrackerTest {
 
         tracker.commitChanges(detected)
         assertTrue(tracker.pollChanges().isEmpty())
+        tracker.close()
+    }
+
+    @Test
+    fun `awaitChanges detects file edits and newly created subdirectories via WatchService and fallback`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+
+        val screenKt = File(appDir, "src/main/kotlin/com/example/Screen.kt").apply {
+            parentFile.mkdirs()
+            writeText("package com.example\nfun Screen() = 1")
+        }
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        SourceChangeTracker(layout).use { tracker ->
+            tracker.initializeBaseline()
+
+            // Idle await returns empty
+            assertTrue(tracker.awaitChanges(timeoutMs = 15L).isEmpty())
+
+            // Modify existing file
+            screenKt.writeText("package com.example\nfun Screen() = 2")
+            screenKt.setLastModified(screenKt.lastModified() + 5_000L)
+
+            val modified = tracker.awaitChanges(timeoutMs = 20L)
+            assertFalse(modified.isEmpty())
+            assertEquals(listOf(screenKt.canonicalFile), modified.codeChangesByModule.values.flatten())
+
+            // Uncommitted repeat await is deduplicated
+            assertTrue(tracker.awaitChanges(timeoutMs = 15L).isEmpty())
+
+            tracker.commitChanges(modified)
+            assertTrue(tracker.awaitChanges(timeoutMs = 15L).isEmpty())
+
+            // Create a brand new nested package directory and file
+            val newSubFile = File(appDir, "src/main/kotlin/com/example/sub/NewComponent.kt").apply {
+                parentFile.mkdirs()
+                writeText("package com.example.sub\nfun NewComponent() {}")
+            }
+            screenKt.parentFile.setLastModified(screenKt.parentFile.lastModified() + 5_000L)
+
+            val added = tracker.awaitChanges(timeoutMs = 20L)
+            assertFalse(added.isEmpty())
+            assertEquals(listOf(newSubFile.canonicalFile), added.codeChangesByModule.values.flatten())
+        }
     }
 }

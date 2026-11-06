@@ -9,6 +9,8 @@
 #include <vector>
 #include <fstream>
 #include <sstream>
+#include <thread>
+#include <unistd.h>
 
 #define TAG "debroid-hotreload"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
@@ -22,10 +24,13 @@ struct ClassPayload {
 };
 
 void write_result(const std::string& path, const std::string& content) {
-    FILE* fp = fopen(path.c_str(), "w");
+    std::string tmp_path = path + ".tmp";
+    FILE* fp = fopen(tmp_path.c_str(), "w");
     if (fp) {
         fputs(content.c_str(), fp);
+        fflush(fp);
         fclose(fp);
+        rename(tmp_path.c_str(), path.c_str());
         LOGI("Wrote result to %s: %s", path.c_str(), content.c_str());
     } else {
         LOGE("Failed to open result file %s for writing", path.c_str());
@@ -57,6 +62,205 @@ bool matches_any_prefix(const char* cname, const std::vector<std::string>& prefi
         }
     }
     return false;
+}
+
+bool is_framework_class_name(const char* cname) {
+    if (!cname) return true;
+    return (strncmp(cname, "androidx.", 9) == 0) ||
+           (strncmp(cname, "android.", 8) == 0) ||
+           (strncmp(cname, "java.", 5) == 0) ||
+           (strncmp(cname, "javax.", 6) == 0) ||
+           (strncmp(cname, "kotlin.", 7) == 0) ||
+           (strncmp(cname, "kotlinx.", 8) == 0) ||
+           (strncmp(cname, "dalvik.", 7) == 0) ||
+           (strncmp(cname, "com.android.", 12) == 0) ||
+           (strncmp(cname, "sun.", 4) == 0);
+}
+
+std::string sanitize_single_line(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    bool last_was_space = true;
+    for (char c : raw) {
+        if (c == '\r' || c == '\n' || c == '\t') {
+            if (!last_was_space) {
+                out.push_back(' ');
+                last_was_space = true;
+            }
+        } else {
+            out.push_back(c);
+            last_was_space = (c == ' ');
+        }
+    }
+    while (!out.empty() && out.back() == ' ') {
+        out.pop_back();
+    }
+    return out;
+}
+
+std::string jstring_to_std_string(JNIEnv* env, jstring jstr) {
+    if (!env || !jstr) return "";
+    const char* chars = env->GetStringUTFChars(jstr, nullptr);
+    if (!chars) return "";
+    std::string res(chars);
+    env->ReleaseStringUTFChars(jstr, chars);
+    return res;
+}
+
+std::string format_java_throwable(
+    JNIEnv* env,
+    jthrowable throwable,
+    const std::vector<std::string>& redefined_prefixes
+) {
+    if (!env || !throwable) return "";
+
+    jclass throwable_cls = env->FindClass("java/lang/Throwable");
+    jclass class_cls = env->FindClass("java/lang/Class");
+    jclass ste_cls = env->FindClass("java/lang/StackTraceElement");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (!throwable_cls || !class_cls || !ste_cls) {
+        if (throwable_cls) env->DeleteLocalRef(throwable_cls);
+        if (class_cls) env->DeleteLocalRef(class_cls);
+        if (ste_cls) env->DeleteLocalRef(ste_cls);
+        return "";
+    }
+
+    jmethodID get_cause_mid = env->GetMethodID(throwable_cls, "getCause", "()Ljava/lang/Throwable;");
+    jmethodID get_msg_mid = env->GetMethodID(throwable_cls, "getMessage", "()Ljava/lang/String;");
+    jmethodID get_stack_mid = env->GetMethodID(throwable_cls, "getStackTrace", "()[Ljava/lang/StackTraceElement;");
+    jmethodID get_simple_name_mid = env->GetMethodID(class_cls, "getSimpleName", "()Ljava/lang/String;");
+    jmethodID get_name_mid = env->GetMethodID(class_cls, "getName", "()Ljava/lang/String;");
+    jmethodID ste_class_mid = env->GetMethodID(ste_cls, "getClassName", "()Ljava/lang/String;");
+    jmethodID ste_file_mid = env->GetMethodID(ste_cls, "getFileName", "()Ljava/lang/String;");
+    jmethodID ste_line_mid = env->GetMethodID(ste_cls, "getLineNumber", "()I");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    jthrowable current = static_cast<jthrowable>(env->NewLocalRef(throwable));
+    for (int depth = 0; depth < 4 && get_cause_mid && current; depth++) {
+        jthrowable cause = static_cast<jthrowable>(env->CallObjectMethod(current, get_cause_mid));
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            cause = nullptr;
+        }
+        if (!cause || env->IsSameObject(cause, current)) {
+            if (cause) env->DeleteLocalRef(cause);
+            break;
+        }
+        env->DeleteLocalRef(current);
+        current = cause;
+    }
+
+    jclass exc_cls = env->GetObjectClass(current);
+    std::string exc_name;
+    if (exc_cls) {
+        if (get_simple_name_mid) {
+            jstring jsimple = static_cast<jstring>(env->CallObjectMethod(exc_cls, get_simple_name_mid));
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                jsimple = nullptr;
+            }
+            if (jsimple) {
+                exc_name = jstring_to_std_string(env, jsimple);
+                env->DeleteLocalRef(jsimple);
+            }
+        }
+        if (exc_name.empty() && get_name_mid) {
+            jstring jfull = static_cast<jstring>(env->CallObjectMethod(exc_cls, get_name_mid));
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                jfull = nullptr;
+            }
+            if (jfull) {
+                std::string full = jstring_to_std_string(env, jfull);
+                env->DeleteLocalRef(jfull);
+                size_t sep = full.find_last_of(".$");
+                exc_name = (sep != std::string::npos) ? full.substr(sep + 1) : full;
+            }
+        }
+        env->DeleteLocalRef(exc_cls);
+    }
+    if (exc_name.empty()) {
+        exc_name = "RuntimeException";
+    }
+
+    std::string exc_msg;
+    if (get_msg_mid) {
+        jstring jmsg = static_cast<jstring>(env->CallObjectMethod(current, get_msg_mid));
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            jmsg = nullptr;
+        }
+        if (jmsg) {
+            exc_msg = sanitize_single_line(jstring_to_std_string(env, jmsg));
+            env->DeleteLocalRef(jmsg);
+        }
+    }
+
+    std::string best_redefined_loc;
+    std::string best_app_loc;
+    std::string fallback_loc;
+
+    if (get_stack_mid && ste_class_mid && ste_file_mid && ste_line_mid) {
+        jobjectArray frames = static_cast<jobjectArray>(env->CallObjectMethod(current, get_stack_mid));
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            frames = nullptr;
+        }
+        if (frames) {
+            jsize len = env->GetArrayLength(frames);
+            for (jsize i = 0; i < len; i++) {
+                jobject frame = env->GetObjectArrayElement(frames, i);
+                if (env->ExceptionCheck() || !frame) {
+                    env->ExceptionClear();
+                    continue;
+                }
+                jstring jcname = static_cast<jstring>(env->CallObjectMethod(frame, ste_class_mid));
+                if (env->ExceptionCheck()) { env->ExceptionClear(); jcname = nullptr; }
+                jstring jfname = static_cast<jstring>(env->CallObjectMethod(frame, ste_file_mid));
+                if (env->ExceptionCheck()) { env->ExceptionClear(); jfname = nullptr; }
+                jint line = env->CallIntMethod(frame, ste_line_mid);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); line = -1; }
+
+                std::string cname = jstring_to_std_string(env, jcname);
+                std::string fname = jstring_to_std_string(env, jfname);
+                if (jcname) env->DeleteLocalRef(jcname);
+                if (jfname) env->DeleteLocalRef(jfname);
+                env->DeleteLocalRef(frame);
+
+                if (!fname.empty() && line > 0) {
+                    std::string loc = fname + ":" + std::to_string(line);
+                    if (fallback_loc.empty()) {
+                        fallback_loc = loc;
+                    }
+                    if (!redefined_prefixes.empty() &&
+                        matches_any_prefix(cname.c_str(), redefined_prefixes) &&
+                        best_redefined_loc.empty()) {
+                        best_redefined_loc = loc;
+                        break;
+                    }
+                    if (!is_framework_class_name(cname.c_str()) && best_app_loc.empty()) {
+                        best_app_loc = loc;
+                    }
+                }
+            }
+            env->DeleteLocalRef(frames);
+        }
+    }
+
+    env->DeleteLocalRef(current);
+    env->DeleteLocalRef(throwable_cls);
+    env->DeleteLocalRef(class_cls);
+    env->DeleteLocalRef(ste_cls);
+
+    std::string chosen_loc = !best_redefined_loc.empty()
+        ? best_redefined_loc
+        : (!best_app_loc.empty() ? best_app_loc : fallback_loc);
+
+    std::string formatted = exc_msg.empty() ? exc_name : (exc_name + ": " + exc_msg);
+    if (!chosen_loc.empty()) {
+        formatted += " (" + chosen_loc + ")";
+    }
+    return sanitize_single_line(formatted);
 }
 
 bool inspect_app_cached_lambda(
@@ -208,8 +412,10 @@ int clear_stale_lambda_slots(
     jfieldID block_fid,
     jclass kotlin_func_cls,
     const std::vector<std::string>& redefined_prefixes,
-    bool* out_matched_any_scope
+    bool allow_fallback,
+    bool* out_comp_matched
 ) {
+    if (out_comp_matched) *out_comp_matched = false;
     if (!comp || !comp_cls || !empty_slot_obj) return 0;
 
     jfieldID slot_table_fid = env->GetFieldID(comp_cls, "slotTable", "Landroidx/compose/runtime/SlotTable;");
@@ -359,19 +565,31 @@ int clear_stale_lambda_slots(
             }
             env->DeleteLocalRef(elem);
         }
+    }
 
-        const std::vector<jsize>& slots_to_clear =
-            !matched_scope_groups.empty() ? matched_lambda_slots : all_app_lambda_slots;
+    bool comp_matched = !matched_scope_groups.empty() || !matched_lambda_slots.empty();
+    if (out_comp_matched) {
+        *out_comp_matched = comp_matched;
+    }
+
+    if (!comp_matched && !allow_fallback) {
+        if (slots) env->DeleteLocalRef(slots);
+        if (recompose_scope_cls) env->DeleteLocalRef(recompose_scope_cls);
+        if (anchor_cls) env->DeleteLocalRef(anchor_cls);
+        if (st_cls) env->DeleteLocalRef(st_cls);
+        env->DeleteLocalRef(slot_table);
+        return 0;
+    }
+
+    const std::vector<jsize>& slots_to_clear =
+        comp_matched ? matched_lambda_slots : all_app_lambda_slots;
+    if (slots) {
         for (jsize slot_idx : slots_to_clear) {
             env->SetObjectArrayElement(slots, slot_idx, empty_slot_obj);
             if (env->ExceptionCheck()) {
                 env->ExceptionClear();
             }
         }
-    }
-
-    if (out_matched_any_scope && !matched_scope_groups.empty()) {
-        *out_matched_any_scope = true;
     }
 
     const std::vector<jint>& target_scope_groups =
@@ -484,10 +702,309 @@ int clear_stale_lambda_slots(
 
     if (st_cls) env->DeleteLocalRef(st_cls);
     env->DeleteLocalRef(slot_table);
-    int base_cleared = static_cast<int>(
-        !matched_scope_groups.empty() ? matched_lambda_slots.size() : all_app_lambda_slots.size()
-    );
+    int base_cleared = static_cast<int>(slots_to_clear.size());
     return base_cleared + extra_cleared_slots;
+}
+
+std::string extract_compose_recomposer_error(
+    JNIEnv* env,
+    jobject class_loader,
+    jmethodID load_class_mid,
+    const std::vector<std::string>& redefined_prefixes
+) {
+    if (!env || !class_loader || !load_class_mid) return "";
+
+    jclass list_cls = env->FindClass("java/util/List");
+    jmethodID size_mid = list_cls ? env->GetMethodID(list_cls, "size", "()I") : nullptr;
+    jmethodID get_mid = list_cls ? env->GetMethodID(list_cls, "get", "(I)Ljava/lang/Object;") : nullptr;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (!list_cls || !size_mid || !get_mid) {
+        if (list_cls) env->DeleteLocalRef(list_cls);
+        return "";
+    }
+
+    std::string formatted;
+
+    // 1. Check HotReloaderKt.getCurrentCompositionErrors() / currentCompositionErrors() -> List<Pair<Throwable, Boolean>>
+    jclass hot_reloader_kt = load_app_class(env, class_loader, load_class_mid, "androidx.compose.runtime.HotReloaderKt");
+    if (hot_reloader_kt) {
+        jmethodID get_errs_mid = env->GetStaticMethodID(hot_reloader_kt, "getCurrentCompositionErrors", "()Ljava/util/List;");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (!get_errs_mid) {
+            get_errs_mid = env->GetStaticMethodID(hot_reloader_kt, "currentCompositionErrors", "()Ljava/util/List;");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        if (get_errs_mid) {
+            jobject errs_list = env->CallStaticObjectMethod(hot_reloader_kt, get_errs_mid);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                errs_list = nullptr;
+            }
+            if (errs_list) {
+                jint sz = env->CallIntMethod(errs_list, size_mid);
+                if (!env->ExceptionCheck() && sz > 0) {
+                    jobject pair_obj = env->CallObjectMethod(errs_list, get_mid, 0);
+                    if (!env->ExceptionCheck() && pair_obj) {
+                        jclass pair_cls = env->GetObjectClass(pair_obj);
+                        jmethodID first_mid = pair_cls ? env->GetMethodID(pair_cls, "getFirst", "()Ljava/lang/Object;") : nullptr;
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        jobject cause_obj = first_mid ? env->CallObjectMethod(pair_obj, first_mid) : nullptr;
+                        if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                            cause_obj = nullptr;
+                        }
+                        if (cause_obj) {
+                            formatted = format_java_throwable(env, static_cast<jthrowable>(cause_obj), redefined_prefixes);
+                            env->DeleteLocalRef(cause_obj);
+                        }
+                        if (pair_cls) env->DeleteLocalRef(pair_cls);
+                        env->DeleteLocalRef(pair_obj);
+                    } else {
+                        env->ExceptionClear();
+                    }
+                } else {
+                    env->ExceptionClear();
+                }
+                env->DeleteLocalRef(errs_list);
+            }
+        }
+        env->DeleteLocalRef(hot_reloader_kt);
+    }
+
+    // 2. Fallback: Check HotReloader.Companion.getRecomposerErrors() / getCurrentErrors()
+    if (formatted.empty()) {
+        jclass hot_reloader_cls = load_app_class(env, class_loader, load_class_mid, "androidx.compose.runtime.HotReloader");
+        if (hot_reloader_cls) {
+            jfieldID companion_fid = env->GetStaticFieldID(
+                hot_reloader_cls,
+                "Companion",
+                "Landroidx/compose/runtime/HotReloader$Companion;"
+            );
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            jobject companion_obj = companion_fid ? env->GetStaticObjectField(hot_reloader_cls, companion_fid) : nullptr;
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                companion_obj = nullptr;
+            }
+            if (companion_obj) {
+                jclass comp_cls = env->GetObjectClass(companion_obj);
+                jmethodID get_rec_errs_mid = comp_cls
+                    ? env->GetMethodID(comp_cls, "getRecomposerErrors", "()Ljava/util/List;")
+                    : nullptr;
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                if (!get_rec_errs_mid && comp_cls) {
+                    get_rec_errs_mid = env->GetMethodID(comp_cls, "getCurrentErrors", "()Ljava/util/List;");
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+                if (get_rec_errs_mid) {
+                    jobject errs_list = env->CallObjectMethod(companion_obj, get_rec_errs_mid);
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        errs_list = nullptr;
+                    }
+                    if (errs_list) {
+                        jint sz = env->CallIntMethod(errs_list, size_mid);
+                        if (!env->ExceptionCheck() && sz > 0) {
+                            jobject err_info = env->CallObjectMethod(errs_list, get_mid, 0);
+                            if (!env->ExceptionCheck() && err_info) {
+                                jclass info_cls = env->GetObjectClass(err_info);
+                                jmethodID cause_mid = info_cls
+                                    ? env->GetMethodID(info_cls, "getCause", "()Ljava/lang/Throwable;")
+                                    : nullptr;
+                                if (env->ExceptionCheck()) env->ExceptionClear();
+                                if (!cause_mid && info_cls) {
+                                    cause_mid = env->GetMethodID(info_cls, "getCause", "()Ljava/lang/Exception;");
+                                    if (env->ExceptionCheck()) env->ExceptionClear();
+                                }
+                                jobject cause_obj = cause_mid ? env->CallObjectMethod(err_info, cause_mid) : nullptr;
+                                if (env->ExceptionCheck()) {
+                                    env->ExceptionClear();
+                                    cause_obj = nullptr;
+                                }
+                                if (cause_obj) {
+                                    formatted = format_java_throwable(
+                                        env,
+                                        static_cast<jthrowable>(cause_obj),
+                                        redefined_prefixes
+                                    );
+                                    env->DeleteLocalRef(cause_obj);
+                                }
+                                if (info_cls) env->DeleteLocalRef(info_cls);
+                                env->DeleteLocalRef(err_info);
+                            } else {
+                                env->ExceptionClear();
+                            }
+                        } else {
+                            env->ExceptionClear();
+                        }
+                        env->DeleteLocalRef(errs_list);
+                    }
+                }
+                if (comp_cls) env->DeleteLocalRef(comp_cls);
+                env->DeleteLocalRef(companion_obj);
+            }
+            env->DeleteLocalRef(hot_reloader_cls);
+        }
+    }
+
+    env->DeleteLocalRef(list_cls);
+    return formatted;
+}
+
+bool query_recomposer_work_state(
+    JNIEnv* env,
+    jobject class_loader,
+    jmethodID load_class_mid,
+    jlong* out_total_change_count
+) {
+    if (out_total_change_count) *out_total_change_count = 0;
+    if (!env || !class_loader || !load_class_mid) return false;
+
+    jclass recomposer_cls = load_app_class(env, class_loader, load_class_mid, "androidx.compose.runtime.Recomposer");
+    if (!recomposer_cls) return false;
+
+    jmethodID get_running_mid = env->GetStaticMethodID(
+        recomposer_cls,
+        "access$get_runningRecomposers$cp",
+        "()Lkotlinx/coroutines/flow/MutableStateFlow;"
+    );
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    jobject state_flow = get_running_mid ? env->CallStaticObjectMethod(recomposer_cls, get_running_mid) : nullptr;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        state_flow = nullptr;
+    }
+
+    bool any_pending = false;
+    jlong total_changes = 0;
+
+    if (state_flow) {
+        jclass sf_cls = env->GetObjectClass(state_flow);
+        jmethodID get_val_mid = sf_cls ? env->GetMethodID(sf_cls, "getValue", "()Ljava/lang/Object;") : nullptr;
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        jobject recomposer_set = get_val_mid ? env->CallObjectMethod(state_flow, get_val_mid) : nullptr;
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            recomposer_set = nullptr;
+        }
+        if (recomposer_set) {
+            jclass iterable_cls = env->FindClass("java/lang/Iterable");
+            jclass iterator_cls = env->FindClass("java/util/Iterator");
+            jmethodID iterator_mid = iterable_cls ? env->GetMethodID(iterable_cls, "iterator", "()Ljava/util/Iterator;") : nullptr;
+            jmethodID has_next_mid = iterator_cls ? env->GetMethodID(iterator_cls, "hasNext", "()Z") : nullptr;
+            jmethodID next_mid = iterator_cls ? env->GetMethodID(iterator_cls, "next", "()Ljava/lang/Object;") : nullptr;
+
+            jobject iter = iterator_mid ? env->CallObjectMethod(recomposer_set, iterator_mid) : nullptr;
+            while (iter && has_next_mid && env->CallBooleanMethod(iter, has_next_mid)) {
+                jobject info_obj = env->CallObjectMethod(iter, next_mid);
+                if (!info_obj) continue;
+                jclass info_cls = env->GetObjectClass(info_obj);
+                if (info_cls) {
+                    jmethodID pending_mid = env->GetMethodID(info_cls, "getHasPendingWork", "()Z");
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    if (pending_mid) {
+                        jboolean pending = env->CallBooleanMethod(info_obj, pending_mid);
+                        if (!env->ExceptionCheck() && pending) {
+                            any_pending = true;
+                        } else if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                        }
+                    }
+                    jmethodID changes_mid = env->GetMethodID(info_cls, "getChangeCount", "()J");
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    if (changes_mid) {
+                        jlong count = env->CallLongMethod(info_obj, changes_mid);
+                        if (!env->ExceptionCheck()) {
+                            total_changes += count;
+                        } else {
+                            env->ExceptionClear();
+                        }
+                    }
+                    env->DeleteLocalRef(info_cls);
+                }
+                env->DeleteLocalRef(info_obj);
+            }
+            if (iter) env->DeleteLocalRef(iter);
+            if (iterable_cls) env->DeleteLocalRef(iterable_cls);
+            if (iterator_cls) env->DeleteLocalRef(iterator_cls);
+            env->DeleteLocalRef(recomposer_set);
+        }
+        if (sf_cls) env->DeleteLocalRef(sf_cls);
+        env->DeleteLocalRef(state_flow);
+    }
+    env->DeleteLocalRef(recomposer_cls);
+
+    if (out_total_change_count) *out_total_change_count = total_changes;
+    return any_pending;
+}
+
+std::string await_compose_recomposition_error(
+    JNIEnv* env,
+    jobject class_loader,
+    jmethodID load_class_mid,
+    const std::vector<std::string>& redefined_prefixes,
+    jlong initial_change_count
+) {
+    bool saw_pending = false;
+    for (int attempt = 0; attempt < 10; attempt++) {
+        usleep(15000); // 15ms per tick (~1 Choreographer frame)
+        std::string err = extract_compose_recomposer_error(env, class_loader, load_class_mid, redefined_prefixes);
+        if (!err.empty()) {
+            return err;
+        }
+        jlong current_change_count = 0;
+        bool has_pending = query_recomposer_work_state(env, class_loader, load_class_mid, &current_change_count);
+        if (has_pending) {
+            saw_pending = true;
+        }
+        if (current_change_count > initial_change_count || (saw_pending && !has_pending) || (attempt >= 5 && !has_pending)) {
+            return extract_compose_recomposer_error(env, class_loader, load_class_mid, redefined_prefixes);
+        }
+    }
+    return extract_compose_recomposer_error(env, class_loader, load_class_mid, redefined_prefixes);
+}
+
+void invalidate_single_composition(
+    JNIEnv* env,
+    jobject comp,
+    jclass comp_cls,
+    bool* out_triggered
+) {
+    jfieldID composer_fid = env->GetFieldID(comp_cls, "composer", "Landroidx/compose/runtime/ComposerImpl;");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (!composer_fid) {
+        composer_fid = env->GetFieldID(comp_cls, "composer", "Landroidx/compose/runtime/InternalComposer;");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (composer_fid) {
+        jobject composer_obj = env->GetObjectField(comp, composer_fid);
+        if (composer_obj) {
+            jclass composer_cls = env->GetObjectClass(composer_obj);
+            jmethodID force_mid = env->GetMethodID(composer_cls, "forceRecomposeScopes$runtime", "()Z");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (!force_mid) {
+                force_mid = env->GetMethodID(composer_cls, "forceRecomposeScopes", "()Z");
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            if (force_mid) {
+                env->CallBooleanMethod(composer_obj, force_mid);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            env->DeleteLocalRef(composer_cls);
+            env->DeleteLocalRef(composer_obj);
+        }
+    }
+    jmethodID inv_all_mid = env->GetMethodID(comp_cls, "invalidateAll", "()V");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (inv_all_mid) {
+        env->CallVoidMethod(comp, inv_all_mid);
+        if (!env->ExceptionCheck()) {
+            if (out_triggered) *out_triggered = true;
+            LOGI("Called CompositionImpl.invalidateAll()");
+        } else {
+            env->ExceptionClear();
+        }
+    }
 }
 
 bool trigger_compose_hot_reload(
@@ -495,10 +1012,15 @@ bool trigger_compose_hot_reload(
     jobject class_loader,
     jmethodID load_class_mid,
     const std::vector<std::string>& redefined_prefixes,
-    bool* out_matched_any_scope
+    bool* out_matched_any_scope,
+    jlong* out_initial_change_count
 ) {
     bool triggered = false;
     if (out_matched_any_scope) *out_matched_any_scope = false;
+
+    jlong initial_change_count = 0;
+    query_recomposer_work_state(env, class_loader, load_class_mid, &initial_change_count);
+    if (out_initial_change_count) *out_initial_change_count = initial_change_count;
 
     jclass hot_reloader_kt = load_app_class(env, class_loader, load_class_mid, "androidx.compose.runtime.HotReloaderKt");
     if (hot_reloader_kt) {
@@ -506,6 +1028,14 @@ bool trigger_compose_hot_reload(
         if (env->ExceptionCheck()) env->ExceptionClear();
         if (clear_err_mid) {
             env->CallStaticVoidMethod(hot_reloader_kt, clear_err_mid);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        jmethodID inv_key_mid = env->GetStaticMethodID(hot_reloader_kt, "invalidateGroupsWithKey", "(I)V");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (inv_key_mid) {
+            // Switch Recomposer into hot-reload mode (_hotReloadEnabled = true) before invalidating scopes
+            // so any recomposition error on the main thread is captured in Recomposer.errorState.
+            env->CallStaticVoidMethod(hot_reloader_kt, inv_key_mid, static_cast<jint>(-3));
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
     }
@@ -616,10 +1146,14 @@ bool trigger_compose_hot_reload(
                         }
                         if (comps_list && size_mid && get_mid) {
                             jint count = env->CallIntMethod(comps_list, size_mid);
+                            bool any_comp_matched = false;
+
+                            // Pass 1: Only clear and invalidate compositions that directly contain redefined scopes/lambdas.
                             for (jint i = 0; i < count; i++) {
                                 jobject comp = env->CallObjectMethod(comps_list, get_mid, i);
                                 if (!comp) continue;
                                 jclass comp_cls = env->GetObjectClass(comp);
+                                bool comp_matched = false;
 
                                 int cleared_slots = clear_stale_lambda_slots(
                                     env,
@@ -634,49 +1168,53 @@ bool trigger_compose_hot_reload(
                                     block_fid,
                                     kotlin_func_cls,
                                     redefined_prefixes,
-                                    out_matched_any_scope
+                                    false,
+                                    &comp_matched
                                 );
                                 if (cleared_slots > 0) {
                                     LOGI("Cleared %d stale cached slot(s) in CompositionImpl", cleared_slots);
                                 }
-
-                                jfieldID composer_fid = env->GetFieldID(comp_cls, "composer", "Landroidx/compose/runtime/ComposerImpl;");
-                                if (env->ExceptionCheck()) env->ExceptionClear();
-                                if (!composer_fid) {
-                                    composer_fid = env->GetFieldID(comp_cls, "composer", "Landroidx/compose/runtime/InternalComposer;");
-                                    if (env->ExceptionCheck()) env->ExceptionClear();
-                                }
-                                if (composer_fid) {
-                                    jobject composer_obj = env->GetObjectField(comp, composer_fid);
-                                    if (composer_obj) {
-                                        jclass composer_cls = env->GetObjectClass(composer_obj);
-                                        jmethodID force_mid = env->GetMethodID(composer_cls, "forceRecomposeScopes$runtime", "()Z");
-                                        if (env->ExceptionCheck()) env->ExceptionClear();
-                                        if (!force_mid) {
-                                            force_mid = env->GetMethodID(composer_cls, "forceRecomposeScopes", "()Z");
-                                            if (env->ExceptionCheck()) env->ExceptionClear();
-                                        }
-                                        if (force_mid) {
-                                            env->CallBooleanMethod(composer_obj, force_mid);
-                                            if (env->ExceptionCheck()) env->ExceptionClear();
-                                        }
-                                        env->DeleteLocalRef(composer_cls);
-                                        env->DeleteLocalRef(composer_obj);
-                                    }
-                                }
-                                jmethodID inv_all_mid = env->GetMethodID(comp_cls, "invalidateAll", "()V");
-                                if (env->ExceptionCheck()) env->ExceptionClear();
-                                if (inv_all_mid) {
-                                    env->CallVoidMethod(comp, inv_all_mid);
-                                    if (!env->ExceptionCheck()) {
-                                        triggered = true;
-                                        LOGI("Called CompositionImpl.invalidateAll()");
-                                    } else {
-                                        env->ExceptionClear();
-                                    }
+                                if (comp_matched) {
+                                    any_comp_matched = true;
+                                    if (out_matched_any_scope) *out_matched_any_scope = true;
+                                    invalidate_single_composition(env, comp, comp_cls, &triggered);
                                 }
                                 env->DeleteLocalRef(comp_cls);
                                 env->DeleteLocalRef(comp);
+                            }
+
+                            // Pass 2 (Fallback): If no composition matched directly (e.g., helper class edited),
+                            // fall back to clearing app scopes across compositions.
+                            if (!any_comp_matched) {
+                                for (jint i = 0; i < count; i++) {
+                                    jobject comp = env->CallObjectMethod(comps_list, get_mid, i);
+                                    if (!comp) continue;
+                                    jclass comp_cls = env->GetObjectClass(comp);
+                                    bool comp_matched = false;
+
+                                    int cleared_slots = clear_stale_lambda_slots(
+                                        env,
+                                        class_loader,
+                                        load_class_mid,
+                                        comp,
+                                        comp_cls,
+                                        empty_slot_obj,
+                                        class_cls,
+                                        get_name_mid,
+                                        composable_lambda_cls,
+                                        block_fid,
+                                        kotlin_func_cls,
+                                        redefined_prefixes,
+                                        true,
+                                        &comp_matched
+                                    );
+                                    if (cleared_slots > 0) {
+                                        LOGI("Cleared %d stale cached slot(s) in CompositionImpl (fallback)", cleared_slots);
+                                    }
+                                    invalidate_single_composition(env, comp, comp_cls, &triggered);
+                                    env->DeleteLocalRef(comp_cls);
+                                    env->DeleteLocalRef(comp);
+                                }
                             }
                             env->DeleteLocalRef(comps_list);
                         }
@@ -1092,6 +1630,7 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     bool activity_or_view_edited = false;
     bool has_composable_singleton_edit = false;
     std::vector<std::string> redefined_prefixes;
+    std::string runtime_error;
 
     // Re-run <clinit> on any redefined ComposableSingletons$ classes so new and updated
     // lambda$ static fields hold fresh ComposableLambda instances.
@@ -1111,8 +1650,15 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
             if (clinit_mid) {
                 env->CallStaticVoidMethod(target_cls, clinit_mid);
                 if (env->ExceptionCheck()) {
-                    LOGE("Exception re-running <clinit> on %s", item.binary_name.c_str());
+                    jthrowable clinit_exc = env->ExceptionOccurred();
                     env->ExceptionClear();
+                    if (clinit_exc) {
+                        if (runtime_error.empty()) {
+                            runtime_error = format_java_throwable(env, clinit_exc, redefined_prefixes);
+                        }
+                        env->DeleteLocalRef(clinit_exc);
+                    }
+                    LOGE("Exception re-running <clinit> on %s", item.binary_name.c_str());
                 } else {
                     LOGI("Re-initialized <clinit> on %s", item.binary_name.c_str());
                 }
@@ -1132,12 +1678,14 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     // UI Refresh
     std::string ui_mode = "NONE";
     bool matched_compose_scope = false;
+    jlong initial_change_count = 0;
     bool composeSuccess = trigger_compose_hot_reload(
         env,
         class_loader,
         load_class_mid,
         redefined_prefixes,
-        &matched_compose_scope
+        &matched_compose_scope,
+        &initial_change_count
     );
 
     if (activity_or_view_edited) {
@@ -1166,15 +1714,54 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     char buffer[256];
     snprintf(buffer, sizeof(buffer), "status=OK mode=%s redefined=%d new=%d ui=%s\n",
              mode_str, redefined_count, new_classes_count, ui_mode.c_str());
-    write_result(result_path, buffer);
+    std::string base_result(buffer);
 
     for (auto& entry : loaded_classes) {
         env->DeleteLocalRef(entry.klass);
     }
     if (activity_thread_cls) env->DeleteLocalRef(activity_thread_cls);
     if (cl_cls) env->DeleteLocalRef(cl_cls);
-    if (class_loader) env->DeleteLocalRef(class_loader);
     if (app_obj) env->DeleteLocalRef(app_obj);
+
+    // Agent_OnAttach is invoked on the main UI thread (ActivityThread.handleAttachAgent).
+    // Free the main thread immediately so Choreographer.doFrame can execute the recomposition pass,
+    // while a detached worker thread awaits the recomposition result and writes result.txt.
+    if (ui_mode == "COMPOSE_HOT_RELOAD" && runtime_error.empty() && class_loader != nullptr) {
+        jobject global_class_loader = env->NewGlobalRef(class_loader);
+        env->DeleteLocalRef(class_loader);
+        std::thread([vm, global_class_loader, load_class_mid, redefined_prefixes, initial_change_count, result_path, base_result]() {
+            JNIEnv* thread_env = nullptr;
+            std::string async_error;
+            if (vm->AttachCurrentThreadAsDaemon(&thread_env, nullptr) == JNI_OK && thread_env != nullptr) {
+                async_error = await_compose_recomposition_error(
+                    thread_env,
+                    global_class_loader,
+                    load_class_mid,
+                    redefined_prefixes,
+                    initial_change_count
+                );
+                if (!async_error.empty()) {
+                    LOGE("Captured Compose recomposition error: %s", async_error.c_str());
+                }
+                if (global_class_loader) {
+                    thread_env->DeleteGlobalRef(global_class_loader);
+                }
+                vm->DetachCurrentThread();
+            }
+            std::string final_content = base_result;
+            if (!async_error.empty()) {
+                final_content += "runtime_error=" + async_error + "\n";
+            }
+            write_result(result_path, final_content);
+        }).detach();
+        return 0;
+    }
+
+    if (class_loader) env->DeleteLocalRef(class_loader);
+    if (!runtime_error.empty()) {
+        base_result += "runtime_error=" + runtime_error + "\n";
+    }
+    write_result(result_path, base_result);
 
     return 0;
 }

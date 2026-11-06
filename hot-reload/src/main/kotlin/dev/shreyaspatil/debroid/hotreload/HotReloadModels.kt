@@ -56,7 +56,8 @@ sealed class AgentExecutionResult {
         val mode: ReloadMode,
         val redefinedCount: Int,
         val newClassesCount: Int,
-        val uiRefresh: UiRefreshMode
+        val uiRefresh: UiRefreshMode,
+        val runtimeError: String? = null
     ) : AgentExecutionResult()
 
     data class StructuralIncompatible(val reason: String) : AgentExecutionResult()
@@ -103,6 +104,13 @@ sealed class HotReloadEvent {
     ) : HotReloadEvent() {
         override fun formatPlainText(): String =
             "[COMPILE_ERROR] module=$module $diagnostic"
+    }
+
+    data class RuntimeError(
+        val error: String
+    ) : HotReloadEvent() {
+        override fun formatPlainText(): String =
+            "[RUNTIME_ERROR] $error"
     }
 
     data class FallbackReinstall(

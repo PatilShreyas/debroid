@@ -683,7 +683,7 @@ object CliRunner {
         help = "Watches project source files and automatically hot-reloads Kotlin/Java and Compose UI changes " +
             "onto the running device via JVMTI.",
         epilog = "Streams single-line [STATUS] plain-text events " +
-            "(WATCHING, RELOADING, RELOADED, COMPILE_ERROR, FALLBACK_REINSTALL, ERROR, STOPPED)."
+            "(WATCHING, RELOADING, RELOADED, COMPILE_ERROR, RUNTIME_ERROR, FALLBACK_REINSTALL, ERROR, STOPPED)."
     ) {
         private val appId by argument(
             "app_id",

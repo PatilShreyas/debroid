@@ -236,4 +236,22 @@ class JvmtiAgentInstallerTest {
         assertEquals("DEX_PARSE_FAIL", error.code)
         assertEquals("invalid dex header", error.message)
     }
+
+    @Test
+    fun `parseResultLine extracts runtime_error when present on OK result`() {
+        val adbManager = mockk<AdbManager>()
+        val installer = JvmtiAgentInstaller(adbManager)
+
+        val okWithErr = installer.parseResultLine(
+            "status=OK mode=JVMTI_HOT_SWAP redefined=1 new=0 ui=COMPOSE_HOT_RELOAD\n" +
+                "runtime_error=IllegalStateException: Failed to render (BookmarksScreen.kt:95)\n"
+        )
+        assertTrue(okWithErr is AgentExecutionResult.Success)
+        val success = okWithErr as AgentExecutionResult.Success
+        assertEquals(ReloadMode.JVMTI_HOT_SWAP, success.mode)
+        assertEquals(
+            "IllegalStateException: Failed to render (BookmarksScreen.kt:95)",
+            success.runtimeError
+        )
+    }
 }

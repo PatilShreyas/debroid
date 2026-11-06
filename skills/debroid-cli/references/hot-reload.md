@@ -64,6 +64,7 @@ Wait for `[WATCHING]` in the output before editing files:
 | `[RELOADING]` | `[RELOADING] modules=[<modules>] files=[<files>]` | Modification detected; compilation in progress. Wait for completion event. |
 | `[RELOADED]` | `[RELOADED] mode=<mode> classes=<count> new_classes=<count> ui=<uiRefresh> duration=<ms>ms` | Bytecode swapped and UI refreshed. Proceed with verification. |
 | `[COMPILE_ERROR]` | `[COMPILE_ERROR] module=<module> <diagnostic>` | Compilation failed. **Watcher stays running** and ignores the broken file until modified again. Fix the compiler error and save. |
+| `[RUNTIME_ERROR]` | `[RUNTIME_ERROR] <Exception>: <message> (<File.kt:line>)` | The hot-reloaded code threw an exception during Compose recomposition or on the main thread. Fix the exception at the reported file/line and save to recover. |
 | `[FALLBACK_REINSTALL]` | `[FALLBACK_REINSTALL] reason=<reason> files=[<files>] duration=<ms>ms` | Change required a full Gradle `install<Variant>` and Activity restart (performed automatically). Note that in-memory state was reset. |
 | `[ERROR]` | `[ERROR] code=<code> message=<msg>` | Runtime or connection failure. See Troubleshooting below. |
 | `[STOPPED]` | `[STOPPED] app=<appId>` | Watcher exited cleanly. |
@@ -115,6 +116,7 @@ Wait for `[WATCHING]` in the output before editing files:
 | :--- | :--- | :--- |
 | `[ERROR] code=APP_NOT_RUNNING` | Target app process is not running or crashed. | Start the app (`adb shell am start -n <app_id>/<Activity>`) and restart `debroid hot-reload`. |
 | `[COMPILE_ERROR] module=...` | Compiler error in modified source file. | Fix the error in the source file and save; the active watcher will automatically retry. |
+| `[RUNTIME_ERROR] <Exception>: ...` | Hot-reloaded code threw a runtime exception during Compose recomposition or main-thread execution. | Inspect the reported exception message and `(<File.kt:line>)`, fix the bug in the source file, and save; Compose recomposition errors recover in-place on the next reload. |
 | File saved, but no `[RELOADING]` event | File was saved before `[WATCHING]` printed, or `-d` points to the wrong directory. | Confirm `-d` points to the Gradle project root and save the file again after `[WATCHING]` is visible. |
 | `ViewModel` method updated and `[RELOADED]` printed, but UI still shows old state | The modified code is inside an action method that hasn't been invoked since the reload. | Trigger the UI action (e.g. `adb shell input tap X Y`) so the `ViewModel` runs the new method and emits updated state. |
 | `[ERROR] code=RELOAD_FAILED` (with `--no-fallback`) | Edit changed class inheritance/interfaces, or the installed APK on device does not match the local Gradle build baseline. | Remove `--no-fallback`, or run `./gradlew :<app-module>:installDebug` once, relaunch the app, and restart `debroid hot-reload`. |

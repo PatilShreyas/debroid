@@ -214,7 +214,8 @@ class JvmtiAgentInstaller(
     }
 
     internal fun parseResultLine(text: String): AgentExecutionResult {
-        val props = text.lines()
+        val lines = text.lines()
+        val props = lines
             .firstOrNull { it.startsWith("status=") }
             ?.split(" ")
             ?.mapNotNull { token ->
@@ -223,6 +224,11 @@ class JvmtiAgentInstaller(
             }
             ?.toMap()
             .orEmpty()
+        val runtimeError = lines
+            .firstOrNull { it.startsWith("runtime_error=") }
+            ?.removePrefix("runtime_error=")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
 
         return when (props["status"]) {
             "OK" -> {
@@ -234,7 +240,8 @@ class JvmtiAgentInstaller(
                     mode = mode,
                     redefinedCount = props["redefined"]?.toIntOrNull() ?: 0,
                     newClassesCount = props["new"]?.toIntOrNull() ?: 0,
-                    uiRefresh = ui
+                    uiRefresh = ui,
+                    runtimeError = runtimeError
                 )
             }
             "STRUCTURAL_INCOMPATIBLE" -> {
