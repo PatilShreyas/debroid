@@ -254,4 +254,67 @@ class JvmtiAgentInstallerTest {
             success.runtimeError
         )
     }
+
+    @Test
+    fun `writes reinit_clinit, reset_scope_key, reset_scope_class, and static_field entries to manifest`() {
+        val runner = mockk<CommandRunner>()
+        var capturedManifestText = ""
+
+        every {
+            runner.runCommand(match { it.contains("ro.product.cpu.abi") }, any())
+        } returns Result.success("arm64-v8a\n")
+        every {
+            runner.runCommand(match { it.contains("push") }, any())
+        } answers {
+            val cmd = firstArg<List<String>>()
+            val pushIdx = cmd.indexOf("push")
+            val localArg = cmd[pushIdx + 1].removeSuffix("/.")
+            val manifestFile = File(localArg, "manifest.txt")
+            if (manifestFile.exists()) {
+                capturedManifestText = manifestFile.readText()
+            }
+            Result.success("")
+        }
+        every { runner.runCommand(match { it.contains("mkdir") }, any()) } returns Result.success("")
+        every { runner.runCommand(match { it.contains("cp") }, any()) } returns Result.success("")
+        every { runner.runCommand(match { it.contains("chmod") }, any()) } returns Result.success("")
+        every { runner.runCommand(match { it.contains("rm") }, any()) } returns Result.success("")
+        every { runner.runCommand(match { it.contains("attach-agent") }, any()) } returns Result.success("")
+        every {
+            runner.runCommand(match { it.contains("cat") && it.last().endsWith("result.txt") }, any())
+        } returns Result.success("status=OK mode=JVMTI_HOT_SWAP redefined=1 new=0 ui=COMPOSE_HOT_RELOAD\n")
+
+        val adbManager = AdbManager(adbPath = "adb", commandRunner = runner)
+        val installer = JvmtiAgentInstaller(adbManager)
+        val dex1 = File(tempDir, "redefine_0.dex").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+
+        val res = installer.applyHotReload(
+            appId = "com.example.app",
+            classPayloads = listOf(
+                ClassDexPayload(
+                    className = "com.example.MainScreenKt",
+                    dexFile = dex1,
+                    reinitClinit = true,
+                    resetScopeKeys = setOf(10101),
+                    resetScope = true,
+                    staticFieldUpdates = listOf(
+                        StaticFieldUpdate(
+                            className = "com.example.MainScreenKt",
+                            fieldName = "MAX_COUNT",
+                            descriptor = "I",
+                            value = "42"
+                        )
+                    )
+                )
+            ),
+            combinedDexFile = null
+        )
+
+        assertTrue(res is AgentExecutionResult.Success)
+        val lines = capturedManifestText.lines().filter { it.isNotBlank() }
+        assertTrue(lines.contains("reinit_clinit=com.example.MainScreenKt"))
+        assertTrue(lines.contains("reset_scope_key=10101"))
+        assertTrue(lines.contains("reset_scope_class=com.example.MainScreenKt"))
+        assertTrue(lines.contains("static_field=com.example.MainScreenKt|MAX_COUNT|I|42"))
+    }
 }

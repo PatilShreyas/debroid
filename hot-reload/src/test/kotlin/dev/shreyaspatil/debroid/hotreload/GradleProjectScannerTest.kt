@@ -1,5 +1,8 @@
 package dev.shreyaspatil.debroid.hotreload
 
+import dev.shreyaspatil.debroid.adb.CommandRunner
+import io.mockk.every
+import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
@@ -188,5 +191,100 @@ class GradleProjectScannerTest {
             "freeStagingDebug",
             layout.resolveVariant("com.acme.shop.free.staging.debug", "debug")
         )
+    }
+
+    @Test
+    fun `queries Gradle via init script to discover modules, included builds, and dependencies`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        val featureDir = File(tempDir, "feature/feed").apply { mkdirs() }
+        val includedDesignDir = File(tempDir, "shared-ui/design").apply { mkdirs() }
+
+        val runner = mockk<CommandRunner>()
+        every { runner.runCommand(any(), any()) } returns Result.success(
+            """
+            > Configure project :
+            DEBROID_MODULE|:app|${appDir.absolutePath}|ANDROID_APP|:feature:feed,:shared-ui:design
+            DEBROID_MODULE|:feature:feed|${featureDir.absolutePath}|ANDROID_LIBRARY|:shared-ui:design
+            DEBROID_MODULE|:shared-ui:design|${includedDesignDir.absolutePath}|ANDROID_LIBRARY|
+            BUILD SUCCESSFUL in 1s
+            """.trimIndent()
+        )
+
+        val layout = GradleProjectScanner.scan(tempDir, runner)
+        assertEquals(3, layout.modules.size)
+        val byPath = layout.modules.associateBy { it.gradlePath }
+        assertEquals(setOf(":feature:feed", ":shared-ui:design"), byPath[":app"]?.dependencies)
+        assertEquals(setOf(":shared-ui:design"), byPath[":feature:feed"]?.dependencies)
+        assertEquals(emptySet<String>(), byPath[":shared-ui:design"]?.dependencies)
+
+        val dependents = GradleProjectLayout.findTransitiveDependents(
+            changedModules = listOfNotNull(byPath[":shared-ui:design"]),
+            allModules = layout.modules
+        )
+        assertEquals(listOf(":feature:feed", ":app"), dependents.map { it.gradlePath })
+    }
+
+    @Test
+    fun `statically discovers composite includeBuild modules and inter-module dependencies`() {
+        File(tempDir, "settings.gradle.kts").writeText(
+            """
+            pluginManagement {
+                includeBuild("build-logic")
+            }
+            rootProject.name = "composite-app"
+            include(":app", ":feature:home")
+            includeBuild("shared-components")
+            """.trimIndent()
+        )
+
+        val buildLogicDir = File(tempDir, "build-logic").apply { mkdirs() }
+        File(buildLogicDir, "settings.gradle.kts").writeText("rootProject.name = \"build-logic\"")
+        File(buildLogicDir, "build.gradle.kts").writeText("plugins { `kotlin-dsl` }")
+
+        val sharedDir = File(tempDir, "shared-components").apply { mkdirs() }
+        File(sharedDir, "settings.gradle.kts").writeText(
+            """
+            rootProject.name = "shared-components"
+            include(":ui")
+            """.trimIndent()
+        )
+        val sharedUiDir = File(sharedDir, "ui").apply { mkdirs() }
+        File(sharedUiDir, "build.gradle.kts").writeText("plugins { id(\"com.android.library\") }")
+
+        val homeDir = File(tempDir, "feature/home").apply { mkdirs() }
+        File(homeDir, "build.gradle.kts").writeText(
+            """
+            plugins { id("com.android.library") }
+            dependencies {
+                implementation("com.example:ui")
+            }
+            """.trimIndent()
+        )
+
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText(
+            """
+            plugins { id("com.android.application") }
+            dependencies {
+                implementation(projects.feature.home)
+            }
+            """.trimIndent()
+        )
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        val byPath = layout.modules.associateBy { it.gradlePath }
+        assertEquals(
+            setOf(":app", ":feature:home", ":shared-components:ui"),
+            byPath.keys
+        )
+        assertEquals(setOf(":feature:home"), byPath[":app"]?.dependencies)
+        assertEquals(setOf(":shared-components:ui"), byPath[":feature:home"]?.dependencies)
+
+        val dependents = GradleProjectLayout.findTransitiveDependents(
+            changedModules = listOfNotNull(byPath[":shared-components:ui"]),
+            allModules = layout.modules
+        )
+        assertEquals(listOf(":feature:home", ":app"), dependents.map { it.gradlePath })
     }
 }

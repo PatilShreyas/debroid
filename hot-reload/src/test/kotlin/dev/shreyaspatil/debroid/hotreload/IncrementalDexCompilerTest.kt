@@ -180,4 +180,95 @@ class IncrementalDexCompilerTest {
             )
         )
     }
+
+    @Test
+    fun `recompiles transitive dependent modules when cross-module signature or inline function changes`() {
+        val coreDir = File(tempDir, "core").apply { mkdirs() }
+        val coreClassesDir = File(coreDir, "build/classes/kotlin/main/com/example/core").apply { mkdirs() }
+        val coreClassFile = File(coreClassesDir, "CoreKt.class")
+        coreClassFile.writeBytes(byteArrayOf(1, 2, 3))
+
+        val featureDir = File(tempDir, "feature").apply { mkdirs() }
+        val featureClassesDir = File(
+            featureDir,
+            "build/tmp/kotlin-classes/debug/com/example/feature"
+        ).apply { mkdirs() }
+        val featureClassFile = File(featureClassesDir, "FeatureKt.class")
+        featureClassFile.writeBytes(byteArrayOf(10, 20, 30))
+
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        val appClassesDir = File(appDir, "build/tmp/kotlin-classes/debug/com/example/app").apply { mkdirs() }
+        val appClassFile = File(appClassesDir, "AppKt.class")
+        appClassFile.writeBytes(byteArrayOf(40, 50, 60))
+
+        val coreModule = GradleModule(":core", coreDir, ModuleType.KOTLIN_JVM)
+        val featureModule = GradleModule(
+            gradlePath = ":feature",
+            moduleDir = featureDir,
+            type = ModuleType.ANDROID_LIBRARY,
+            dependencies = setOf(":core")
+        )
+        val appModule = GradleModule(
+            gradlePath = ":app",
+            moduleDir = appDir,
+            type = ModuleType.ANDROID_APP,
+            dependencies = setOf(":feature")
+        )
+
+        val runner = mockk<CommandRunner>()
+        val gradleCommands = mutableListOf<List<String>>()
+        every { runner.runCommand(any(), any()) } answers {
+            val cmd = firstArg<List<String>>()
+            if (cmd.first() == "gradle" || cmd.first().endsWith("gradlew") || cmd.first().endsWith("gradlew.bat")) {
+                gradleCommands.add(cmd)
+                if (cmd.contains(":core:compileKotlin")) {
+                    // Simulate signature change in CoreKt.class (invalid bytes fallback triggers crossModuleChange=true)
+                    coreClassFile.writeBytes(byteArrayOf(1, 2, 3, 4))
+                }
+                if (cmd.contains(":feature:compileDebugKotlin")) {
+                    // Simulate inlined callsite update in FeatureKt.class
+                    featureClassFile.writeBytes(byteArrayOf(10, 20, 30, 40))
+                }
+                if (cmd.contains(":app:compileDebugKotlin")) {
+                    // AppKt.class was not affected by the change
+                }
+                Result.success("BUILD SUCCESSFUL")
+            } else if (cmd.first() == "/mock/d8") {
+                val outIdx = cmd.indexOf("--output")
+                val outDir = File(cmd[outIdx + 1])
+                outDir.mkdirs()
+                File(outDir, "classes.dex").writeBytes(byteArrayOf(0x64, 0x65, 0x78))
+                Result.success("")
+            } else {
+                Result.failure(RuntimeException("Unexpected command: $cmd"))
+            }
+        }
+
+        val compiler = IncrementalDexCompiler(
+            projectRoot = tempDir,
+            variant = "debug",
+            commandRunner = runner,
+            d8PathProvider = { "/mock/d8" }
+        )
+        compiler.snapshotModuleClasses(listOf(coreModule, featureModule, appModule))
+
+        val outcome = compiler.compileAndDex(
+            mapOf(coreModule to listOf(File(coreDir, "src/main/kotlin/com/example/core/Core.kt"))),
+            File(tempDir, "staging")
+        )
+
+        assertTrue(outcome is CompilationOutcome.Success)
+        val success = outcome as CompilationOutcome.Success
+        // First Gradle invocation compiled :core; second compiled dependents :feature and :app
+        assertEquals(2, gradleCommands.size)
+        assertTrue(gradleCommands[0].contains(":core:compileKotlin"))
+        assertTrue(gradleCommands[1].contains(":feature:compileDebugKotlin"))
+        assertTrue(gradleCommands[1].contains(":app:compileDebugKotlin"))
+
+        val reloadedClasses = success.classPayloads.map { it.className }.sorted()
+        assertEquals(
+            listOf("com.example.core.CoreKt", "com.example.feature.FeatureKt"),
+            reloadedClasses
+        )
+    }
 }

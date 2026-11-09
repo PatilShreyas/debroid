@@ -60,7 +60,8 @@ object AdditiveClassMerger {
 
     data class DexClassMembers(
         val fields: List<MemberSignature>,
-        val methods: List<MemberSignature>
+        val methods: List<MemberSignature>,
+        val superClassName: String? = null
     )
 
     private class ConstantPoolSection(
@@ -85,8 +86,9 @@ object AdditiveClassMerger {
     )
 
     fun mergePreservingRemovedMembers(previousBytes: ByteArray, currentBytes: ByteArray): ByteArray {
-        val prev = runCatching { parseClass(previousBytes) }.getOrNull() ?: return currentBytes
-        val curr = runCatching { parseClass(currentBytes) }.getOrNull() ?: return currentBytes
+        val hiltTransformed = ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(currentBytes)
+        val prev = runCatching { parseClass(previousBytes) }.getOrNull() ?: return hiltTransformed
+        val curr = runCatching { parseClass(hiltTransformed) }.getOrNull() ?: return hiltTransformed
 
         val currentFieldKeys = curr.fields.members.map { it.name to it.descriptor }.toSet()
         val missingFields = prev.fields.members.filter { (it.name to it.descriptor) !in currentFieldKeys }
@@ -97,7 +99,7 @@ object AdditiveClassMerger {
             .map { normalizeLambdaStubFlags(it) }
 
         if (missingFields.isEmpty() && missingMethods.isEmpty()) {
-            return currentBytes
+            return hiltTransformed
         }
 
         return rebuildWithMissingMembers(curr, missingFields, missingMethods)
@@ -110,9 +112,9 @@ object AdditiveClassMerger {
         targetClassName: String? = null
     ): ByteArray {
         val prevDex = runCatching { parseDexMembers(previousDexBytes, targetClassName) }.getOrNull()
-            ?: return currentClassBytes
+            ?: return ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(currentClassBytes)
         val currDex = runCatching { parseDexMembers(currentDexBytes, targetClassName) }.getOrNull()
-            ?: return currentClassBytes
+            ?: return ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(currentClassBytes, prevDex.superClassName)
         return mergeWithPreviousDexMembers(prevDex, currDex, currentClassBytes)
     }
 
@@ -121,7 +123,8 @@ object AdditiveClassMerger {
         currDex: DexClassMembers,
         currentClassBytes: ByteArray
     ): ByteArray {
-        val patchedBytes = alignMethodAccessFlagsIfNeeded(prevDex, currentClassBytes)
+        val hiltBytes = ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(currentClassBytes, prevDex.superClassName)
+        val patchedBytes = alignMethodAccessFlagsIfNeeded(prevDex, hiltBytes)
         val currClass = runCatching { parseClass(patchedBytes) }.getOrNull() ?: return patchedBytes
 
         val currFieldKeys = buildSet {
@@ -171,8 +174,9 @@ object AdditiveClassMerger {
         currentClassBytes: ByteArray,
         knownStubs: DexClassMembers
     ): ByteArray {
-        if (knownStubs.fields.isEmpty() && knownStubs.methods.isEmpty()) return currentClassBytes
-        val patchedBytes = alignMethodAccessFlagsIfNeeded(knownStubs, currentClassBytes)
+        val hiltBytes = ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(currentClassBytes, knownStubs.superClassName)
+        if (knownStubs.fields.isEmpty() && knownStubs.methods.isEmpty()) return hiltBytes
+        val patchedBytes = alignMethodAccessFlagsIfNeeded(knownStubs, hiltBytes)
         val currClass = runCatching { parseClass(patchedBytes) }.getOrNull() ?: return patchedBytes
 
         val currFieldKeys = currClass.fields.members.map { it.name to it.descriptor }.toSet()
@@ -558,9 +562,15 @@ private object DexMemberParser {
             val classTypeIdx = buf.getInt(itemOff)
             val classDescriptor = readDexType(classTypeIdx)
             val className = classDescriptor.removeSurrounding("L", ";").replace('/', '.')
+            val superTypeIdx = buf.getInt(itemOff + 8)
+            val superClassName = if (superTypeIdx in 0..<typeIdsSize) {
+                readDexType(superTypeIdx).removeSurrounding("L", ";").takeIf { it.isNotEmpty() }
+            } else {
+                null
+            }
             val classDataOff = buf.getInt(itemOff + DEX_CLASS_DATA_FIELD_OFFSET)
             if (classDataOff == 0) {
-                result[className] = AdditiveClassMerger.DexClassMembers(emptyList(), emptyList())
+                result[className] = AdditiveClassMerger.DexClassMembers(emptyList(), emptyList(), superClassName)
                 continue
             }
             buf.position(classDataOff)
@@ -575,7 +585,7 @@ private object DexMemberParser {
             decodeFields(instanceFieldsSize, fields)
             decodeMethods(directMethodsSize, methods)
             decodeMethods(virtualMethodsSize, methods)
-            result[className] = AdditiveClassMerger.DexClassMembers(fields, methods)
+            result[className] = AdditiveClassMerger.DexClassMembers(fields, methods, superClassName)
         }
 
         return result

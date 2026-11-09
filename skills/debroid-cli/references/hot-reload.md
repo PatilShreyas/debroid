@@ -81,16 +81,19 @@ Wait for `[WATCHING]` in the output before editing files:
 
 ### 1. Jetpack Compose (`@Composable` functions)
 - **Supported:** Any layout container (`Column`, `Row`, `Box`, `Surface`, `Scaffold`, `Card`, `LazyColumn`, etc.), modifiers, styling, gradients, animations (`rememberInfiniteTransition`, `animate*AsState`, `AnimatedVisibility`), and event lambdas.
+- **`remember` State:** `remember { ... }` state is preserved across reloads when a composable's `remember` calls are unchanged. If you add, remove, or reorder `remember` calls inside a `@Composable` function, `debroid` automatically resets the `remember` slots for that specific composable while preserving state in all other composables on screen.
 - **Multi-Screen Navigation:** Only the Compose scopes in the modified classes are invalidated. Editing a child screen updates it in-place without resetting `NavHost` / `rememberNavBackStack` or navigation arguments.
 
 ### 2. `ViewModel`, `Repository`, & Domain Classes
 - **Methods & Event Handlers:** Updated in-place on **existing instances** in memory. Existing `MutableStateFlow` and field values are preserved, and the next call to a modified method immediately executes the new code.
 - **New Methods, Fields, & Lambdas:** Adding new helper methods, properties, or `viewModelScope.launch { ... }` blocks is supported in-place.
+- **Static & Top-Level Properties:** Changes to `const val` constants and static top-level / `companion object` / `object` property initializers are automatically updated in memory while keeping unchanged static state intact.
+- **Cross-Module & Composite (`includeBuild`) Edits:** Modifying method signatures, `inline` functions, or `const val` values in a library or `includeBuild` module automatically recompiles dependent modules and reloads all affected call sites together.
 - **Computed Getters (`val x: String get() = ...`):** Re-evaluated automatically during the Compose recomposition triggered at the end of the reload.
 - **Constructors & `init {}` Blocks:** Do **not** re-run on already-instantiated `ViewModel` or singleton objects in memory. To execute updated `init {}` or constructor property initialization logic, navigate away and back so a new instance is created, or move the logic into a callable method.
 
-### 3. `Activity` & Android `View` Subclasses
-- Modifying an `Activity` or `android.view.View` subclass triggers `ui=ACTIVITY_RECREATE`, recreating the active `Activity` through Android's standard saved-instance-state lifecycle without reinstalling the APK.
+### 3. `Activity`, `Fragment`, & Android `View` Subclasses (Including Hilt `@AndroidEntryPoint`)
+- Modifying an `Activity` or `android.view.View` subclass (including classes annotated with Hilt's `@AndroidEntryPoint` or `@HiltAndroidApp`) hot-reloads in-place and triggers `ui=ACTIVITY_RECREATE`, recreating the active `Activity` through Android's standard saved-instance-state lifecycle without reinstalling the APK.
 
 ### 4. Resources (`res/**`) & `AndroidManifest.xml`
 - XML resource and manifest edits cannot be hot-swapped via JVMTI and automatically trigger `[FALLBACK_REINSTALL]` (unless `--no-fallback` is set).
@@ -104,7 +107,7 @@ Wait for `[WATCHING]` in the output before editing files:
 - **DO keep a single watcher running** across edits instead of starting and stopping it per edit.
 - **DO NOT restart the watcher on `[COMPILE_ERROR]`:** The watcher deduplicates failed builds and keeps its baseline anchored to the last successful reload. Fixing the syntax/type error and saving will compile and reload all pending changes together.
 - **DO NOT run `./gradlew install<Variant>` or `adb shell am force-stop` while watching:** This kills the app PID and wipes runtime state.
-- **Positional `remember` ordering in Compose:** Top-level `remember` slots in a `@Composable` function are matched by declaration order. When adding a new `remember { ... }` variable during a live session, declare it **after** existing `remember` variables in that function so existing `remember` values are not shifted to a different slot index.
+- **Automatic `remember` state reset on structural `remember` edits:** When a `@Composable` function's `remember` calls are unchanged, its remembered values are preserved across hot reloads. When `remember` calls in a composable are added, removed, or reordered, `debroid` automatically resets the `remember` slots for that composable so new initial values take effect cleanly without affecting other composables.
 - **New fields on existing instances:** When adding a new field/property to a class that already has live instances in memory, that field reads as its default zero/null value (`0`, `false`, `null`) on pre-existing instances until a new instance is constructed.
 - **Class hierarchy changes:** Changing a class's superclass, implemented interfaces, or `enum` constants cannot be hot-swapped in memory and will trigger `[FALLBACK_REINSTALL]` (or `[ERROR] code=RELOAD_FAILED` when `--no-fallback` is enabled).
 

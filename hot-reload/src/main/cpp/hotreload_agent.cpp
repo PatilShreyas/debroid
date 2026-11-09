@@ -23,6 +23,89 @@ struct ClassPayload {
     std::string dex_path;
 };
 
+struct StaticFieldUpdate {
+    std::string class_name;
+    std::string field_name;
+    std::string descriptor;
+    std::string value;
+};
+
+bool contains_int(const std::vector<jint>& vec, jint val) {
+    for (jint v : vec) {
+        if (v == val) return true;
+    }
+    return false;
+}
+
+bool contains_str(const std::vector<std::string>& vec, const std::string& val) {
+    for (const auto& s : vec) {
+        if (s == val) return true;
+    }
+    return false;
+}
+
+std::string decode_hex_string(const std::string& raw) {
+    if (raw.rfind("HEX:", 0) != 0) return raw;
+    std::string hex = raw.substr(4);
+    std::string out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        char byte_str[3] = {hex[i], hex[i + 1], '\0'};
+        char* end_ptr = nullptr;
+        unsigned long val = strtoul(byte_str, &end_ptr, 16);
+        if (end_ptr != byte_str + 2) break;
+        out.push_back(static_cast<char>(val));
+    }
+    return out;
+}
+
+void apply_static_field_update(JNIEnv* env, jclass target_cls, const StaticFieldUpdate& u) {
+    if (!env || !target_cls || u.field_name.empty() || u.descriptor.empty()) return;
+    jfieldID fid = env->GetStaticFieldID(target_cls, u.field_name.c_str(), u.descriptor.c_str());
+    if (env->ExceptionCheck() || !fid) {
+        env->ExceptionClear();
+        return;
+    }
+    const std::string& desc = u.descriptor;
+    if (desc == "I") {
+        jint v = static_cast<jint>(strtol(u.value.c_str(), nullptr, 10));
+        env->SetStaticIntField(target_cls, fid, v);
+    } else if (desc == "Z") {
+        jboolean v = (strtol(u.value.c_str(), nullptr, 10) != 0) ? JNI_TRUE : JNI_FALSE;
+        env->SetStaticBooleanField(target_cls, fid, v);
+    } else if (desc == "B") {
+        jbyte v = static_cast<jbyte>(strtol(u.value.c_str(), nullptr, 10));
+        env->SetStaticByteField(target_cls, fid, v);
+    } else if (desc == "S") {
+        jshort v = static_cast<jshort>(strtol(u.value.c_str(), nullptr, 10));
+        env->SetStaticShortField(target_cls, fid, v);
+    } else if (desc == "C") {
+        jchar v = static_cast<jchar>(strtol(u.value.c_str(), nullptr, 10));
+        env->SetStaticCharField(target_cls, fid, v);
+    } else if (desc == "J") {
+        jlong v = static_cast<jlong>(strtoll(u.value.c_str(), nullptr, 10));
+        env->SetStaticLongField(target_cls, fid, v);
+    } else if (desc == "F") {
+        jfloat v = strtof(u.value.c_str(), nullptr);
+        env->SetStaticFloatField(target_cls, fid, v);
+    } else if (desc == "D") {
+        jdouble v = strtod(u.value.c_str(), nullptr);
+        env->SetStaticDoubleField(target_cls, fid, v);
+    } else if (desc == "Ljava/lang/String;") {
+        std::string decoded = decode_hex_string(u.value);
+        jstring jval = env->NewStringUTF(decoded.c_str());
+        if (!env->ExceptionCheck() && jval) {
+            env->SetStaticObjectField(target_cls, fid, jval);
+            env->DeleteLocalRef(jval);
+        }
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    } else {
+        LOGI("Updated static field %s.%s (%s)", u.class_name.c_str(), u.field_name.c_str(), desc.c_str());
+    }
+}
+
 void write_result(const std::string& path, const std::string& content) {
     std::string tmp_path = path + ".tmp";
     FILE* fp = fopen(tmp_path.c_str(), "w");
@@ -412,6 +495,8 @@ int clear_stale_lambda_slots(
     jfieldID block_fid,
     jclass kotlin_func_cls,
     const std::vector<std::string>& redefined_prefixes,
+    const std::vector<jint>& reset_scope_keys,
+    const std::vector<std::string>& reset_scope_classes,
     bool allow_fallback,
     bool* out_comp_matched
 ) {
@@ -492,6 +577,11 @@ int clear_stale_lambda_slots(
         : nullptr;
     if (env->ExceptionCheck()) env->ExceptionClear();
 
+    jfieldID lambda_key_fid = composable_lambda_cls
+        ? env->GetFieldID(composable_lambda_cls, "key", "I")
+        : nullptr;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
     jclass anchor_cls = load_app_class(
         env,
         class_loader,
@@ -504,6 +594,7 @@ int clear_stale_lambda_slots(
     if (env->ExceptionCheck()) env->ExceptionClear();
 
     std::vector<jint> matched_scope_groups;
+    std::vector<jint> reset_remember_scope_groups;
     std::vector<jint> all_app_scope_groups;
     std::vector<std::pair<jint, jsize>> scope_slot_indices;
     std::vector<jsize> matched_lambda_slots;
@@ -530,8 +621,25 @@ int clear_stale_lambda_slots(
                 }
                 bool matches_redefined = false;
                 if (blk && inspect_app_cached_lambda(
-                        env, blk, class_cls, get_name_mid, nullptr, nullptr, kotlin_func_cls,
+                        env, blk, class_cls, get_name_mid, composable_lambda_cls, block_fid, kotlin_func_cls,
                         redefined_prefixes, &matches_redefined)) {
+                    bool matches_reset = false;
+                    if (!reset_scope_classes.empty()) {
+                        inspect_app_cached_lambda(
+                            env, blk, class_cls, get_name_mid, composable_lambda_cls, block_fid, kotlin_func_cls,
+                            reset_scope_classes, &matches_reset
+                        );
+                    }
+                    if (!matches_reset && !reset_scope_keys.empty() &&
+                        composable_lambda_cls && lambda_key_fid &&
+                        env->IsInstanceOf(blk, composable_lambda_cls)) {
+                        jint lkey = env->GetIntField(blk, lambda_key_fid);
+                        if (!env->ExceptionCheck() && contains_int(reset_scope_keys, lkey)) {
+                            matches_reset = true;
+                        } else if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                        }
+                    }
                     jobject anc = env->GetObjectField(elem, scope_anchor_fid);
                     if (env->ExceptionCheck()) {
                         env->ExceptionClear();
@@ -544,8 +652,11 @@ int clear_stale_lambda_slots(
                         if (g_idx >= 0) {
                             all_app_scope_groups.push_back(g_idx);
                             scope_slot_indices.push_back({g_idx, k});
-                            if (matches_redefined) {
+                            if (matches_redefined || matches_reset) {
                                 matched_scope_groups.push_back(g_idx);
+                            }
+                            if (matches_reset) {
+                                reset_remember_scope_groups.push_back(g_idx);
                             }
                         }
                         env->DeleteLocalRef(anc);
@@ -567,12 +678,38 @@ int clear_stale_lambda_slots(
         }
     }
 
+    jintArray groups_arr = (groups_fid && groups_size > 0)
+        ? static_cast<jintArray>(env->GetObjectField(slot_table, groups_fid))
+        : nullptr;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        groups_arr = nullptr;
+    }
+    jint* g_ptr = groups_arr ? env->GetIntArrayElements(groups_arr, nullptr) : nullptr;
+    if (g_ptr && !reset_scope_keys.empty()) {
+        for (jint scope_g : all_app_scope_groups) {
+            if (scope_g >= 0 && scope_g < groups_size) {
+                jint scope_key = g_ptr[scope_g * 5 + 0];
+                if (contains_int(reset_scope_keys, scope_key)) {
+                    if (!contains_int(reset_remember_scope_groups, scope_g)) {
+                        reset_remember_scope_groups.push_back(scope_g);
+                    }
+                    if (!contains_int(matched_scope_groups, scope_g)) {
+                        matched_scope_groups.push_back(scope_g);
+                    }
+                }
+            }
+        }
+    }
+
     bool comp_matched = !matched_scope_groups.empty() || !matched_lambda_slots.empty();
     if (out_comp_matched) {
         *out_comp_matched = comp_matched;
     }
 
     if (!comp_matched && !allow_fallback) {
+        if (g_ptr) env->ReleaseIntArrayElements(groups_arr, g_ptr, JNI_ABORT);
+        if (groups_arr) env->DeleteLocalRef(groups_arr);
         if (slots) env->DeleteLocalRef(slots);
         if (recompose_scope_cls) env->DeleteLocalRef(recompose_scope_cls);
         if (anchor_cls) env->DeleteLocalRef(anchor_cls);
@@ -596,106 +733,136 @@ int clear_stale_lambda_slots(
         !matched_scope_groups.empty() ? matched_scope_groups : all_app_scope_groups;
 
     int extra_cleared_slots = 0;
-    if (!target_scope_groups.empty() && groups_fid && groups_size > 0) {
-        jintArray groups_arr = static_cast<jintArray>(env->GetObjectField(slot_table, groups_fid));
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            groups_arr = nullptr;
-        }
-        if (groups_arr) {
-            jint* g_ptr = env->GetIntArrayElements(groups_arr, nullptr);
-            if (g_ptr) {
-                if (slots) {
-                    jsize len = env->GetArrayLength(slots);
-                    jclass state_cls = load_app_class(
-                        env, class_loader, load_class_mid, "androidx.compose.runtime.State"
-                    );
-                    jclass remember_obs_cls = load_app_class(
-                        env, class_loader, load_class_mid, "androidx.compose.runtime.RememberObserver"
-                    );
-                    jclass remember_holder_cls = load_app_class(
-                        env, class_loader, load_class_mid, "androidx.compose.runtime.RememberObserverHolder"
-                    );
-                    jclass comp_local_map_cls = load_app_class(
-                        env, class_loader, load_class_mid, "androidx.compose.runtime.CompositionLocalMap"
-                    );
+    if (!target_scope_groups.empty() && g_ptr) {
+        jclass state_cls = load_app_class(
+            env, class_loader, load_class_mid, "androidx.compose.runtime.State"
+        );
+        jclass remember_obs_cls = load_app_class(
+            env, class_loader, load_class_mid, "androidx.compose.runtime.RememberObserver"
+        );
+        jclass remember_holder_cls = load_app_class(
+            env, class_loader, load_class_mid, "androidx.compose.runtime.RememberObserverHolder"
+        );
+        jclass comp_local_map_cls = load_app_class(
+            env, class_loader, load_class_mid, "androidx.compose.runtime.CompositionLocalMap"
+        );
+        jsize len = slots ? env->GetArrayLength(slots) : 0;
 
-                    for (jint scope_g : target_scope_groups) {
-                        if (scope_g < 0 || scope_g >= groups_size) continue;
-                        jint slot_start = g_ptr[scope_g * 5 + 4];
-                        jint slot_end = (scope_g + 1 < groups_size) ? g_ptr[(scope_g + 1) * 5 + 4] : slots_size;
-                        for (const auto& pair : scope_slot_indices) {
-                            if (pair.first == scope_g && pair.second + 1 > slot_start) {
-                                slot_start = pair.second + 1;
-                                break;
-                            }
-                        }
-                        if (slot_start < 0) slot_start = 0;
-                        if (slot_end > len) slot_end = len;
-                        for (jint s = slot_start; s < slot_end; s++) {
-                            jobject elem = env->GetObjectArrayElement(slots, s);
-                            if (env->ExceptionCheck()) {
-                                env->ExceptionClear();
-                                continue;
-                            }
-                            if (!elem) continue;
-                            bool preserve = is_preserved_scope_slot(
-                                env, elem, empty_slot_obj, state_cls, remember_obs_cls,
-                                remember_holder_cls, recompose_scope_cls, comp_local_map_cls
-                            );
-                            env->DeleteLocalRef(elem);
-                            if (!preserve) {
-                                env->SetObjectArrayElement(slots, s, empty_slot_obj);
-                                if (env->ExceptionCheck()) env->ExceptionClear();
-                                extra_cleared_slots++;
-                            }
-                        }
-                    }
-
-                    if (state_cls) env->DeleteLocalRef(state_cls);
-                    if (remember_obs_cls) env->DeleteLocalRef(remember_obs_cls);
-                    if (remember_holder_cls) env->DeleteLocalRef(remember_holder_cls);
-                    if (comp_local_map_cls) env->DeleteLocalRef(comp_local_map_cls);
-                }
-
-                int bashed = 0;
-                for (jint g = 0; g < groups_size; g++) {
-                    jint key = g_ptr[g * 5 + 0];
-                    jint info = g_ptr[g * 5 + 1];
-                    jint parent = g_ptr[g * 5 + 2];
-                    jint g_size = g_ptr[g * 5 + 3];
-                    bool is_node_group = (key == 125 || (info & 0x40000000) != 0);
-
-                    bool skip_group = false;
-                    for (jint app_scope_g : all_app_scope_groups) {
-                        if (g == app_scope_g || (!is_node_group && app_scope_g > g && app_scope_g < g + g_size)) {
-                            skip_group = true;
-                            break;
-                        }
-                    }
-                    if (skip_group) continue;
-
-                    // Bash any direct UI child group (ReusableComposeNode key==125 or any group with LayoutNodes)
-                    // while keeping top-level non-UI state hook groups (nodeCount == 0) and child restart scopes intact.
-                    if (is_node_group || (info & 0x43FFFFFF) != 0) {
-                        for (jint scope_g : target_scope_groups) {
-                            if (parent == scope_g) {
-                                g_ptr[g * 5 + 0] = -3;
-                                bashed++;
-                                break;
-                            }
-                        }
+        if (slots) {
+            for (jint scope_g : target_scope_groups) {
+                if (scope_g < 0 || scope_g >= groups_size) continue;
+                bool reset_remember = contains_int(reset_remember_scope_groups, scope_g);
+                jint slot_start = g_ptr[scope_g * 5 + 4];
+                jint slot_end = (scope_g + 1 < groups_size) ? g_ptr[(scope_g + 1) * 5 + 4] : slots_size;
+                for (const auto& pair : scope_slot_indices) {
+                    if (pair.first == scope_g && pair.second + 1 > slot_start) {
+                        slot_start = pair.second + 1;
+                        break;
                     }
                 }
-                env->ReleaseIntArrayElements(groups_arr, g_ptr, 0);
-                if (bashed > 0) {
-                    LOGI("Bashed %d UI child group(s) in SlotTable.groups", bashed);
+                if (slot_start < 0) slot_start = 0;
+                if (slot_end > len) slot_end = len;
+                for (jint s = slot_start; s < slot_end; s++) {
+                    jobject elem = env->GetObjectArrayElement(slots, s);
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        continue;
+                    }
+                    if (!elem) continue;
+                    bool preserve = is_preserved_scope_slot(
+                        env, elem, empty_slot_obj,
+                        reset_remember ? nullptr : state_cls,
+                        reset_remember ? nullptr : remember_obs_cls,
+                        reset_remember ? nullptr : remember_holder_cls,
+                        recompose_scope_cls,
+                        comp_local_map_cls
+                    );
+                    env->DeleteLocalRef(elem);
+                    if (!preserve) {
+                        env->SetObjectArrayElement(slots, s, empty_slot_obj);
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        extra_cleared_slots++;
+                    }
+                }
+                if (reset_remember) {
+                    LOGI("Reset remember state slots for scope group %d", scope_g);
                 }
             }
-            env->DeleteLocalRef(groups_arr);
+        }
+
+        int bashed = 0;
+        for (jint g = 0; g < groups_size; g++) {
+            jint key = g_ptr[g * 5 + 0];
+            jint info = g_ptr[g * 5 + 1];
+            jint parent = g_ptr[g * 5 + 2];
+            jint g_size = g_ptr[g * 5 + 3];
+            bool is_node_group = (key == 125 || (info & 0x40000000) != 0);
+
+            bool skip_group = false;
+            for (jint app_scope_g : all_app_scope_groups) {
+                if (g == app_scope_g || (!is_node_group && app_scope_g > g && app_scope_g < g + g_size)) {
+                    skip_group = true;
+                    break;
+                }
+            }
+            if (skip_group) continue;
+
+            bool parent_resets_remember = contains_int(reset_remember_scope_groups, parent) ||
+                                          contains_int(reset_scope_keys, key);
+            if (parent_resets_remember) {
+                g_ptr[g * 5 + 0] = -3;
+                bashed++;
+                if (slots) {
+                    jint g_slot_start = g_ptr[g * 5 + 4];
+                    jint g_slot_end = (g + 1 < groups_size) ? g_ptr[(g + 1) * 5 + 4] : slots_size;
+                    if (g_slot_start < 0) g_slot_start = 0;
+                    if (g_slot_end > len) g_slot_end = len;
+                    for (jint s = g_slot_start; s < g_slot_end; s++) {
+                        jobject elem = env->GetObjectArrayElement(slots, s);
+                        if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                            continue;
+                        }
+                        if (!elem) continue;
+                        bool preserve = is_preserved_scope_slot(
+                            env, elem, empty_slot_obj, nullptr, nullptr, nullptr,
+                            recompose_scope_cls, comp_local_map_cls
+                        );
+                        env->DeleteLocalRef(elem);
+                        if (!preserve) {
+                            env->SetObjectArrayElement(slots, s, empty_slot_obj);
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            extra_cleared_slots++;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Bash any direct UI child group (ReusableComposeNode key==125 or any group with LayoutNodes)
+            // while keeping top-level non-UI state hook groups (nodeCount == 0) and child restart scopes intact.
+            if (is_node_group || (info & 0x43FFFFFF) != 0) {
+                for (jint scope_g : target_scope_groups) {
+                    if (parent == scope_g) {
+                        g_ptr[g * 5 + 0] = -3;
+                        bashed++;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (state_cls) env->DeleteLocalRef(state_cls);
+        if (remember_obs_cls) env->DeleteLocalRef(remember_obs_cls);
+        if (remember_holder_cls) env->DeleteLocalRef(remember_holder_cls);
+        if (comp_local_map_cls) env->DeleteLocalRef(comp_local_map_cls);
+        if (bashed > 0) {
+            LOGI("Bashed %d UI child group(s) in SlotTable.groups", bashed);
         }
     }
 
+    if (g_ptr) env->ReleaseIntArrayElements(groups_arr, g_ptr, 0);
+    if (groups_arr) env->DeleteLocalRef(groups_arr);
     if (slots) env->DeleteLocalRef(slots);
     if (recompose_scope_cls) env->DeleteLocalRef(recompose_scope_cls);
     if (anchor_cls) env->DeleteLocalRef(anchor_cls);
@@ -1012,6 +1179,8 @@ bool trigger_compose_hot_reload(
     jobject class_loader,
     jmethodID load_class_mid,
     const std::vector<std::string>& redefined_prefixes,
+    const std::vector<jint>& reset_scope_keys,
+    const std::vector<std::string>& reset_scope_classes,
     bool* out_matched_any_scope,
     jlong* out_initial_change_count
 ) {
@@ -1168,6 +1337,8 @@ bool trigger_compose_hot_reload(
                                     block_fid,
                                     kotlin_func_cls,
                                     redefined_prefixes,
+                                    reset_scope_keys,
+                                    reset_scope_classes,
                                     false,
                                     &comp_matched
                                 );
@@ -1205,6 +1376,8 @@ bool trigger_compose_hot_reload(
                                         block_fid,
                                         kotlin_func_cls,
                                         redefined_prefixes,
+                                        reset_scope_keys,
+                                        reset_scope_classes,
                                         true,
                                         &comp_matched
                                     );
@@ -1379,6 +1552,10 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
 
     std::string combined_dex_path;
     std::vector<ClassPayload> class_payloads;
+    std::vector<std::string> reinit_clinit_classes;
+    std::vector<jint> reset_scope_keys;
+    std::vector<std::string> reset_scope_classes;
+    std::vector<StaticFieldUpdate> static_field_updates;
 
     std::ifstream manifest_file(manifest_path);
     if (!manifest_file.is_open()) {
@@ -1400,6 +1577,26 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
                 std::string name = class_info.substr(0, pipe_pos);
                 std::string path = class_info.substr(pipe_pos + 1);
                 class_payloads.push_back({name, path});
+            }
+        } else if (line.rfind("reinit_clinit=", 0) == 0) {
+            reinit_clinit_classes.push_back(line.substr(14));
+        } else if (line.rfind("reset_scope_key=", 0) == 0) {
+            jint key = static_cast<jint>(strtol(line.substr(16).c_str(), nullptr, 10));
+            reset_scope_keys.push_back(key);
+        } else if (line.rfind("reset_scope_class=", 0) == 0) {
+            reset_scope_classes.push_back(line.substr(18));
+        } else if (line.rfind("static_field=", 0) == 0) {
+            std::string raw = line.substr(13);
+            size_t p1 = raw.find('|');
+            size_t p2 = (p1 != std::string::npos) ? raw.find('|', p1 + 1) : std::string::npos;
+            size_t p3 = (p2 != std::string::npos) ? raw.find('|', p2 + 1) : std::string::npos;
+            if (p1 != std::string::npos && p2 != std::string::npos && p3 != std::string::npos) {
+                static_field_updates.push_back({
+                    raw.substr(0, p1),
+                    raw.substr(p1 + 1, p2 - p1 - 1),
+                    raw.substr(p2 + 1, p3 - p2 - 1),
+                    raw.substr(p3 + 1)
+                });
             }
         }
     }
@@ -1632,17 +1829,25 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     std::vector<std::string> redefined_prefixes;
     std::string runtime_error;
 
-    // Re-run <clinit> on any redefined ComposableSingletons$ classes so new and updated
-    // lambda$ static fields hold fresh ComposableLambda instances.
+    // Re-run <clinit> on any redefined ComposableSingletons$ classes or classes with changed
+    // static field initializers so updated static fields hold fresh values.
     for (auto& item : loaded_classes) {
         redefined_prefixes.push_back(item.binary_name);
         size_t cs_pos = item.binary_name.find("ComposableSingletons$");
+        bool should_reinit = (cs_pos != std::string::npos) ||
+                             contains_str(reinit_clinit_classes, item.binary_name);
         if (cs_pos != std::string::npos) {
             has_composable_singleton_edit = true;
             std::string outer_prefix = item.binary_name.substr(0, cs_pos) +
                                        item.binary_name.substr(cs_pos + strlen("ComposableSingletons$"));
             redefined_prefixes.push_back(outer_prefix);
-
+        } else if (should_reinit) {
+            size_t dollar_pos = item.binary_name.find('$');
+            if (dollar_pos != std::string::npos) {
+                redefined_prefixes.push_back(item.binary_name.substr(0, dollar_pos));
+            }
+        }
+        if (should_reinit) {
             jclass target_cls = load_app_class(env, class_loader, load_class_mid, item.binary_name.c_str());
             if (!target_cls) target_cls = item.klass;
             jmethodID clinit_mid = env->GetStaticMethodID(target_cls, "<clinit>", "()V");
@@ -1675,6 +1880,37 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     if (activity_base_cls) env->DeleteLocalRef(activity_base_cls);
     if (view_base_cls) env->DeleteLocalRef(view_base_cls);
 
+    // Apply ConstantValue static field updates
+    for (const auto& u : static_field_updates) {
+        if (!contains_str(redefined_prefixes, u.class_name)) {
+            redefined_prefixes.push_back(u.class_name);
+        }
+        jclass target_cls = nullptr;
+        bool owned_ref = false;
+        for (const auto& item : loaded_classes) {
+            if (item.binary_name == u.class_name) {
+                target_cls = item.klass;
+                break;
+            }
+        }
+        if (!target_cls && class_loader && find_loaded_class_mid) {
+            jstring jname = env->NewStringUTF(u.class_name.c_str());
+            target_cls = static_cast<jclass>(env->CallObjectMethod(class_loader, find_loaded_class_mid, jname));
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                target_cls = nullptr;
+            }
+            env->DeleteLocalRef(jname);
+            owned_ref = (target_cls != nullptr);
+        }
+        if (target_cls) {
+            apply_static_field_update(env, target_cls, u);
+            if (owned_ref) {
+                env->DeleteLocalRef(target_cls);
+            }
+        }
+    }
+
     // UI Refresh
     std::string ui_mode = "NONE";
     bool matched_compose_scope = false;
@@ -1684,6 +1920,8 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
         class_loader,
         load_class_mid,
         redefined_prefixes,
+        reset_scope_keys,
+        reset_scope_classes,
         &matched_compose_scope,
         &initial_change_count
     );

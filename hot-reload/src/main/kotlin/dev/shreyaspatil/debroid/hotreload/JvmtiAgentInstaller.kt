@@ -132,6 +132,7 @@ class JvmtiAgentInstaller(
                 payload.dexFile.copyTo(File(hostTempDir, fileName), overwrite = true)
                 manifestLines.add("class=${payload.className}|$appAgentDir/$fileName")
             }
+            appendPayloadMetadataManifestLines(payload, manifestLines)
         }
 
         val manifestFile = File(hostTempDir, "manifest.txt")
@@ -175,6 +176,26 @@ class JvmtiAgentInstaller(
             adbManager.runAs(appId, "chmod", "700", "$appAgentDir/$AGENT_FILENAME")
         }
         return null
+    }
+
+    private fun appendPayloadMetadataManifestLines(
+        payload: ClassDexPayload,
+        manifestLines: MutableList<String>
+    ) {
+        if (payload.reinitClinit) {
+            manifestLines.add("reinit_clinit=${payload.className}")
+        }
+        for (scopeKey in payload.resetScopeKeys) {
+            manifestLines.add("reset_scope_key=$scopeKey")
+        }
+        if (payload.resetScope) {
+            manifestLines.add("reset_scope_class=${payload.className}")
+        }
+        for (update in payload.staticFieldUpdates) {
+            manifestLines.add(
+                "static_field=${update.className}|${update.fieldName}|${update.descriptor}|${update.value}"
+            )
+        }
     }
 
     private fun pushStagedFiles(

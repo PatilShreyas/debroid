@@ -11,7 +11,8 @@ enum class ModuleType {
 data class GradleModule(
     val gradlePath: String,
     val moduleDir: File,
-    val type: ModuleType
+    val type: ModuleType,
+    val dependencies: Set<String> = emptySet()
 )
 
 data class DetectedChanges(
@@ -21,9 +22,20 @@ data class DetectedChanges(
     fun isEmpty(): Boolean = codeChangesByModule.isEmpty() && resourceFiles.isEmpty()
 }
 
+data class StaticFieldUpdate(
+    val className: String,
+    val fieldName: String,
+    val descriptor: String,
+    val value: String
+)
+
 data class ClassDexPayload(
     val className: String,
-    val dexFile: File
+    val dexFile: File,
+    val reinitClinit: Boolean = false,
+    val resetScopeKeys: Set<Int> = emptySet(),
+    val resetScope: Boolean = false,
+    val staticFieldUpdates: List<StaticFieldUpdate> = emptyList()
 )
 
 sealed class CompilationOutcome {

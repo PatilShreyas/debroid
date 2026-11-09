@@ -134,14 +134,101 @@ class AdditiveClassMergerTest {
         assertNotNull(loadedClass.getDeclaredMethod("\$jacocoInit"))
     }
 
+    @Test
+    fun `transforms Hilt AndroidEntryPoint class superclass and super calls to Hilt_ base class`() {
+        val hiltBaseBytes = buildSyntheticClassFile(
+            internalName = "com/example/Hilt_MainActivity",
+            superName = "java/lang/Object",
+            fields = emptyList(),
+            methods = emptyList(),
+            includeDefaultConstructor = true
+        )
+        val unweavedActivityBytes = buildSyntheticClassFile(
+            internalName = "com/example/MainActivity",
+            superName = "java/lang/Object",
+            fields = emptyList(),
+            methods = listOf(AdditiveClassMerger.MemberSignature(0x0001, "activeMethod", "()I")),
+            includeDefaultConstructor = true,
+            includeAndroidEntryPointAnnotation = true
+        )
+
+        val transformedBytes = ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(
+            classBytes = unweavedActivityBytes,
+            baselineSuperClass = null,
+            hasHiltSiblingClass = false
+        )
+
+        val loader = ByteArrayClassLoader()
+        val hiltBaseClass = loader.define("com.example.Hilt_MainActivity", hiltBaseBytes)
+        val activityClass = loader.define("com.example.MainActivity", transformedBytes)
+
+        assertEquals(hiltBaseClass, activityClass.superclass)
+        val instance = activityClass.getDeclaredConstructor().newInstance()
+        assertTrue(hiltBaseClass.isInstance(instance))
+    }
+
+    @Test
+    fun `detects remember call changes per Composable and maps to restart group keys`() {
+        val prevBytes = buildComposableClassWithRememberCalls(
+            screenARememberTypes = listOf("I"),
+            screenBRememberTypes = listOf("I", "Ljava/lang/String;")
+        )
+        val currBytes = buildComposableClassWithRememberCalls(
+            screenARememberTypes = listOf("I"),
+            screenBRememberTypes = listOf("Ljava/lang/String;", "I")
+        )
+
+        val diff = ClassBytecodeAnalyzer.analyzeComposeRememberChanges(prevBytes, currBytes)
+        // ScreenA (key 101) is unchanged; ScreenB (key 202) reordered its remember calls
+        assertEquals(setOf(202), diff.resetScopeKeys)
+    }
+
+    @Test
+    fun `diffs ConstantValue static fields and patches clinit to preserve unchanged static fields`() {
+        val prevBytes = buildClassWithStaticFieldsAndClinit(
+            versionConstant = 1,
+            firstStaticValue = 10,
+            secondStaticValue = 20
+        )
+        val currBytes = buildClassWithStaticFieldsAndClinit(
+            versionConstant = 2,
+            firstStaticValue = 10,
+            secondStaticValue = 99
+        )
+
+        val staticDiff = ClassBytecodeAnalyzer.prepareStaticFieldUpdates(prevBytes, currBytes)
+        assertTrue(staticDiff.reinitClinit)
+        assertEquals(
+            listOf(
+                StaticFieldUpdate(
+                    className = "com.example.StaticHolder",
+                    fieldName = "VERSION",
+                    descriptor = "I",
+                    value = "2"
+                )
+            ),
+            staticDiff.constantFieldUpdates
+        )
+
+        val loadedClass = ByteArrayClassLoader().define("com.example.StaticHolder", staticDiff.patchedClassBytes)
+        // In the patched <clinit>, FIRST_STATE (unchanged: 10) was NOP'd out so it stays 0 when loaded fresh,
+        // while SECOND_STATE (changed: 20 -> 99) is assigned 99!
+        assertEquals(0, loadedClass.getDeclaredField("FIRST_STATE").getInt(null))
+        assertEquals(99, loadedClass.getDeclaredField("SECOND_STATE").getInt(null))
+    }
+
     private class ByteArrayClassLoader : ClassLoader(AdditiveClassMergerTest::class.java.classLoader) {
         fun define(name: String, bytes: ByteArray): Class<*> = defineClass(name, bytes, 0, bytes.size)
     }
 
+    @Suppress("LongParameterList")
     private fun buildSyntheticClassFile(
         internalName: String,
         fields: List<AdditiveClassMerger.MemberSignature>,
-        methods: List<AdditiveClassMerger.MemberSignature>
+        methods: List<AdditiveClassMerger.MemberSignature>,
+        superName: String = "java/lang/Object",
+        includeDefaultConstructor: Boolean = false,
+        includeAndroidEntryPointAnnotation: Boolean = false
     ): ByteArray {
         val utf8List = mutableListOf<String>()
         fun addUtf8(str: String): Int {
@@ -152,8 +239,16 @@ class AdditiveClassMergerTest {
         }
 
         val thisNameUtf8 = addUtf8(internalName)
-        val superNameUtf8 = addUtf8("java/lang/Object")
+        val superNameUtf8 = addUtf8(superName)
         val codeUtf8 = addUtf8("Code")
+        val initNameUtf8 = addUtf8("<init>")
+        val voidDescUtf8 = addUtf8("()V")
+        val rvaUtf8 = if (includeAndroidEntryPointAnnotation) addUtf8("RuntimeVisibleAnnotations") else 0
+        val hiltAnnUtf8 = if (includeAndroidEntryPointAnnotation) {
+            addUtf8("Ldagger/hilt/android/AndroidEntryPoint;")
+        } else {
+            0
+        }
         fields.forEach {
             addUtf8(it.name)
             addUtf8(it.descriptor)
@@ -165,7 +260,9 @@ class AdditiveClassMergerTest {
 
         val thisClassCpIdx = utf8List.size + 1
         val superClassCpIdx = utf8List.size + 2
-        val cpCount = utf8List.size + 3
+        val initNatCpIdx = utf8List.size + 3
+        val superInitRefCpIdx = utf8List.size + 4
+        val cpCount = utf8List.size + 5
 
         val out = ByteArrayOutputStream()
         fun u2(v: Int) {
@@ -193,6 +290,12 @@ class AdditiveClassMergerTest {
         u2(thisNameUtf8)
         out.write(7)
         u2(superNameUtf8)
+        out.write(12) // CONSTANT_NameAndType <init>:()V
+        u2(initNameUtf8)
+        u2(voidDescUtf8)
+        out.write(10) // CONSTANT_Methodref super.<init>:()V
+        u2(superClassCpIdx)
+        u2(initNatCpIdx)
 
         u2(0x0021) // ACC_PUBLIC | ACC_SUPER
         u2(thisClassCpIdx)
@@ -207,7 +310,30 @@ class AdditiveClassMergerTest {
             u2(0)
         }
 
-        u2(methods.size)
+        val totalMethods = methods.size + if (includeDefaultConstructor) 1 else 0
+        u2(totalMethods)
+        if (includeDefaultConstructor) {
+            u2(0x0001) // public <init>()V
+            u2(initNameUtf8)
+            u2(voidDescUtf8)
+            u2(1)
+            // aload_0; invokespecial super.<init>; return
+            val initCode = byteArrayOf(
+                0x2A,
+                0xB7.toByte(),
+                ((superInitRefCpIdx ushr 8) and 0xFF).toByte(),
+                (superInitRefCpIdx and 0xFF).toByte(),
+                0xB1.toByte()
+            )
+            u2(codeUtf8)
+            u4(12 + initCode.size)
+            u2(2)
+            u2(2)
+            u4(initCode.size)
+            out.write(initCode)
+            u2(0)
+            u2(0)
+        }
         for (m in methods) {
             u2(m.accessFlags)
             u2(addUtf8(m.name))
@@ -227,7 +353,308 @@ class AdditiveClassMergerTest {
             u2(0)
             u2(0)
         }
-        u2(0) // class attributes_count
+        if (includeAndroidEntryPointAnnotation) {
+            u2(1) // 1 class attribute
+            u2(rvaUtf8)
+            u4(6) // 2 (num_annotations) + 2 (type_index) + 2 (num_element_value_pairs)
+            u2(1)
+            u2(hiltAnnUtf8)
+            u2(0)
+        } else {
+            u2(0) // class attributes_count
+        }
+        return out.toByteArray()
+    }
+
+    private fun buildComposableClassWithRememberCalls(
+        screenARememberTypes: List<String>,
+        screenBRememberTypes: List<String>
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+
+        // Constant pool entries:
+        // 1: Utf8 "com/example/ScreensKt"
+        // 2: Utf8 "java/lang/Object"
+        // 3: Utf8 "Code"
+        // 4: Utf8 "ScreenA"
+        // 5: Utf8 "ScreenB"
+        // 6: Utf8 "(Landroidx/compose/runtime/Composer;I)V"
+        // 7: Utf8 "androidx/compose/runtime/Composer"
+        // 8: Utf8 "startRestartGroup"
+        // 9: Utf8 "(I)Landroidx/compose/runtime/Composer;"
+        // 10: Utf8 "rememberedValue"
+        // 11: Utf8 "()Ljava/lang/Object;"
+        // 12: Utf8 "updateRememberedValue"
+        // 13: Utf8 "(Ljava/lang/Object;)V"
+        // 14: Class #1 (com/example/ScreensKt)
+        // 15: Class #2 (java/lang/Object)
+        // 16: Class #7 (androidx/compose/runtime/Composer)
+        // 17: NameAndType #8:#9 (startRestartGroup)
+        // 18: NameAndType #10:#11 (rememberedValue)
+        // 19: NameAndType #12:#13 (updateRememberedValue)
+        // 20: InterfaceMethodref #16.#17 (Composer.startRestartGroup)
+        // 21: InterfaceMethodref #16.#18 (Composer.rememberedValue)
+        // 22: InterfaceMethodref #16.#19 (Composer.updateRememberedValue)
+        // 23: Utf8 "I"
+        // 24: Utf8 "Ljava/lang/String;"
+        // 25: Class #23
+        // 26: Class #24
+        val utf8s = listOf(
+            "com/example/ScreensKt",
+            "java/lang/Object",
+            "Code",
+            "ScreenA",
+            "ScreenB",
+            "(Landroidx/compose/runtime/Composer;I)V",
+            "androidx/compose/runtime/Composer",
+            "startRestartGroup",
+            "(I)Landroidx/compose/runtime/Composer;",
+            "rememberedValue",
+            "()Ljava/lang/Object;",
+            "updateRememberedValue",
+            "(Ljava/lang/Object;)V"
+        )
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(27) // cpCount = 26 + 1
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1) // #14
+        out.write(7)
+        u2(2) // #15
+        out.write(7)
+        u2(7) // #16
+        out.write(12)
+        u2(8)
+        u2(9) // #17
+        out.write(12)
+        u2(10)
+        u2(11) // #18
+        out.write(12)
+        u2(12)
+        u2(13) // #19
+        out.write(11)
+        u2(16)
+        u2(17) // #20 startRestartGroup
+        out.write(11)
+        u2(16)
+        u2(18) // #21 rememberedValue
+        out.write(11)
+        u2(16)
+        u2(19) // #22 updateRememberedValue
+        val iBytes = "java/lang/Integer".toByteArray(Charsets.UTF_8)
+        out.write(1)
+        u2(iBytes.size)
+        out.write(iBytes) // #23
+        val sBytes = "java/lang/String".toByteArray(Charsets.UTF_8)
+        out.write(1)
+        u2(sBytes.size)
+        out.write(sBytes) // #24
+        out.write(7)
+        u2(23) // #25 Integer class
+        out.write(7)
+        u2(24) // #26 String class
+
+        u2(0x0011)
+        u2(14)
+        u2(15)
+        u2(0)
+        u2(0) // fields
+
+        fun buildComposableCode(groupKey: Int, rememberTypes: List<String>): ByteArray {
+            val code = ByteArrayOutputStream()
+            // aload_0; sipush groupKey; invokeinterface #20, 2, 0; pop
+            code.write(0x2A)
+            code.write(0x11)
+            code.write((groupKey ushr 8) and 0xFF)
+            code.write(groupKey and 0xFF)
+            code.write(0xB9)
+            code.write(0)
+            code.write(20)
+            code.write(2)
+            code.write(0)
+            code.write(0x57)
+            for (t in rememberTypes) {
+                // aload_0, invokeinterface rememberedValue (#21), checkcast, updateRememberedValue (#22)
+                val clsCp = if (t == "I") 25 else 26
+                code.write(0x2A)
+                code.write(0xB9)
+                code.write(0)
+                code.write(21)
+                code.write(1)
+                code.write(0)
+                code.write(0xC0)
+                code.write(0)
+                code.write(clsCp)
+                code.write(0x2A)
+                code.write(0x5F)
+                code.write(0xB9)
+                code.write(0)
+                code.write(22)
+                code.write(2)
+                code.write(0)
+            }
+            code.write(0xB1) // return
+            return code.toByteArray()
+        }
+
+        u2(2) // 2 methods: ScreenA, ScreenB
+        for ((nameIdx, pair) in listOf(4 to (101 to screenARememberTypes), 5 to (202 to screenBRememberTypes))) {
+            val codeBytes = buildComposableCode(pair.first, pair.second)
+            u2(0x0009)
+            u2(nameIdx)
+            u2(6)
+            u2(1)
+            u2(3) // Code
+            u4(12 + codeBytes.size)
+            u2(4)
+            u2(4)
+            u4(codeBytes.size)
+            out.write(codeBytes)
+            u2(0)
+            u2(0)
+        }
+        u2(0)
+        return out.toByteArray()
+    }
+
+    private fun buildClassWithStaticFieldsAndClinit(
+        versionConstant: Int,
+        firstStaticValue: Int,
+        secondStaticValue: Int
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+
+        val utf8s = listOf(
+            "com/example/StaticHolder", // 1
+            "java/lang/Object", // 2
+            "Code", // 3
+            "ConstantValue", // 4
+            "VERSION", // 5
+            "FIRST_STATE", // 6
+            "SECOND_STATE", // 7
+            "I", // 8
+            "<clinit>", // 9
+            "()V" // 10
+        )
+        // #11: Class #1
+        // #12: Class #2
+        // #13: Integer(versionConstant)
+        // #14: NameAndType #6:#8 (FIRST_STATE:I)
+        // #15: NameAndType #7:#8 (SECOND_STATE:I)
+        // #16: Fieldref #11.#14
+        // #17: Fieldref #11.#15
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(18)
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1) // #11
+        out.write(7)
+        u2(2) // #12
+        out.write(3)
+        u4(versionConstant) // #13 CONSTANT_Integer
+        out.write(12)
+        u2(6)
+        u2(8) // #14
+        out.write(12)
+        u2(7)
+        u2(8) // #15
+        out.write(9)
+        u2(11)
+        u2(14) // #16 Fieldref FIRST_STATE
+        out.write(9)
+        u2(11)
+        u2(15) // #17 Fieldref SECOND_STATE
+
+        u2(0x0021)
+        u2(11)
+        u2(12)
+        u2(0)
+
+        // 3 fields: VERSION (with ConstantValue), FIRST_STATE, SECOND_STATE
+        u2(3)
+        // VERSION
+        u2(0x0019) // public static final
+        u2(5)
+        u2(8)
+        u2(1) // 1 field attribute: ConstantValue
+        u2(4)
+        u4(2)
+        u2(13)
+        // FIRST_STATE
+        u2(0x0009) // public static
+        u2(6)
+        u2(8)
+        u2(0)
+        // SECOND_STATE
+        u2(0x0009) // public static
+        u2(7)
+        u2(8)
+        u2(0)
+
+        // 1 method: <clinit>()V
+        u2(1)
+        u2(0x0008) // static
+        u2(9)
+        u2(10)
+        u2(1)
+        // bipush firstStaticValue; putstatic #16; bipush secondStaticValue; putstatic #17; return
+        val clinitCode = byteArrayOf(
+            0x10,
+            firstStaticValue.toByte(),
+            0xB3.toByte(),
+            0x00,
+            16,
+            0x10,
+            secondStaticValue.toByte(),
+            0xB3.toByte(),
+            0x00,
+            17,
+            0xB1.toByte()
+        )
+        u2(3)
+        u4(12 + clinitCode.size)
+        u2(2)
+        u2(0)
+        u4(clinitCode.size)
+        out.write(clinitCode)
+        u2(0)
+        u2(0)
+
+        u2(0)
         return out.toByteArray()
     }
 
