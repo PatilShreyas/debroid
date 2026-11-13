@@ -58,6 +58,8 @@ internal object ClassBytecodeAnalyzer {
     private const val ACC_INTERFACE = 0x0200
     private const val ACC_ABSTRACT = 0x0400
     private const val ACC_SYNTHETIC = 0x1000
+    private const val ACC_ANNOTATION = 0x2000
+    private const val ACC_ENUM = 0x4000
 
     private const val COMPOSER_DESC = "Landroidx/compose/runtime/Composer;"
     private const val COMPOSER_OWNER = "androidx/compose/runtime/Composer"
@@ -372,10 +374,50 @@ internal object ClassBytecodeAnalyzer {
     fun hasClassHierarchyChange(previousBytes: ByteArray, currentBytes: ByteArray): Boolean {
         val prev = runCatching { parseDetailedClass(previousBytes) }.getOrNull() ?: return false
         val curr = runCatching { parseDetailedClass(currentBytes) }.getOrNull() ?: return false
-        val hierarchyFlagsMask = ACC_INTERFACE or ACC_ABSTRACT
+        val hierarchyFlagsMask = ACC_INTERFACE or ACC_ABSTRACT or ACC_ENUM or ACC_ANNOTATION
         return prev.superInternalName != curr.superInternalName ||
             prev.interfaces != curr.interfaces ||
             (prev.accessFlags and hierarchyFlagsMask) != (curr.accessFlags and hierarchyFlagsMask)
+    }
+
+    fun detectUnsupportedRedefinitionReason(
+        previousBytes: ByteArray?,
+        currentBytes: ByteArray,
+        baselineDexMembers: AdditiveClassMerger.DexClassMembers? = null
+    ): String? {
+        val curr = runCatching { parseDetailedClass(currentBytes) }.getOrNull() ?: return null
+        val simpleName = curr.thisInternalName.substringAfterLast('/').ifEmpty { "Unknown" }
+        val kindMask = ACC_INTERFACE or ACC_ABSTRACT or ACC_ENUM or ACC_ANNOTATION
+
+        if (previousBytes != null) {
+            val prev = runCatching { parseDetailedClass(previousBytes) }.getOrNull() ?: return null
+            if ((prev.accessFlags and kindMask) != (curr.accessFlags and kindMask)) {
+                return "CLASS_MODIFIERS_CHANGED:$simpleName"
+            }
+            if (prev.superInternalName != curr.superInternalName) {
+                return "SUPERCLASS_CHANGED:$simpleName"
+            }
+            if (prev.interfaces != curr.interfaces) {
+                return "INTERFACE_HIERARCHY_CHANGED:$simpleName"
+            }
+            return null
+        }
+
+        if (baselineDexMembers != null) {
+            if ((baselineDexMembers.accessFlags and kindMask) != (curr.accessFlags and kindMask)) {
+                return "CLASS_MODIFIERS_CHANGED:$simpleName"
+            }
+            val dexSuper = baselineDexMembers.superClassName?.replace('.', '/').orEmpty()
+            if (dexSuper.isNotEmpty() && dexSuper != curr.superInternalName) {
+                return "SUPERCLASS_CHANGED:$simpleName"
+            }
+            val dexIfaces = baselineDexMembers.interfaces.filterNot { it.contains("\$\$") }
+            val currIfaces = curr.interfaces.filterNot { it.contains("\$\$") }
+            if (dexIfaces != currIfaces) {
+                return "INTERFACE_HIERARCHY_CHANGED:$simpleName"
+            }
+        }
+        return null
     }
 
     fun remapSingleInternalClassName(internalName: String, renameMap: Map<String, String>): String {
@@ -1162,7 +1204,7 @@ internal object ClassBytecodeAnalyzer {
                 }
                 if (currKey != null) changedKeys.add(currKey)
                 if (prevKey != null) changedKeys.add(prevKey)
-                if (currKey == null && prevKey == null && sigKey !in currBootstrapTargets) {
+                if (currKey == null && prevKey == null) {
                     invalidateAll = true
                 }
             } else {
@@ -1466,7 +1508,7 @@ internal object ClassBytecodeAnalyzer {
                     if (ref.first == COMPOSABLE_LAMBDA_KT && ref.second in composableLambdaFactories) {
                         var targetLambdaName: String? = null
                         var groupKey: Int? = null
-                        val windowStart = maxOf(0, idx - 12)
+                        val windowStart = maxOf(0, idx - 32)
                         for (back in (idx - 1) downTo windowStart) {
                             val bInsn = insns[back]
                             if (targetLambdaName == null && bInsn.opcode == 0xBA) { // invokedynamic

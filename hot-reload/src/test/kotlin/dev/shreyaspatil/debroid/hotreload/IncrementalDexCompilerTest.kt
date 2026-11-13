@@ -698,6 +698,78 @@ class IncrementalDexCompilerTest {
         )
     }
 
+    @Test
+    fun `detects interface addition pre-flight before D8 and supports baseline reapply`() {
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        val pkgDir = File(appDir, "build/tmp/kotlin-classes/debug/com/example/app").apply { mkdirs() }
+        val stateClassFile = File(pkgDir, "NiaAppState.class")
+        stateClassFile.writeBytes(buildClassWithLine("com/example/app/NiaAppState", returnConst = 1, line = 10))
+
+        val appModule = GradleModule(":app", appDir, ModuleType.ANDROID_APP)
+        var pass = 0
+        var d8Invocations = 0
+        val runner = mockk<CommandRunner>()
+        every { runner.runCommand(any(), any()) } answers {
+            val cmd = firstArg<List<String>>()
+            if (cmd.first() == "gradle" || cmd.first().endsWith("gradlew") || cmd.first().endsWith("gradlew.bat")) {
+                pass++
+                if (pass == 1) {
+                    // Named class adds Serializable interface -> must fail pre-flight before D8!
+                    stateClassFile.writeBytes(
+                        buildAnonymousWithInterface(
+                            "com/example/app/NiaAppState",
+                            "java/io/Serializable",
+                            returnConst = 1
+                        )
+                    )
+                } else if (pass == 2) {
+                    // Valid method body change without hierarchy change
+                    stateClassFile.writeBytes(
+                        buildClassWithLine("com/example/app/NiaAppState", returnConst = 42, line = 10)
+                    )
+                }
+                Result.success("BUILD SUCCESSFUL")
+            } else if (cmd.first() == "/mock/d8") {
+                d8Invocations++
+                val outIdx = cmd.indexOf("--output")
+                val outDir = File(cmd[outIdx + 1]).apply { mkdirs() }
+                File(outDir, "classes.dex").writeBytes(byteArrayOf(0x64, 0x65, 0x78))
+                Result.success("")
+            } else {
+                Result.failure(RuntimeException("Unexpected command: $cmd"))
+            }
+        }
+
+        val compiler = IncrementalDexCompiler(
+            projectRoot = tempDir,
+            variant = "debug",
+            commandRunner = runner,
+            d8PathProvider = { "/mock/d8" }
+        )
+        compiler.snapshotModuleClasses(listOf(appModule))
+        val srcFile = File(appDir, "src/main/kotlin/com/example/app/NiaAppState.kt")
+
+        val incompatible = compiler.compileAndDex(mapOf(appModule to listOf(srcFile)), File(tempDir, "pf_s1"))
+        assertEquals(
+            CompilationOutcome.StructuralIncompatible("INTERFACE_HIERARCHY_CHANGED:NiaAppState"),
+            incompatible
+        )
+        assertEquals(0, d8Invocations)
+
+        val valid = compiler.compileAndDex(mapOf(appModule to listOf(srcFile)), File(tempDir, "pf_s2"))
+        assertTrue(valid is CompilationOutcome.Success)
+
+        // Simulate app restart -> reapplyFromApkBaseline diffs cached .class files without invoking Gradle!
+        val gradleCallsBeforeReapply = pass
+        val reapplied = compiler.reapplyFromApkBaseline(mapOf(appModule to listOf(srcFile)), File(tempDir, "pf_s3"))
+        assertEquals(gradleCallsBeforeReapply, pass)
+        assertTrue(reapplied is CompilationOutcome.Success)
+        assertEquals(
+            listOf("com.example.app.NiaAppState"),
+            (reapplied as CompilationOutcome.Success).classPayloads.map { it.className }
+        )
+    }
+
     private fun buildOuterReferencingAnonymous(outerInternal: String, anonInternal: String): ByteArray {
         val out = ByteArrayOutputStream()
         fun u2(v: Int) {

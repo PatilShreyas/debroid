@@ -635,4 +635,140 @@ class HotReloadSessionTest {
             watcherThread.join(3_000L)
         }
     }
+
+    @Test
+    fun `handles pre-flight StructuralIncompatible from compiler without invoking device agent`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+        val stateKt = File(appDir, "src/main/kotlin/NiaAppState.kt").apply {
+            parentFile.mkdirs()
+            writeText("class NiaAppState")
+        }
+
+        val adbManager = mockk<AdbManager>(relaxed = true)
+        every { adbManager.isAppDebuggable("com.example.app") } returns Result.success(true)
+        every { adbManager.findPid("com.example.app") } returns Result.success(9999)
+        every { adbManager.restartApp("com.example.app") } returns Result.success(Unit)
+
+        val compiler = mockk<IncrementalDexCompiler>(relaxed = true)
+        every { compiler.compileAndDex(any(), any()) } returns CompilationOutcome.StructuralIncompatible(
+            reason = "INTERFACE_HIERARCHY_CHANGED:NiaAppState"
+        )
+
+        var agentCalled = false
+        val installer = mockk<JvmtiAgentInstaller>()
+        every { installer.invalidateInstalledAgent(any()) } returns Unit
+        every { installer.applyHotReload(any(), any(), any()) } answers {
+            agentCalled = true
+            AgentExecutionResult.Error("UNEXPECTED", "Agent must not be called")
+        }
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        val tracker = SourceChangeTracker(layout).apply { initializeBaseline() }
+        stateKt.writeText("class NiaAppState : java.io.Serializable")
+        stateKt.setLastModified(stateKt.lastModified() + 5_000L)
+
+        val session = HotReloadSession(
+            config = HotReloadConfig(appId = "com.example.app", projectDir = tempDir, once = true),
+            adbManager = adbManager,
+            layout = layout,
+            tracker = tracker,
+            compiler = compiler,
+            agentInstaller = installer,
+            fallbackInstaller = { Result.success(Unit) }
+        )
+
+        val events = mutableListOf<HotReloadEvent>()
+        session.run { events.add(it) }
+
+        assertTrue(!agentCalled)
+        val fallback = events.filterIsInstance<HotReloadEvent.FallbackReinstall>().single()
+        assertEquals("INTERFACE_HIERARCHY_CHANGED:NiaAppState", fallback.reason)
+    }
+
+    @Test
+    fun `automatically reapplies session edits when target app process restarts with new PID`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+        val mainKt = File(appDir, "src/main/kotlin/MainScreen.kt").apply {
+            parentFile.mkdirs()
+            writeText("fun MainScreen() = 1")
+        }
+        val registryDir = File(tempDir, "reapply_registry").apply { mkdirs() }
+
+        var currentPid = 1001
+        val adbManager = mockk<AdbManager>(relaxed = true)
+        every { adbManager.isAppDebuggable("com.example.app") } returns Result.success(true)
+        every { adbManager.findPid("com.example.app") } answers { Result.success(currentPid) }
+
+        val dexFile = File(tempDir, "redefine_0.dex").apply { writeBytes(byteArrayOf(1)) }
+        val compiler = mockk<IncrementalDexCompiler>(relaxed = true)
+        every { compiler.compileAndDex(any(), any()) } returns CompilationOutcome.Success(
+            classPayloads = listOf(ClassDexPayload("MainScreenKt", dexFile)),
+            combinedDexFile = dexFile
+        )
+        every { compiler.reapplyFromApkBaseline(any(), any()) } returns CompilationOutcome.Success(
+            classPayloads = listOf(ClassDexPayload("MainScreenKt", dexFile)),
+            combinedDexFile = dexFile
+        )
+
+        val installer = mockk<JvmtiAgentInstaller>(relaxed = true)
+        every { installer.applyHotReload("com.example.app", any(), any()) } returns AgentExecutionResult.Success(
+            mode = ReloadMode.JVMTI_HOT_SWAP,
+            redefinedCount = 1,
+            newClassesCount = 0,
+            uiRefresh = UiRefreshMode.COMPOSE_HOT_RELOAD
+        )
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        val tracker = SourceChangeTracker(layout).apply { initializeBaseline() }
+        mainKt.writeText("fun MainScreen() = 2")
+        mainKt.setLastModified(mainKt.lastModified() + 5_000L)
+
+        val events = java.util.concurrent.CopyOnWriteArrayList<HotReloadEvent>()
+        lateinit var session: HotReloadSession
+        session = HotReloadSession(
+            config = HotReloadConfig(
+                appId = "com.example.app",
+                projectDir = tempDir,
+                once = false,
+                intervalMs = 50L
+            ),
+            adbManager = adbManager,
+            layout = layout,
+            tracker = tracker,
+            compiler = compiler,
+            agentInstaller = installer,
+            syncRegistryDir = registryDir
+        )
+
+        session.run { event ->
+            events.add(event)
+            val reloadedCount = events.count { it is HotReloadEvent.Reloaded }
+            if (reloadedCount == 1 && event is HotReloadEvent.Reloaded) {
+                // Simulate app restart to PID 2002 and wake watcher via sync
+                currentPid = 2002
+                Thread {
+                    val portFile = HotReloadSyncCoordinator.portFileFor("com.example.app", tempDir, registryDir)
+                    val deadline = System.currentTimeMillis() + 2_000L
+                    while (!portFile.exists() && System.currentTimeMillis() < deadline) {
+                        Thread.sleep(10L)
+                    }
+                    HotReloadSyncCoordinator.trySyncWithRunningWatcher(
+                        config = HotReloadConfig(appId = "com.example.app", projectDir = tempDir, once = true),
+                        registryDir = registryDir,
+                        onLine = {}
+                    )
+                }.start()
+            } else if (reloadedCount >= 2 && event is HotReloadEvent.Reloaded) {
+                session.stop()
+            }
+        }
+
+        val watchingPids = events.filterIsInstance<HotReloadEvent.Watching>().map { it.pid }
+        assertEquals(listOf(1001, 2002), watchingPids)
+        assertEquals(2, events.count { it is HotReloadEvent.Reloaded })
+    }
 }

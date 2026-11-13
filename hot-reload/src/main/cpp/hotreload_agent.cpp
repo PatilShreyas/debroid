@@ -598,6 +598,7 @@ int clear_stale_lambda_slots(
     std::vector<jint> matched_scope_groups;
     std::vector<jint> reset_remember_scope_groups;
     std::vector<jint> all_app_scope_groups;
+    std::vector<jint> all_restart_scope_groups;
     std::vector<std::pair<jint, jsize>> scope_slot_indices;
     std::vector<jsize> matched_lambda_slots;
     std::vector<jsize> all_app_lambda_slots;
@@ -616,13 +617,27 @@ int clear_stale_lambda_slots(
             if (!elem) continue;
             if (recompose_scope_cls && scope_block_fid && scope_anchor_fid &&
                 env->IsInstanceOf(elem, recompose_scope_cls)) {
+                jobject anc = env->GetObjectField(elem, scope_anchor_fid);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    anc = nullptr;
+                }
+                jint g_idx = anc
+                    ? resolve_anchor_group_index(env, anc, slot_table, st_anchor_index_mid, to_index_mid, groups_size)
+                    : -1;
+                if (anc) env->DeleteLocalRef(anc);
+                if (g_idx >= 0) {
+                    all_restart_scope_groups.push_back(g_idx);
+                    scope_slot_indices.push_back({g_idx, k});
+                }
+
                 jobject blk = env->GetObjectField(elem, scope_block_fid);
                 if (env->ExceptionCheck()) {
                     env->ExceptionClear();
                     blk = nullptr;
                 }
                 bool matches_redefined = false;
-                if (blk && inspect_app_cached_lambda(
+                if (blk && g_idx >= 0 && inspect_app_cached_lambda(
                         env, blk, class_cls, get_name_mid, composable_lambda_cls, block_fid, kotlin_func_cls,
                         redefined_prefixes, &matches_redefined)) {
                     bool has_fine_grained = !changed_scope_keys.empty() || !invalidate_all_scope_classes.empty();
@@ -655,29 +670,15 @@ int clear_stale_lambda_slots(
                             env->ExceptionClear();
                         }
                     }
-                    jobject anc = env->GetObjectField(elem, scope_anchor_fid);
-                    if (env->ExceptionCheck()) {
-                        env->ExceptionClear();
-                        anc = nullptr;
+                    all_app_scope_groups.push_back(g_idx);
+                    bool scope_changed = has_fine_grained
+                        ? (matches_unscoped_class || matches_changed_lkey)
+                        : matches_redefined;
+                    if (scope_changed || matches_reset) {
+                        matched_scope_groups.push_back(g_idx);
                     }
-                    if (anc) {
-                        jint g_idx = resolve_anchor_group_index(
-                            env, anc, slot_table, st_anchor_index_mid, to_index_mid, groups_size
-                        );
-                        if (g_idx >= 0) {
-                            all_app_scope_groups.push_back(g_idx);
-                            scope_slot_indices.push_back({g_idx, k});
-                            bool scope_changed = has_fine_grained
-                                ? (matches_unscoped_class || matches_changed_lkey)
-                                : matches_redefined;
-                            if (scope_changed || matches_reset) {
-                                matched_scope_groups.push_back(g_idx);
-                            }
-                            if (matches_reset) {
-                                reset_remember_scope_groups.push_back(g_idx);
-                            }
-                        }
-                        env->DeleteLocalRef(anc);
+                    if (matches_reset) {
+                        reset_remember_scope_groups.push_back(g_idx);
                     }
                 }
                 if (blk) env->DeleteLocalRef(blk);
@@ -705,7 +706,7 @@ int clear_stale_lambda_slots(
     }
     jint* g_ptr = groups_arr ? env->GetIntArrayElements(groups_arr, nullptr) : nullptr;
     if (g_ptr && (!reset_scope_keys.empty() || !changed_scope_keys.empty())) {
-        for (jint scope_g : all_app_scope_groups) {
+        for (jint scope_g : all_restart_scope_groups) {
             if (scope_g >= 0 && scope_g < groups_size) {
                 jint scope_key = g_ptr[scope_g * 5 + 0];
                 if (!reset_scope_keys.empty() && contains_int(reset_scope_keys, scope_key)) {
@@ -715,18 +716,23 @@ int clear_stale_lambda_slots(
                     if (!contains_int(matched_scope_groups, scope_g)) {
                         matched_scope_groups.push_back(scope_g);
                     }
+                    if (!contains_int(all_app_scope_groups, scope_g)) {
+                        all_app_scope_groups.push_back(scope_g);
+                    }
                 }
                 if (!changed_scope_keys.empty() && contains_int(changed_scope_keys, scope_key)) {
                     if (!contains_int(matched_scope_groups, scope_g)) {
                         matched_scope_groups.push_back(scope_g);
+                    }
+                    if (!contains_int(all_app_scope_groups, scope_g)) {
+                        all_app_scope_groups.push_back(scope_g);
                     }
                 }
             }
         }
     }
 
-    bool scoped_only = !changed_scope_keys.empty() && invalidate_all_scope_classes.empty();
-    bool comp_matched = !matched_scope_groups.empty() || (!scoped_only && !matched_lambda_slots.empty());
+    bool comp_matched = !matched_scope_groups.empty() || !matched_lambda_slots.empty();
     if (out_comp_matched) {
         *out_comp_matched = comp_matched;
     }

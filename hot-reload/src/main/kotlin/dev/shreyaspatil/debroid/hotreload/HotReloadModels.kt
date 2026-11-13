@@ -46,6 +46,10 @@ sealed class CompilationOutcome {
         val combinedDexFile: File?
     ) : CompilationOutcome()
 
+    data class StructuralIncompatible(
+        val reason: String
+    ) : CompilationOutcome()
+
     data class Failure(
         val module: String,
         val diagnostic: String

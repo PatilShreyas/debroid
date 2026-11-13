@@ -201,4 +201,40 @@ class SourceChangeTrackerTest {
             assertEquals(listOf(newSubFile.canonicalFile), added.codeChangesByModule.values.flatten())
         }
     }
+
+    @Test
+    fun `reverting broken edit back to baseline content triggers recovery change instead of silence`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+
+        val stateKt = File(appDir, "src/main/kotlin/com/example/NiaAppState.kt").apply {
+            parentFile.mkdirs()
+            writeText("package com.example\nclass NiaAppState { val ok = 1 }")
+        }
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        SourceChangeTracker(layout).use { tracker ->
+            tracker.initializeBaseline()
+
+            // Save uncompilable edit (not committed because compilation fails)
+            stateKt.writeText("package com.example\nclass NiaAppState { val broken = missing() }")
+            stateKt.setLastModified(stateKt.lastModified() + 5_000L)
+            val brokenDetected = tracker.pollChanges()
+            assertFalse(brokenDetected.isEmpty())
+
+            // Duplicate poll while still broken is deduplicated
+            assertTrue(tracker.pollChanges().isEmpty())
+
+            // Revert file back to exact baseline content -> MUST emit recovery change!
+            stateKt.writeText("package com.example\nclass NiaAppState { val ok = 1 }")
+            stateKt.setLastModified(stateKt.lastModified() + 10_000L)
+            val revertedDetected = tracker.pollChanges()
+            assertFalse(revertedDetected.isEmpty())
+            assertEquals(listOf(stateKt.canonicalFile), revertedDetected.codeChangesByModule.values.flatten())
+
+            tracker.commitChanges(revertedDetected)
+            assertTrue(tracker.pollChanges().isEmpty())
+        }
+    }
 }

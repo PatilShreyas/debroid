@@ -30,6 +30,8 @@ class IncrementalDexCompiler(
 
     private val classMetaByModule = mutableMapOf<String, MutableMap<String, ClassFileMeta>>()
     private val classBytesByModule = mutableMapOf<String, MutableMap<String, ByteArray>>()
+    private val apkBaselineMetaByModule = mutableMapOf<String, Map<String, ClassFileMeta>>()
+    private val apkBaselineBytesByModule = mutableMapOf<String, Map<String, ByteArray>>()
     private val dexBytesByModule = mutableMapOf<String, MutableMap<String, ByteArray>>()
     private val baselineDexFilesByModule = mutableMapOf<String, Map<String, File>>()
     private val baselineDexMembersByClassName = mutableMapOf<String, AdditiveClassMerger.DexClassMembers>()
@@ -99,9 +101,12 @@ class IncrementalDexCompiler(
     fun snapshotModuleClasses(modules: Collection<GradleModule>) {
         classMetaByModule.clear()
         classBytesByModule.clear()
+        apkBaselineMetaByModule.clear()
+        apkBaselineBytesByModule.clear()
         dexBytesByModule.clear()
         baselineDexFilesByModule.clear()
         baselineDexMembersByClassName.clear()
+        cumulativeStubsByModule.clear()
         knownModulesByPath.clear()
         redirectedInterfacesByModule.clear()
         activeClassRenamesByModule.clear()
@@ -138,6 +143,10 @@ class IncrementalDexCompiler(
         }
         classMetaByModule[module.gradlePath] = metaMap
         classBytesByModule[module.gradlePath] = bytesMap
+        if (module.gradlePath !in apkBaselineMetaByModule) {
+            apkBaselineMetaByModule[module.gradlePath] = metaMap.toMap()
+            apkBaselineBytesByModule[module.gradlePath] = bytesMap.toMap()
+        }
 
         val rawDexFiles = scanModuleDexFiles(module)
         baselineDexFilesByModule[module.gradlePath] = rawDexFiles
@@ -163,6 +172,55 @@ class IncrementalDexCompiler(
                 }
         }
         dexBytesByModule[module.gradlePath] = persistedDexMap
+    }
+
+    fun resetToApkBaseline() {
+        classMetaByModule.clear()
+        for ((mod, meta) in apkBaselineMetaByModule) {
+            classMetaByModule[mod] = meta.toMutableMap()
+        }
+        classBytesByModule.clear()
+        for ((mod, bytes) in apkBaselineBytesByModule) {
+            classBytesByModule[mod] = bytes.toMutableMap()
+        }
+        dexBytesByModule.clear()
+        cumulativeStubsByModule.clear()
+        redirectedInterfacesByModule.clear()
+        activeClassRenamesByModule.clear()
+        for ((_, moduleDir) in moduleDirsByPath) {
+            val modVariant = resolveVariantForDir(moduleDir)
+            File(moduleDir, "build/tmp/debroid-hotreload/$modVariant").deleteRecursively()
+        }
+    }
+
+    fun reapplyFromApkBaseline(
+        editedModulesAndFiles: Map<GradleModule, List<File>>,
+        stagingDir: File
+    ): CompilationOutcome {
+        for (module in editedModulesAndFiles.keys) {
+            if (module.gradlePath !in apkBaselineMetaByModule) {
+                snapshotSingleModule(module)
+            }
+        }
+        resetToApkBaseline()
+
+        val allTargetModules = LinkedHashMap<GradleModule, List<File>>()
+        allTargetModules.putAll(editedModulesAndFiles)
+        for (modulePath in apkBaselineMetaByModule.keys) {
+            val mod = knownModulesByPath[modulePath] ?: continue
+            if (mod !in allTargetModules) {
+                allTargetModules[mod] = emptyList()
+            }
+        }
+
+        val collected = when (val res = collectModifiedClasses(allTargetModules)) {
+            is ClassCollectionResult.Incompatible -> return CompilationOutcome.StructuralIncompatible(res.reason)
+            is ClassCollectionResult.Collected -> res.entries
+        }
+        if (collected.isEmpty()) {
+            return CompilationOutcome.Success(emptyList(), null)
+        }
+        return packageDexPayloads(collected, stagingDir)
     }
 
     private fun ensureAppMergedDexIndexed() {
@@ -283,7 +341,10 @@ class IncrementalDexCompiler(
         }
         kspChangeDetector.recordSuccessfulCompile(changesByModule.values.flatten())
 
-        val primaryClasses = collectModifiedClasses(changesByModule)
+        val primaryClasses = when (val res = collectModifiedClasses(changesByModule)) {
+            is ClassCollectionResult.Incompatible -> return CompilationOutcome.StructuralIncompatible(res.reason)
+            is ClassCollectionResult.Collected -> res.entries
+        }
         val combinedClasses = LinkedHashMap<String, ModifiedClassEntry>()
         for (entry in primaryClasses) {
             combinedClasses[entry.className] = entry
@@ -320,7 +381,13 @@ class IncrementalDexCompiler(
                     }.flatten()
                     val depResult = executeGradleCompile(gradlew, depTasks, gradleFlags + depKspFlags)
                     if (depResult.isSuccess) {
-                        for (depEntry in collectModifiedClasses(depChanges)) {
+                        val depCollected = when (val depRes = collectModifiedClasses(depChanges)) {
+                            is ClassCollectionResult.Incompatible -> {
+                                return CompilationOutcome.StructuralIncompatible(depRes.reason)
+                            }
+                            is ClassCollectionResult.Collected -> depRes.entries
+                        }
+                        for (depEntry in depCollected) {
                             combinedClasses[depEntry.className] = depEntry
                         }
                     }
@@ -423,6 +490,11 @@ class IncrementalDexCompiler(
         val syntheticMarker: String
     )
 
+    private sealed class ClassCollectionResult {
+        data class Collected(val entries: List<ModifiedClassEntry>) : ClassCollectionResult()
+        data class Incompatible(val reason: String) : ClassCollectionResult()
+    }
+
     private inner class ModuleCollectState(
         val module: GradleModule,
         val previousMeta: Map<String, ClassFileMeta>,
@@ -433,12 +505,15 @@ class IncrementalDexCompiler(
     ) {
         val updatedMeta = mutableMapOf<String, ClassFileMeta>()
         val updatedBytesMap = previousBytesMap.toMutableMap()
-        val activeRenames = activeClassRenamesByModule.getOrPut(module.gradlePath) { LinkedHashMap() }
+        val activeRenames = activeClassRenamesByModule[module.gradlePath]
+            ?.let { LinkedHashMap(it) }
+            ?: LinkedHashMap()
         val newlyRenamedClasses = LinkedHashMap<String, String>()
         val newlyRedirectedIfaces = LinkedHashMap<String, List<Pair<String, String>>>()
         val synthesizedDefaultImplsByClass = LinkedHashMap<String, Pair<File, ByteArray>>()
         val interfaceStaticFieldUpdates = mutableListOf<StaticFieldUpdate>()
         var anyInterfaceCrossModuleChange = false
+        var structuralIncompatibleReason: String? = null
         val modifiedRawBytesByClass = LinkedHashMap<String, Pair<File, ByteArray>>()
 
         fun resolveClassBytes(internalName: String): ByteArray? {
@@ -505,7 +580,8 @@ class IncrementalDexCompiler(
                 return true
             }
             if (ClassBytecodeAnalyzer.hasInterfaceStructureChange(prevBytes, currentBytes)) {
-                return false
+                structuralIncompatibleReason = "INTERFACE_STRUCTURE_CHANGED:$simpleName"
+                return true
             }
 
             updatedBytesMap[className] = currentBytes
@@ -608,8 +684,9 @@ class IncrementalDexCompiler(
 
     private fun collectModifiedClasses(
         changesByModule: Map<GradleModule, List<File>>
-    ): List<ModifiedClassEntry> {
+    ): ClassCollectionResult {
         val changedClasses = LinkedHashMap<String, ModifiedClassEntry>()
+        val completedStates = mutableListOf<ModuleCollectState>()
         for ((module, sourceFiles) in changesByModule) {
             val state = ModuleCollectState(
                 module = module,
@@ -617,10 +694,13 @@ class IncrementalDexCompiler(
                 previousBytesMap = classBytesByModule[module.gradlePath].orEmpty(),
                 currentClasses = scanModuleClassFiles(module),
                 editedBaseNames = sourceFiles.map { it.nameWithoutExtension }.toSet(),
-                redirectedIfaces = redirectedInterfacesByModule.getOrPut(module.gradlePath) { LinkedHashMap() }
+                redirectedIfaces = redirectedInterfacesByModule[module.gradlePath]
+                    ?.let { LinkedHashMap(it) }
+                    ?: LinkedHashMap()
             )
 
             state.scanModifiedCandidates()
+            state.structuralIncompatibleReason?.let { return ClassCollectionResult.Incompatible(it) }
             state.collectNewlyRedirectedInterfaceCallers()
             state.detectAndRegisterAnonymousClassRenames()
             state.collectNewlyRenamedClassCallers()
@@ -650,14 +730,21 @@ class IncrementalDexCompiler(
                     File(fileAndBytes.first.parentFile, "${effectiveClassName.substringAfterLast('.')}.class")
                 }
                 val entry = buildModifiedClassEntry(state, effectiveClassName, effectiveFile, remappedBytes)
+                state.structuralIncompatibleReason?.let { return ClassCollectionResult.Incompatible(it) }
                 if (entry != null) {
                     changedClasses[effectiveClassName] = entry
                 }
             }
-            classMetaByModule[module.gradlePath] = state.updatedMeta
-            classBytesByModule[module.gradlePath] = state.updatedBytesMap
+            completedStates.add(state)
         }
-        return changedClasses.values.toList()
+        for (state in completedStates) {
+            val modPath = state.module.gradlePath
+            classMetaByModule[modPath] = state.updatedMeta
+            classBytesByModule[modPath] = state.updatedBytesMap
+            redirectedInterfacesByModule[modPath] = state.redirectedIfaces
+            activeClassRenamesByModule[modPath] = state.activeRenames
+        }
+        return ClassCollectionResult.Collected(changedClasses.values.toList())
     }
 
     private fun buildModifiedClassEntry(
@@ -692,6 +779,22 @@ class IncrementalDexCompiler(
                 baselineSuperClass = baselineSuper,
                 hasHiltSiblingClass = hiltSibling
             )
+        }
+        if (!isSynthesizedDefaultImpls) {
+            val dexHierarchyFallback = if (hiltPrevBytes == null) {
+                resolveBaselineDexMembers(modulePath, className)
+            } else {
+                null
+            }
+            val unsupportedReason = ClassBytecodeAnalyzer.detectUnsupportedRedefinitionReason(
+                previousBytes = hiltPrevBytes,
+                currentBytes = hiltCurrentBytes,
+                baselineDexMembers = dexHierarchyFallback
+            )
+            if (unsupportedReason != null) {
+                state.structuralIncompatibleReason = unsupportedReason
+                return null
+            }
         }
         state.updatedBytesMap[className] = hiltCurrentBytes
 
@@ -740,6 +843,18 @@ class IncrementalDexCompiler(
             invalidateAllClassScopes = if (hiltPrevBytes == null) false else rememberDiff.invalidateAllClassScopes,
             staticFieldUpdates = combinedStaticUpdates
         )
+    }
+
+    private fun resolveBaselineDexMembers(
+        modulePath: String,
+        className: String
+    ): AdditiveClassMerger.DexClassMembers? {
+        ensureAppMergedDexIndexed()
+        baselineDexMembersByClassName[className]?.let { return it }
+        return baselineDexFilesByModule[modulePath]?.get(className)
+            ?.takeIf { it.exists() }
+            ?.readBytes()
+            ?.let { AdditiveClassMerger.parseDexMembers(it, className) }
     }
 
     private fun resolveBaselineSuperClass(modulePath: String, className: String): String? {
@@ -1022,7 +1137,9 @@ class IncrementalDexCompiler(
         return AdditiveClassMerger.DexClassMembers(
             fields = fieldMap.values.toList(),
             methods = methodMap.values.toList(),
-            superClassName = incoming.superClassName ?: existing.superClassName
+            superClassName = incoming.superClassName ?: existing.superClassName,
+            interfaces = incoming.interfaces.ifEmpty { existing.interfaces },
+            accessFlags = if (incoming.accessFlags != 0) incoming.accessFlags else existing.accessFlags
         )
     }
 

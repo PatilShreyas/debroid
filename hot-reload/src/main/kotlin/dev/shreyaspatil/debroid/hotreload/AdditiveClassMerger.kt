@@ -61,7 +61,9 @@ object AdditiveClassMerger {
     data class DexClassMembers(
         val fields: List<MemberSignature>,
         val methods: List<MemberSignature>,
-        val superClassName: String? = null
+        val superClassName: String? = null,
+        val interfaces: List<String> = emptyList(),
+        val accessFlags: Int = 0
     )
 
     private class ConstantPoolSection(
@@ -527,6 +529,26 @@ private object DexMemberParser {
             ?: allClasses.values.first()
     }
 
+    private fun readDexInterfaces(
+        dexBytes: ByteArray,
+        buf: ByteBuffer,
+        interfacesOff: Int,
+        readDexType: (Int) -> String
+    ): List<String> {
+        if (interfacesOff <= 0 || interfacesOff + 4 > dexBytes.size) return emptyList()
+        val count = buf.getInt(interfacesOff)
+        if (count <= 0 || interfacesOff + 4 + count * 2 > dexBytes.size) return emptyList()
+        val list = ArrayList<String>(count)
+        for (k in 0..<count) {
+            val tIdx = buf.getShort(interfacesOff + 4 + k * 2).toInt() and U16_MASK
+            val internalName = readDexType(tIdx).removeSurrounding("L", ";")
+            if (internalName.isNotEmpty()) {
+                list.add(internalName)
+            }
+        }
+        return list
+    }
+
     fun parseAllClasses(dexBytes: ByteArray): Map<String, AdditiveClassMerger.DexClassMembers> {
         if (dexBytes.size < MIN_DEX_BYTES) return emptyMap()
         if (dexBytes[0] != 'd'.code.toByte() || dexBytes[1] != 'e'.code.toByte() || dexBytes[2] != 'x'.code.toByte()) {
@@ -620,6 +642,7 @@ private object DexMemberParser {
         for (i in 0..<classDefsSize) {
             val itemOff = classDefsOff + i * DEX_CLASS_DEF_ITEM_SIZE
             val classTypeIdx = buf.getInt(itemOff)
+            val classAccessFlags = buf.getInt(itemOff + 4) and U16_MASK
             val classDescriptor = readDexType(classTypeIdx)
             val className = classDescriptor.removeSurrounding("L", ";").replace('/', '.')
             val superTypeIdx = buf.getInt(itemOff + 8)
@@ -628,9 +651,16 @@ private object DexMemberParser {
             } else {
                 null
             }
+            val interfaces = readDexInterfaces(dexBytes, buf, buf.getInt(itemOff + 12), ::readDexType)
             val classDataOff = buf.getInt(itemOff + DEX_CLASS_DATA_FIELD_OFFSET)
             if (classDataOff == 0) {
-                result[className] = AdditiveClassMerger.DexClassMembers(emptyList(), emptyList(), superClassName)
+                result[className] = AdditiveClassMerger.DexClassMembers(
+                    fields = emptyList(),
+                    methods = emptyList(),
+                    superClassName = superClassName,
+                    interfaces = interfaces,
+                    accessFlags = classAccessFlags
+                )
                 continue
             }
             buf.position(classDataOff)
@@ -645,7 +675,13 @@ private object DexMemberParser {
             decodeFields(instanceFieldsSize, fields)
             decodeMethods(directMethodsSize, methods)
             decodeMethods(virtualMethodsSize, methods)
-            result[className] = AdditiveClassMerger.DexClassMembers(fields, methods, superClassName)
+            result[className] = AdditiveClassMerger.DexClassMembers(
+                fields = fields,
+                methods = methods,
+                superClassName = superClassName,
+                interfaces = interfaces,
+                accessFlags = classAccessFlags
+            )
         }
 
         return result

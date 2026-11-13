@@ -60,7 +60,7 @@ Wait for `[WATCHING]` in the output before editing files:
      ```bash
      debroid hot-reload <app_id> -d <project_dir> --once && android layout --pretty
      ```
-   - *(Note: If an edit only touched comments, imports, or formatting with zero executable bytecode changes, `debroid` still emits `[RELOADED] mode=JVMTI_HOT_SWAP classes=0 new_classes=0 ui=NONE duration=...ms` so every `[RELOADING]` pairs 1-to-1 with a completion event).*
+   - *(Note: If an edit only touched comments, imports, formatting, or reverted a `[COMPILE_ERROR]` back to the prior working code, `debroid` still emits `[RELOADING]` followed by `[RELOADED] mode=JVMTI_HOT_SWAP classes=0 new_classes=0 ui=NONE duration=...ms` so every save pairs 1-to-1 with a completion event).*
 3. **Verify the updated behavior on device**:
    - Visual UI check: `android screen capture -o screen.png` or `adb exec-out screencap -p > screen.png`.
    - Hierarchy/bounds check: `android layout --pretty` or `adb shell uiautomator dump`.
@@ -120,12 +120,12 @@ Wait for `[WATCHING]` in the output before editing files:
 
 - **DO focus strictly on editing source files, reading `[STATUS]` events, and verifying the app UI.** All compilation, variant resolution, DEX merging, and runtime bytecode swapping are handled automatically by the CLI.
 - **DO NOT run `javap`, `dexdump`, or inspect `.class` / `.dex` / `build/` internals.** Never disassemble bytecode or modify Gradle build logic (such as JaCoCo or compiler flags) to work around hot-reload behavior.
-- **DO keep a single watcher running** across edits instead of starting and stopping it per edit.
-- **DO NOT restart the watcher on `[COMPILE_ERROR]`:** The watcher deduplicates failed builds and keeps its baseline anchored to the last successful reload. Fixing the syntax/type error and saving will compile and reload all pending changes together.
-- **DO NOT run `./gradlew install<Variant>` or `adb shell am force-stop` while watching:** This kills the app PID and wipes runtime state.
+- **DO keep a single watcher running** across edits instead of starting and stopping it per edit. If the target app crashes or is restarted mid-session while the watcher is running, `debroid` automatically detects the new PID (`[WATCHING] ... pid=<newPid>`) and reapplies all session edits onto the restarted process from cached compiler outputs without requiring a Gradle rebuild or reinstall. (To bake edits permanently into the installed APK after stopping the watcher, run `./gradlew :<app-module>:install<Variant>`).
+- **DO NOT restart the watcher on `[COMPILE_ERROR]`:** The watcher deduplicates failed builds and keeps its baseline anchored to the last successful reload. Fixing or reverting the syntax/type error and saving will always emit `[RELOADING]` followed by `[RELOADED]`.
+- **DO NOT run `./gradlew install<Variant>` or `adb shell am force-stop` unnecessarily while watching:** Killing the app PID resets in-memory UI/`ViewModel` state (though an active watcher will automatically reapply your code edits when the app relaunches).
 - **Automatic `remember` state reset on structural `remember` edits:** When a `@Composable` function's `remember` calls are unchanged, its remembered values are preserved across hot reloads. When `remember` calls in a composable are added, removed, or reordered, `debroid` automatically resets the `remember` slots for that composable so new initial values take effect cleanly without affecting other composables.
 - **New fields on existing instances:** When adding a new field/property to a class that already has live instances in memory, that field reads as its default zero/null value (`0`, `false`, `null`) on pre-existing instances until a new instance is constructed.
-- **Class hierarchy changes:** Changing a class's superclass, implemented interfaces, or `enum` constants cannot be hot-swapped in memory and will trigger `[FALLBACK_REINSTALL]` (or `[ERROR] code=RELOAD_FAILED` when `--no-fallback` is enabled).
+- **Pre-flight class hierarchy checks:** Changing a named class's superclass, implemented interfaces (e.g. adding `: Serializable`), class kind/modifiers, or `interface` method signatures is detected immediately on the host after incremental compilation (before `D8` or device staging) and triggers `[FALLBACK_REINSTALL]` with a descriptive reason such as `INTERFACE_HIERARCHY_CHANGED:<Class>` or `SUPERCLASS_CHANGED:<Class>` (or `[ERROR] code=FALLBACK_DISABLED` when `--no-fallback` is enabled).
 
 ---
 

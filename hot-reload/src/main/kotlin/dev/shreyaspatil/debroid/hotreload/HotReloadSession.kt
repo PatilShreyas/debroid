@@ -17,7 +17,7 @@ data class HotReloadConfig(
     val allowFallback: Boolean = true
 )
 
-@Suppress("LongParameterList")
+@Suppress("LongParameterList", "TooManyFunctions")
 class HotReloadSession(
     private val config: HotReloadConfig,
     private val adbManager: AdbManager = AdbManager(),
@@ -42,6 +42,10 @@ class HotReloadSession(
 ) {
     private val isRunning = AtomicBoolean(true)
     private var lastReportedCrashBlock: String? = null
+    private var activePid: Int = -1
+    private var appWasStopped: Boolean = false
+    private var lastIdlePidCheckMs: Long = 0L
+    private val sessionModifiedFilesByModule = LinkedHashMap<GradleModule, LinkedHashSet<File>>()
     private val syncMonitor = Object()
     private var isPassInProgress = false
     private var pendingSyncCount = 0
@@ -54,6 +58,7 @@ class HotReloadSession(
         private const val CRASH_LOG_TAIL_LINES = "150"
         private const val RECENT_SYNC_WINDOW_MS = 5_000L
         private const val SYNC_WAIT_SLICE_MS = 200L
+        private const val PID_CHECK_INTERVAL_MS = 1_000L
         private const val COMPOSE_ERROR_PREFIX = "Error was captured in composition"
         private val stackFrameRegex = Regex("""^at\s+([\w.$]+)\.[\w$<>]+\(([^():]+):(\d+)\)$""")
         private val frameworkPrefixes = listOf(
@@ -118,6 +123,8 @@ class HotReloadSession(
             return
         }
         val initialPid = initialPidRes.getOrThrow()
+        activePid = initialPid
+        lastIdlePidCheckMs = System.currentTimeMillis()
         seedExistingCrashBaseline(initialPid)
 
         onEvent(
@@ -156,15 +163,11 @@ class HotReloadSession(
                     tracker.awaitChanges(config.intervalMs)
                 }
                 if (!changes.isEmpty()) {
-                    val passCaptured = mutableListOf<String>()
-                    processDetectedChanges(changes, stagingDir) { event ->
-                        passCaptured.add(event.formatPlainText())
-                        onEvent(event)
+                    runPassWithCapture(onEvent) { emit ->
+                        processDetectedChanges(changes, stagingDir, emit)
                     }
-                    synchronized(syncMonitor) {
-                        lastPassLines = passCaptured
-                        lastPassEndMs = System.currentTimeMillis()
-                    }
+                } else {
+                    checkAndHandlePidRestartWhenIdle(forcePoll, stagingDir, onEvent)
                 }
                 synchronized(syncMonitor) {
                     isPassInProgress = false
@@ -219,6 +222,149 @@ class HotReloadSession(
         }
     }
 
+    private fun runPassWithCapture(
+        onEvent: (HotReloadEvent) -> Unit,
+        block: ((HotReloadEvent) -> Unit) -> Unit
+    ) {
+        val passCaptured = mutableListOf<String>()
+        block { event ->
+            passCaptured.add(event.formatPlainText())
+            onEvent(event)
+        }
+        synchronized(syncMonitor) {
+            lastPassLines = passCaptured
+            lastPassEndMs = System.currentTimeMillis()
+        }
+    }
+
+    private fun shouldProbeIdlePid(forceCheck: Boolean): Boolean {
+        if (config.once) return false
+        if (!forceCheck && sessionModifiedFilesByModule.isEmpty() && !appWasStopped) return false
+        val now = System.currentTimeMillis()
+        if (!forceCheck && now - lastIdlePidCheckMs < PID_CHECK_INTERVAL_MS) return false
+        lastIdlePidCheckMs = now
+        return true
+    }
+
+    private fun checkAndHandlePidRestartWhenIdle(
+        forceCheck: Boolean,
+        stagingDir: File,
+        onEvent: (HotReloadEvent) -> Unit
+    ) {
+        if (!shouldProbeIdlePid(forceCheck)) return
+
+        val pidRes = adbManager.findPid(config.appId)
+        if (pidRes.isFailure) {
+            appWasStopped = true
+            return
+        }
+        val currentPid = pidRes.getOrThrow()
+        val wasStopped = appWasStopped
+        appWasStopped = false
+
+        val unapplied = if (wasStopped) {
+            tracker.clearFailedAttempts()
+            tracker.pollChanges()
+        } else {
+            DetectedChanges(emptyMap(), emptyList())
+        }
+        if (!unapplied.isEmpty()) {
+            runPassWithCapture(onEvent) { emit ->
+                processDetectedChanges(unapplied, stagingDir, emit)
+            }
+            return
+        }
+
+        if (currentPid != activePid) {
+            onProcessRestarted(currentPid, onEvent)
+            if (sessionModifiedFilesByModule.isNotEmpty()) {
+                runPassWithCapture(onEvent) { emit ->
+                    reapplySessionEdits(currentPid, stagingDir, emit)
+                }
+            }
+        }
+    }
+
+    private fun onProcessRestarted(newPid: Int, onEvent: (HotReloadEvent) -> Unit) {
+        activePid = newPid
+        runCatching { agentInstaller.invalidateInstalledAgent(config.appId) }
+        seedExistingCrashBaseline(newPid)
+        onEvent(
+            HotReloadEvent.Watching(
+                appId = config.appId,
+                pid = newPid,
+                moduleCount = layout.modules.size,
+                intervalMs = config.intervalMs
+            )
+        )
+    }
+
+    private fun reapplySessionEdits(
+        pid: Int,
+        stagingDir: File,
+        onEvent: (HotReloadEvent) -> Unit
+    ) {
+        val editedMap = sessionModifiedFilesByModule.mapValues { it.value.toList() }
+        val modulePaths = editedMap.keys.map { it.gradlePath }
+        val fileNames = editedMap.values.flatten().map { it.name }
+        onEvent(HotReloadEvent.Reloading(modules = modulePaths, files = fileNames))
+
+        val startMs = System.currentTimeMillis()
+        when (val outcome = compiler.reapplyFromApkBaseline(editedMap, stagingDir)) {
+            is CompilationOutcome.Failure -> {
+                onEvent(HotReloadEvent.CompileError(outcome.module, outcome.diagnostic))
+            }
+            is CompilationOutcome.StructuralIncompatible -> {
+                handleFallback(
+                    reason = outcome.reason,
+                    files = fileNames,
+                    changes = DetectedChanges(editedMap, emptyList()),
+                    onEvent = onEvent
+                )
+            }
+            is CompilationOutcome.Success -> {
+                if (outcome.classPayloads.isEmpty()) {
+                    onEvent(
+                        HotReloadEvent.Reloaded(
+                            mode = ReloadMode.JVMTI_HOT_SWAP,
+                            redefinedCount = 0,
+                            newClassesCount = 0,
+                            uiRefresh = UiRefreshMode.NONE,
+                            durationMs = System.currentTimeMillis() - startMs
+                        )
+                    )
+                    return
+                }
+                applyDexToDevice(
+                    compileOutcome = outcome,
+                    changes = DetectedChanges(emptyMap(), emptyList()),
+                    fileNames = fileNames,
+                    pid = pid,
+                    startMs = startMs,
+                    onEvent = onEvent
+                )
+            }
+        }
+    }
+
+    private fun recordSessionModifiedFiles(changes: DetectedChanges) {
+        for ((module, files) in changes.codeChangesByModule) {
+            sessionModifiedFilesByModule.getOrPut(module) { LinkedHashSet() }.addAll(files)
+        }
+    }
+
+    private fun mergeWithSessionModifiedFiles(changes: DetectedChanges): Map<GradleModule, List<File>> {
+        if (sessionModifiedFilesByModule.isEmpty()) return changes.codeChangesByModule
+        val merged = LinkedHashMap<GradleModule, LinkedHashSet<File>>()
+        for ((mod, files) in sessionModifiedFilesByModule) {
+            merged.getOrPut(mod) { LinkedHashSet() }.addAll(files)
+        }
+        for ((mod, files) in changes.codeChangesByModule) {
+            merged.getOrPut(mod) { LinkedHashSet() }.addAll(files)
+        }
+        return merged.mapValues { it.value.toList() }
+    }
+
     private fun processDetectedChanges(
         changes: DetectedChanges,
         stagingDir: File,
@@ -236,23 +382,44 @@ class HotReloadSession(
 
         val pidRes = adbManager.findPid(config.appId)
         if (pidRes.isFailure) {
+            appWasStopped = true
             onEvent(HotReloadEvent.Error("APP_NOT_RUNNING", "App ${config.appId} is not running"))
             return
         }
         val pid = pidRes.getOrThrow()
+        appWasStopped = false
+        val restartedBeforePass = activePid != -1 && pid != activePid
+        if (restartedBeforePass) {
+            onProcessRestarted(pid, onEvent)
+            compiler.resetToApkBaseline()
+        }
 
-        val modulePaths = changes.codeChangesByModule.keys.map { it.gradlePath }
-        val fileNames = changes.codeChangesByModule.values.flatten().map { it.name }
+        val effectiveCodeChanges = if (restartedBeforePass) {
+            mergeWithSessionModifiedFiles(changes)
+        } else {
+            changes.codeChangesByModule
+        }
+        val modulePaths = effectiveCodeChanges.keys.map { it.gradlePath }
+        val fileNames = effectiveCodeChanges.values.flatten().map { it.name }
         onEvent(HotReloadEvent.Reloading(modules = modulePaths, files = fileNames))
 
         val startMs = System.currentTimeMillis()
-        when (val compileOutcome = compiler.compileAndDex(changes.codeChangesByModule, stagingDir)) {
+        when (val compileOutcome = compiler.compileAndDex(effectiveCodeChanges, stagingDir)) {
             is CompilationOutcome.Failure -> {
                 onEvent(HotReloadEvent.CompileError(compileOutcome.module, compileOutcome.diagnostic))
+            }
+            is CompilationOutcome.StructuralIncompatible -> {
+                handleFallback(
+                    reason = compileOutcome.reason,
+                    files = fileNames,
+                    changes = changes,
+                    onEvent = onEvent
+                )
             }
             is CompilationOutcome.Success -> {
                 if (compileOutcome.classPayloads.isEmpty()) {
                     tracker.commitChanges(changes)
+                    recordSessionModifiedFiles(changes)
                     onEvent(
                         HotReloadEvent.Reloaded(
                             mode = ReloadMode.JVMTI_HOT_SWAP,
@@ -286,7 +453,10 @@ class HotReloadSession(
 
         when (agentRes) {
             is AgentExecutionResult.Success -> {
-                tracker.commitChanges(changes)
+                if (!changes.isEmpty()) {
+                    tracker.commitChanges(changes)
+                    recordSessionModifiedFiles(changes)
+                }
                 onEvent(
                     HotReloadEvent.Reloaded(
                         mode = agentRes.mode,
@@ -499,6 +669,12 @@ class HotReloadSession(
 
         adbManager.restartApp(config.appId)
         runCatching { agentInstaller.invalidateInstalledAgent(config.appId) }
+        sessionModifiedFilesByModule.clear()
+        appWasStopped = false
+        adbManager.findPid(config.appId).getOrNull()?.let { newPid ->
+            activePid = newPid
+            seedExistingCrashBaseline(newPid)
+        }
         compiler.snapshotModuleClasses(layout.modules)
         tracker.commitChanges(changes)
         val durationMs = System.currentTimeMillis() - startMs

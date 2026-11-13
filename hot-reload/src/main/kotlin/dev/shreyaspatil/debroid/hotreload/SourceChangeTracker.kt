@@ -186,15 +186,20 @@ class SourceChangeTracker(
         return evaluateCandidates(candidates)
     }
 
+    fun clearFailedAttempts() {
+        failedAttemptHashes.clear()
+    }
+
     private fun evaluateCandidates(candidates: Set<File>): DetectedChanges {
         val codeChanges = mutableMapOf<GradleModule, MutableList<File>>()
         val resourceChanges = mutableListOf<File>()
 
         for (file in candidates) {
             val module = fileModules[file] ?: continue
+            val prevFailedHash = failedAttemptHashes[file]
             if (!file.exists()) {
                 pendingSnapshots.remove(file)
-                if (file in baseline) {
+                if (file in baseline || (prevFailedHash != null && prevFailedHash != DELETED_SENTINEL)) {
                     recordChangedFile(module, file, codeChanges, resourceChanges)
                 } else {
                     failedAttemptHashes.remove(file)
@@ -205,15 +210,18 @@ class SourceChangeTracker(
             val previous = baseline[file]
             val currentModified = file.lastModified()
             val currentLength = file.length()
+            val unchangedMeta = previous != null &&
+                previous.lastModified == currentModified &&
+                previous.length == currentLength
 
-            if (previous != null && previous.lastModified == currentModified && previous.length == currentLength) {
+            if (prevFailedHash == null && unchangedMeta) {
                 pendingSnapshots.remove(file)
-                failedAttemptHashes.remove(file)
                 continue
             }
 
             val currentFp = fingerprint(file)
-            if (previous != null && previous.sha256 == currentFp.sha256) {
+            val recoveringFromFailedAttempt = prevFailedHash != null && prevFailedHash != currentFp.sha256
+            if (previous != null && previous.sha256 == currentFp.sha256 && !recoveringFromFailedAttempt) {
                 // Only timestamp changed; update baseline timestamp silently
                 baseline[file] = currentFp
                 pendingSnapshots.remove(file)
@@ -326,6 +334,13 @@ class SourceChangeTracker(
         }
 
         for ((file, fp) in baseline) {
+            val refFp = pendingSnapshots[file] ?: fp
+            if (!file.exists() || file.lastModified() != refFp.lastModified || file.length() != refFp.length) {
+                dirtyCandidates.add(file)
+            }
+        }
+        for ((file, fp) in pendingSnapshots) {
+            if (file in baseline) continue
             if (!file.exists() || file.lastModified() != fp.lastModified || file.length() != fp.length) {
                 dirtyCandidates.add(file)
             }
