@@ -11,8 +11,8 @@ class JvmtiAgentInstaller(
     private val installedAgentApps = mutableSetOf<String>()
 
     companion object {
-        private const val RESULT_POLL_ATTEMPTS = 50
-        private const val RESULT_POLL_SLEEP_MS = 20L
+        private const val RESULT_POLL_ATTEMPTS = 160
+        private const val RESULT_POLL_SLEEP_MS = 15L
         private const val AGENT_FILENAME = "libdebroid_hotreload.so"
         private const val SYNTHETIC_MARKER_PREFIX = "\$\$ExternalSynthetic"
     }

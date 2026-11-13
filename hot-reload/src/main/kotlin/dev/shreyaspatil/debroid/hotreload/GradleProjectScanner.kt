@@ -3,7 +3,9 @@ package dev.shreyaspatil.debroid.hotreload
 import dev.shreyaspatil.debroid.adb.CommandRunner
 import dev.shreyaspatil.debroid.adb.DefaultCommandRunner
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.security.MessageDigest
 import java.util.Locale
 
 data class GradleProjectLayout(
@@ -299,6 +301,10 @@ object GradleProjectScanner {
     ): GradleProjectLayout {
         val rootDir = findGradleRoot(startDir.canonicalFile) ?: startDir.canonicalFile
         val gradleWrapper = findGradleWrapper(rootDir)
+        val useDiskCache = commandRunner == null && gradleWrapper != null
+        if (useDiskCache) {
+            GradleLayoutDiskCache.tryLoad(rootDir)?.let { return it }
+        }
 
         val rawModules = if (commandRunner != null || gradleWrapper != null) {
             val runner = commandRunner ?: DefaultCommandRunner()
@@ -309,10 +315,14 @@ object GradleProjectScanner {
         }
 
         val enrichedModules = populateModuleDependencies(rawModules)
-        return GradleProjectLayout(
+        val layout = GradleProjectLayout(
             rootDir = rootDir,
             modules = enrichedModules.sortedBy { it.gradlePath }
         )
+        if (useDiskCache && layout.modules.isNotEmpty()) {
+            GradleLayoutDiskCache.save(layout)
+        }
+        return layout
     }
 
     private fun findGradleWrapper(rootDir: File): File? {
@@ -750,5 +760,94 @@ object GradleProjectScanner {
         }
 
         return ModuleType.KOTLIN_JVM
+    }
+}
+
+private object GradleLayoutDiskCache {
+    private const val CACHE_VERSION = "v1"
+    private const val HASH_BYTES = 8
+    private const val MODULE_PREFIX = "MODULE|"
+    private const val EXPECTED_MODULE_PARTS = 4
+
+    fun tryLoad(rootDir: File): GradleProjectLayout? = runCatching {
+        val cacheFile = cacheFileFor(rootDir)
+        if (!cacheFile.isFile) return null
+        val lines = cacheFile.readLines(StandardCharsets.UTF_8)
+        val header = lines.firstOrNull().orEmpty()
+        if (!header.startsWith("fingerprint=")) return null
+        val expectedFp = header.removePrefix("fingerprint=")
+
+        val modules = ArrayList<GradleModule>(lines.size)
+        for (line in lines.drop(1)) {
+            if (!line.startsWith(MODULE_PREFIX)) continue
+            val parts = line.removePrefix(MODULE_PREFIX).split('|')
+            if (parts.size < EXPECTED_MODULE_PARTS) return null
+            val path = parts[0]
+            val dir = File(parts[1])
+            if (!dir.isDirectory) return null
+            val type = ModuleType.valueOf(parts[2])
+            val deps = if (parts[3].isBlank()) emptySet() else parts[3].split(',').toSet()
+            modules.add(GradleModule(path, dir, type, deps))
+        }
+        if (modules.isEmpty()) return null
+
+        val actualFp = computeBuildScriptsFingerprint(rootDir, modules)
+        if (actualFp != expectedFp) return null
+        GradleProjectLayout(rootDir, modules)
+    }.getOrNull()
+
+    fun save(layout: GradleProjectLayout) {
+        runCatching {
+            val cacheFile = cacheFileFor(layout.rootDir)
+            cacheFile.parentFile?.mkdirs()
+            val fp = computeBuildScriptsFingerprint(layout.rootDir, layout.modules)
+            val sb = StringBuilder()
+            sb.append("fingerprint=").append(fp).append('\n')
+            for (mod in layout.modules) {
+                sb.append(MODULE_PREFIX)
+                    .append(mod.gradlePath).append('|')
+                    .append(mod.moduleDir.canonicalPath).append('|')
+                    .append(mod.type.name).append('|')
+                    .append(mod.dependencies.sorted().joinToString(","))
+                    .append('\n')
+            }
+            cacheFile.writeText(sb.toString(), StandardCharsets.UTF_8)
+        }
+    }
+
+    private fun cacheFileFor(rootDir: File): File {
+        val key = rootDir.canonicalPath
+        val hash = MessageDigest.getInstance("SHA-256")
+            .digest(key.toByteArray(StandardCharsets.UTF_8))
+            .take(HASH_BYTES)
+            .joinToString("") { "%02x".format(Locale.US, it) }
+        return File(HotReloadSyncCoordinator.defaultRegistryDir(), "layout-${rootDir.name}-$hash.cache")
+    }
+
+    private fun computeBuildScriptsFingerprint(rootDir: File, modules: List<GradleModule>): String {
+        val trackedFiles = buildList {
+            add(File(rootDir, "settings.gradle.kts"))
+            add(File(rootDir, "settings.gradle"))
+            add(File(rootDir, "gradle.properties"))
+            add(File(rootDir, "build.gradle.kts"))
+            add(File(rootDir, "build.gradle"))
+            add(File(rootDir, "gradle/libs.versions.toml"))
+            for (mod in modules) {
+                add(File(mod.moduleDir, "build.gradle.kts"))
+                add(File(mod.moduleDir, "build.gradle"))
+            }
+        }
+        val sb = StringBuilder()
+        sb.append(CACHE_VERSION).append('|')
+        for (file in trackedFiles) {
+            if (file.isFile) {
+                sb.append(file.path).append(':')
+                    .append(file.lastModified()).append(':')
+                    .append(file.length()).append(';')
+            }
+        }
+        return MessageDigest.getInstance("SHA-256")
+            .digest(sb.toString().toByteArray(StandardCharsets.UTF_8))
+            .joinToString("") { "%02x".format(Locale.US, it) }
     }
 }

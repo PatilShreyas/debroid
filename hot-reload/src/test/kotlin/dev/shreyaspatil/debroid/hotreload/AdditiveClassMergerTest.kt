@@ -217,6 +217,48 @@ class AdditiveClassMergerTest {
         assertEquals(99, loadedClass.getDeclaredField("SECOND_STATE").getInt(null))
     }
 
+    @Test
+    fun `preserves removed constructor stubs for Object and ViewModel subclasses when adding fields`() {
+        val prevClassBytes = buildSyntheticClassFile(
+            internalName = "com/example/NavItem",
+            fields = listOf(AdditiveClassMerger.MemberSignature(0x0012, "iconId", "I")),
+            methods = listOf(AdditiveClassMerger.MemberSignature(0x0001, "<init>", "(I)V"))
+        )
+        val currClassBytes = buildSyntheticClassFile(
+            internalName = "com/example/NavItem",
+            fields = listOf(
+                AdditiveClassMerger.MemberSignature(0x0012, "iconId", "I"),
+                AdditiveClassMerger.MemberSignature(0x0012, "customLabel", "Ljava/lang/String;")
+            ),
+            methods = emptyList(),
+            includeDefaultConstructor = true
+        )
+
+        val mergedBytes = AdditiveClassMerger.mergePreservingRemovedMembers(prevClassBytes, currClassBytes)
+        val loadedClass = ByteArrayClassLoader().define("com.example.NavItem", mergedBytes)
+        val legacyCtor = loadedClass.getDeclaredConstructor(Int::class.javaPrimitiveType)
+        assertNotNull(legacyCtor.newInstance(42))
+
+        // Arbitrary non-Object/non-ViewModel base classes must not synthesize super.<init>()V stubs
+        val customSubCurr = buildSyntheticClassFile(
+            internalName = "com/example/CustomSub",
+            superName = "com/example/CustomBase",
+            fields = emptyList(),
+            methods = emptyList()
+        )
+        val customPrevDex = AdditiveClassMerger.DexClassMembers(
+            fields = emptyList(),
+            methods = listOf(AdditiveClassMerger.MemberSignature(0x0001, "<init>", "(I)V"))
+        )
+        val customCurrDex = AdditiveClassMerger.DexClassMembers(fields = emptyList(), methods = emptyList())
+        val unmergedCustom = AdditiveClassMerger.mergeWithPreviousDexMembers(
+            prevDex = customPrevDex,
+            currDex = customCurrDex,
+            currentClassBytes = customSubCurr
+        )
+        assertTrue(unmergedCustom.contentEquals(customSubCurr))
+    }
+
     private class ByteArrayClassLoader : ClassLoader(AdditiveClassMergerTest::class.java.classLoader) {
         fun define(name: String, bytes: ByteArray): Class<*> = defineClass(name, bytes, 0, bytes.size)
     }

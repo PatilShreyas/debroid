@@ -184,6 +184,7 @@ class HotReloadSession(
                 syncMonitor.notifyAll()
             }
             runCatching { tracker.close() }
+            runCatching { compiler.close() }
             stagingDir.deleteRecursively()
         }
     }

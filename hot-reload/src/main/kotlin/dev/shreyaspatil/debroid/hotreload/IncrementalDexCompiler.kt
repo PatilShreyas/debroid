@@ -15,6 +15,7 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.Adler32
 
+@Suppress("TooManyFunctions")
 class IncrementalDexCompiler(
     private val projectRoot: File,
     private val variant: String = "debug",
@@ -38,7 +39,12 @@ class IncrementalDexCompiler(
         mutableMapOf<String, MutableMap<String, AdditiveClassMerger.DexClassMembers>>()
     private val redirectedInterfacesByModule =
         mutableMapOf<String, MutableMap<String, List<Pair<String, String>>>>()
+    private val activeClassRenamesByModule =
+        mutableMapOf<String, MutableMap<String, String>>()
+    private val kspChangeDetector = KspChangeDetector()
+    private var appMergedDexIndexed = false
     private var reloadGeneration = 0
+    private var classRenameCounter = 0
 
     companion object {
         private const val COMPILE_TIMEOUT_SECONDS = 120L
@@ -84,15 +90,34 @@ class IncrementalDexCompiler(
         }
     }
 
+    fun close() {
+        if (commandRunner is DefaultCommandRunner) {
+            InProcessGradleRunner.closeProject(projectRoot)
+        }
+    }
+
     fun snapshotModuleClasses(modules: Collection<GradleModule>) {
+        classMetaByModule.clear()
+        classBytesByModule.clear()
+        dexBytesByModule.clear()
+        baselineDexFilesByModule.clear()
         baselineDexMembersByClassName.clear()
         knownModulesByPath.clear()
         redirectedInterfacesByModule.clear()
+        activeClassRenamesByModule.clear()
+        appMergedDexIndexed = false
+
         for (module in modules) {
-            snapshotSingleModule(module)
+            knownModulesByPath[module.gradlePath] = module
+            moduleDirsByPath[module.gradlePath] = module.moduleDir
         }
+        kspChangeDetector.snapshotModules(modules, ::resolveModuleVariant)
+
         val d8Path = d8PathProvider()
         InProcessD8Runner.warmUpAsync(d8Path, d8BaseFlags(d8Path))
+        if (commandRunner is DefaultCommandRunner) {
+            InProcessGradleRunner.warmUpAsync(projectRoot)
+        }
     }
 
     private fun snapshotSingleModule(module: GradleModule) {
@@ -116,9 +141,6 @@ class IncrementalDexCompiler(
 
         val rawDexFiles = scanModuleDexFiles(module)
         baselineDexFilesByModule[module.gradlePath] = rawDexFiles
-        if (module.type == ModuleType.ANDROID_APP) {
-            indexAppMergedDexFiles(module, modVariant)
-        }
 
         val persistedDexMap = mutableMapOf<String, ByteArray>()
         val baselineTimestamp = rawDexFiles.values.maxOfOrNull { it.lastModified() } ?: 0L
@@ -141,6 +163,16 @@ class IncrementalDexCompiler(
                 }
         }
         dexBytesByModule[module.gradlePath] = persistedDexMap
+    }
+
+    private fun ensureAppMergedDexIndexed() {
+        if (appMergedDexIndexed) return
+        appMergedDexIndexed = true
+        for (module in knownModulesByPath.values) {
+            if (module.type == ModuleType.ANDROID_APP) {
+                indexAppMergedDexFiles(module, resolveModuleVariant(module))
+            }
+        }
     }
 
     private fun indexAppMergedDexFiles(appModule: GradleModule, modVariant: String) {
@@ -232,8 +264,15 @@ class IncrementalDexCompiler(
         val tasks = buildGradleTasksForModules(changesByModule)
         val gradlew = resolveGradleWrapper()
         val gradleFlags = listOf("--console=plain", "-p", projectRoot.absolutePath)
+        val kspFlags = kspChangeDetector.buildKspExclusionFlags(changesByModule, ::resolveModuleVariant)
 
-        val compileResult = executeGradleCompile(gradlew, tasks, gradleFlags)
+        var compileResult = executeGradleCompile(gradlew, tasks, gradleFlags + kspFlags)
+        if (compileResult.isFailure && kspFlags.isNotEmpty()) {
+            val errText = compileResult.exceptionOrNull()?.message.orEmpty()
+            if (shouldRetryWithoutKspSkip(errText)) {
+                compileResult = executeGradleCompile(gradlew, tasks, gradleFlags)
+            }
+        }
         if (compileResult.isFailure) {
             val rawError = compileResult.exceptionOrNull()?.message.orEmpty()
             val firstModule = changesByModule.keys.firstOrNull()?.gradlePath ?: ":app"
@@ -242,6 +281,7 @@ class IncrementalDexCompiler(
                 diagnostic = extractDiagnostic(rawError)
             )
         }
+        kspChangeDetector.recordSuccessfulCompile(changesByModule.values.flatten())
 
         val primaryClasses = collectModifiedClasses(changesByModule)
         val combinedClasses = LinkedHashMap<String, ModifiedClassEntry>()
@@ -272,7 +312,13 @@ class IncrementalDexCompiler(
                 if (activeDependents.isNotEmpty()) {
                     val depChanges = activeDependents.associateWith { emptyList<File>() }
                     val depTasks = buildGradleTasksForModules(depChanges)
-                    val depResult = executeGradleCompile(gradlew, depTasks, gradleFlags)
+                    val depKspFlags = activeDependents.mapNotNull { dep ->
+                        val modVar = resolveModuleVariant(dep)
+                        val capVar = modVar.replaceFirstChar { it.uppercaseChar() }
+                        val kspDir = File(dep.moduleDir, "build/generated/ksp/$modVar")
+                        if (kspDir.isDirectory) listOf("-x", "${dep.gradlePath}:ksp${capVar}Kotlin") else null
+                    }.flatten()
+                    val depResult = executeGradleCompile(gradlew, depTasks, gradleFlags + depKspFlags)
                     if (depResult.isSuccess) {
                         for (depEntry in collectModifiedClasses(depChanges)) {
                             combinedClasses[depEntry.className] = depEntry
@@ -295,18 +341,36 @@ class IncrementalDexCompiler(
         tasks: List<String>,
         gradleFlags: List<String>
     ): Result<String> {
-        var compileResult = commandRunner.runCommand(listOf(gradlew) + tasks + gradleFlags, COMPILE_TIMEOUT_SECONDS)
+        var compileResult = runGradleTasks(gradlew, tasks, gradleFlags)
         if (compileResult.isFailure) {
             val rawError = compileResult.exceptionOrNull()?.message.orEmpty()
             val retryTasks = resolveFallbackTasksOnTaskNotFound(tasks, rawError)
             if (retryTasks != null) {
-                compileResult = commandRunner.runCommand(
-                    listOf(gradlew) + retryTasks + gradleFlags,
-                    COMPILE_TIMEOUT_SECONDS
-                )
+                compileResult = runGradleTasks(gradlew, retryTasks, gradleFlags)
             }
         }
         return compileResult
+    }
+
+    private fun runGradleTasks(
+        gradlew: String,
+        tasks: List<String>,
+        gradleFlags: List<String>
+    ): Result<String> {
+        if (commandRunner is DefaultCommandRunner) {
+            val inProcessRes = InProcessGradleRunner.tryRunTasks(projectRoot, tasks, gradleFlags)
+            if (inProcessRes != null) {
+                return inProcessRes
+            }
+        }
+        return commandRunner.runCommand(listOf(gradlew) + tasks + gradleFlags, COMPILE_TIMEOUT_SECONDS)
+    }
+
+    private fun shouldRetryWithoutKspSkip(rawError: String): Boolean {
+        if (rawError.contains("not found in project", ignoreCase = true)) return true
+        val hasDirectKotlincError = rawError.lineSequence().any { kotlincErrorRegex.containsMatchIn(it) }
+        if (!hasDirectKotlincError) return true
+        return rawError.contains("Hilt_") || rawError.contains("_Factory") || rawError.contains("_Impl")
     }
 
     internal fun resolveFallbackTasksOnTaskNotFound(
@@ -369,6 +433,8 @@ class IncrementalDexCompiler(
     ) {
         val updatedMeta = mutableMapOf<String, ClassFileMeta>()
         val updatedBytesMap = previousBytesMap.toMutableMap()
+        val activeRenames = activeClassRenamesByModule.getOrPut(module.gradlePath) { LinkedHashMap() }
+        val newlyRenamedClasses = LinkedHashMap<String, String>()
         val newlyRedirectedIfaces = LinkedHashMap<String, List<Pair<String, String>>>()
         val synthesizedDefaultImplsByClass = LinkedHashMap<String, Pair<File, ByteArray>>()
         val interfaceStaticFieldUpdates = mutableListOf<StaticFieldUpdate>()
@@ -421,8 +487,12 @@ class IncrementalDexCompiler(
             classFile: File,
             currentBytes: ByteArray
         ): Boolean {
-            val isKnownInterface = ClassBytecodeAnalyzer.isInterfaceClass(currentBytes) &&
-                (className in previousMeta || className in baselineDexMembersByClassName)
+            val isKnownInterface = if (ClassBytecodeAnalyzer.isInterfaceClass(currentBytes)) {
+                ensureAppMergedDexIndexed()
+                className in previousMeta || className in baselineDexMembersByClassName
+            } else {
+                false
+            }
             if (!isKnownInterface) return false
 
             val internalIface = className.replace('.', '/')
@@ -500,6 +570,40 @@ class IncrementalDexCompiler(
                 }
             }
         }
+
+        fun detectAndRegisterAnonymousClassRenames() {
+            val orderedCandidates = modifiedRawBytesByClass.entries.sortedBy { it.key.length }
+            for ((diskClassName, fileAndBytes) in orderedCandidates) {
+                val rawBytes = fileAndBytes.second
+                if (!ClassBytecodeAnalyzer.isRenamableSyntheticOrAnonymousClass(rawBytes)) continue
+                val diskInternalName = diskClassName.replace('.', '/')
+                val mappedInternalName = ClassBytecodeAnalyzer.remapSingleInternalClassName(
+                    diskInternalName,
+                    activeRenames
+                )
+                val prevLoadedBytes = previousBytesMap[mappedInternalName.replace('/', '.')] ?: continue
+                val provisionalBytes = ClassBytecodeAnalyzer.remapInternalClassNames(rawBytes, activeRenames)
+                if (ClassBytecodeAnalyzer.hasClassHierarchyChange(prevLoadedBytes, provisionalBytes)) {
+                    val renamedInternal = "${diskInternalName}\$hr${++classRenameCounter}"
+                    activeRenames[diskInternalName] = renamedInternal
+                    newlyRenamedClasses[diskInternalName] = renamedInternal
+                }
+            }
+        }
+
+        fun collectNewlyRenamedClassCallers() {
+            if (newlyRenamedClasses.isEmpty()) return
+            for ((className, classFile) in currentClasses) {
+                if (className in modifiedRawBytesByClass || className in synthesizedDefaultImplsByClass) {
+                    continue
+                }
+                val rawBytes = classFile.readBytes()
+                val rewritten = ClassBytecodeAnalyzer.remapInternalClassNames(rawBytes, newlyRenamedClasses)
+                if (rewritten !== rawBytes && !rewritten.contentEquals(rawBytes)) {
+                    modifiedRawBytesByClass[className] = classFile to rawBytes
+                }
+            }
+        }
     }
 
     private fun collectModifiedClasses(
@@ -518,12 +622,36 @@ class IncrementalDexCompiler(
 
             state.scanModifiedCandidates()
             state.collectNewlyRedirectedInterfaceCallers()
+            state.detectAndRegisterAnonymousClassRenames()
+            state.collectNewlyRenamedClassCallers()
+            if (state.activeRenames.isNotEmpty() && state.synthesizedDefaultImplsByClass.isNotEmpty()) {
+                for ((defaultImplsName, fileAndBytes) in state.synthesizedDefaultImplsByClass.entries.toList()) {
+                    val remapped = ClassBytecodeAnalyzer.remapInternalClassNames(
+                        fileAndBytes.second,
+                        state.activeRenames
+                    )
+                    state.synthesizedDefaultImplsByClass[defaultImplsName] = fileAndBytes.first to remapped
+                }
+            }
             state.modifiedRawBytesByClass.putAll(state.synthesizedDefaultImplsByClass)
 
-            for ((className, fileAndBytes) in state.modifiedRawBytesByClass) {
-                val entry = buildModifiedClassEntry(state, className, fileAndBytes.first, fileAndBytes.second)
+            for ((diskClassName, fileAndBytes) in state.modifiedRawBytesByClass) {
+                val remappedBytes = ClassBytecodeAnalyzer.remapInternalClassNames(
+                    fileAndBytes.second,
+                    state.activeRenames
+                )
+                val effectiveClassName = ClassBytecodeAnalyzer.remapSingleInternalClassName(
+                    diskClassName.replace('.', '/'),
+                    state.activeRenames
+                ).replace('/', '.')
+                val effectiveFile = if (effectiveClassName == diskClassName) {
+                    fileAndBytes.first
+                } else {
+                    File(fileAndBytes.first.parentFile, "${effectiveClassName.substringAfterLast('.')}.class")
+                }
+                val entry = buildModifiedClassEntry(state, effectiveClassName, effectiveFile, remappedBytes)
                 if (entry != null) {
-                    changedClasses[className] = entry
+                    changedClasses[effectiveClassName] = entry
                 }
             }
             classMetaByModule[module.gradlePath] = state.updatedMeta
@@ -616,6 +744,7 @@ class IncrementalDexCompiler(
 
     private fun resolveBaselineSuperClass(modulePath: String, className: String): String? {
         cumulativeStubsByModule[modulePath]?.get(className)?.superClassName?.let { return it }
+        ensureAppMergedDexIndexed()
         baselineDexMembersByClassName[className]?.superClassName?.let { return it }
         dexBytesByModule[modulePath]?.get(className)
             ?.let { AdditiveClassMerger.parseDexMembers(it, className)?.superClassName }
@@ -637,7 +766,10 @@ class IncrementalDexCompiler(
         val hiltClassName = if (pkg.isEmpty()) hiltSimple else "$pkg.$hiltSimple"
         return hiltClassName in currentClasses ||
             hiltClassName in previousMeta ||
-            hiltClassName in baselineDexMembersByClassName
+            run {
+                ensureAppMergedDexIndexed()
+                hiltClassName in baselineDexMembersByClassName
+            }
     }
 
     private fun isUnchangedClassFile(
@@ -954,6 +1086,7 @@ class IncrementalDexCompiler(
                 }
             }
 
+        ensureAppMergedDexIndexed()
         baselineDexMembersByClassName[entry.className]?.let { parsed ->
             combined = if (combined == null) parsed else mergeDexMembers(combined!!, parsed)
         }

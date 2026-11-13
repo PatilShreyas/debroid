@@ -20,6 +20,69 @@ class ClassBytecodeAnalyzerTest {
     }
 
     @Test
+    fun `detects anonymous inner class hierarchy changes and remaps constant pool class names safely`() {
+        val anonRunnable = buildImplementingClassWithoutBridge(
+            "com/example/DigestViewModel\$uiState\$1",
+            "java/lang/Runnable"
+        )
+        val anonCloneable = buildImplementingClassWithoutBridge(
+            "com/example/DigestViewModel\$uiState\$1",
+            "java/lang/Cloneable"
+        )
+        val inlinedClass = buildImplementingClassWithoutBridge(
+            "com/example/DigestViewModel\$special\$\$inlined\$map\$1",
+            "java/lang/Runnable"
+        )
+        val namedSealedChild = buildImplementingClassWithoutBridge(
+            "com/example/QueueFilter\$All",
+            "java/lang/Runnable"
+        )
+        val serializerClass = buildImplementingClassWithoutBridge(
+            "com/example/DigestNavKey\$\$serializer",
+            "java/lang/Runnable"
+        )
+
+        assertTrue(ClassBytecodeAnalyzer.isRenamableSyntheticOrAnonymousClass(anonRunnable))
+        assertTrue(ClassBytecodeAnalyzer.isRenamableSyntheticOrAnonymousClass(inlinedClass))
+        assertTrue(!ClassBytecodeAnalyzer.isRenamableSyntheticOrAnonymousClass(namedSealedChild))
+        assertTrue(!ClassBytecodeAnalyzer.isRenamableSyntheticOrAnonymousClass(serializerClass))
+
+        assertTrue(!ClassBytecodeAnalyzer.hasClassHierarchyChange(anonRunnable, anonRunnable))
+        assertTrue(ClassBytecodeAnalyzer.hasClassHierarchyChange(anonRunnable, anonCloneable))
+
+        val renames = mapOf(
+            "com/example/Outer\$1" to "com/example/Outer\$1\$hr1",
+            "com/example/Outer\$1\$2" to "com/example/Outer\$1\$hr1\$2\$hr2"
+        )
+        assertEquals(
+            "com/example/Outer\$1\$hr1",
+            ClassBytecodeAnalyzer.remapSingleInternalClassName("com/example/Outer\$1", renames)
+        )
+        assertEquals(
+            "com/example/Outer\$1\$hr1\$3",
+            ClassBytecodeAnalyzer.remapSingleInternalClassName("com/example/Outer\$1\$3", renames)
+        )
+        assertEquals(
+            "com/example/Outer\$1\$hr1\$2\$hr2",
+            ClassBytecodeAnalyzer.remapSingleInternalClassName("com/example/Outer\$1\$2", renames)
+        )
+        assertEquals(
+            "com/example/Outer\$10",
+            ClassBytecodeAnalyzer.remapSingleInternalClassName("com/example/Outer\$10", renames)
+        )
+
+        val remappedCloneable = ClassBytecodeAnalyzer.remapInternalClassNames(
+            anonCloneable,
+            mapOf("com/example/DigestViewModel\$uiState\$1" to "com/example/DigestViewModel\$uiState\$1\$hr1")
+        )
+        val loader = ByteArrayClassLoader()
+        val loaded = loader.define("com.example.DigestViewModel\$uiState\$1\$hr1", remappedCloneable)
+        assertEquals("com.example.DigestViewModel\$uiState\$1\$hr1", loaded.name)
+        assertTrue(Cloneable::class.java.isAssignableFrom(loaded))
+        assertNotNull(loaded.getDeclaredConstructor().newInstance())
+    }
+
+    @Test
     fun `synthesizes DefaultImpls from interface default method and redirects implementing class invokespecial`() {
         val ifaceBytesV1 = buildInterfaceWithDefaultMethod("com/example/UiState", returnConstant = 7)
         val ifaceBytesV2 = buildInterfaceWithDefaultMethod("com/example/UiState", returnConstant = 42)

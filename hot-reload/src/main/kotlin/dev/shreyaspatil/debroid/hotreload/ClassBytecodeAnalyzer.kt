@@ -63,8 +63,11 @@ internal object ClassBytecodeAnalyzer {
     private const val COMPOSER_OWNER = "androidx/compose/runtime/Composer"
     private const val COMPOSER_KT_OWNER = "androidx/compose/runtime/ComposerKt"
     private const val COMPOSABLE_LAMBDA_KT = "androidx/compose/runtime/internal/ComposableLambdaKt"
+    private const val STATE_DESC_PREFIX = "(Landroidx/compose/runtime/State;)"
+    private const val FLOW_PKG_MARKER = "Lkotlinx/coroutines/flow/"
     private const val MH_REF_INVOKE_STATIC = 6
     private val anonymousClassSuffixRegex = Regex("""\$\d+""")
+    private val renamableInnerClassRegex = Regex("""(?:\$\d+(?:\$|$)|\$\${'$'}inlined\$)""")
     private val hiltAnnotations = setOf(
         "Ldagger/hilt/android/AndroidEntryPoint;",
         "Ldagger/hilt/android/HiltAndroidApp;"
@@ -349,6 +352,159 @@ internal object ClassBytecodeAnalyzer {
     fun isInterfaceClass(classBytes: ByteArray): Boolean {
         val parsed = runCatching { parseDetailedClass(classBytes) }.getOrNull() ?: return false
         return (parsed.accessFlags and ACC_INTERFACE) != 0
+    }
+
+    fun isRenamableSyntheticOrAnonymousClass(classBytes: ByteArray): Boolean {
+        val parsed = runCatching { parseDetailedClass(classBytes) }.getOrNull() ?: return false
+        val simpleName = parsed.thisInternalName.substringAfterLast('/')
+        if ('$' !in simpleName) return false
+        if (simpleName.endsWith("\$DefaultImpls") ||
+            simpleName.endsWith("\$Companion") ||
+            simpleName.endsWith("\$Creator") ||
+            simpleName.endsWith("\$\$serializer")
+        ) {
+            return false
+        }
+        return renamableInnerClassRegex.containsMatchIn(simpleName) ||
+            (parsed.accessFlags and ACC_SYNTHETIC) != 0
+    }
+
+    fun hasClassHierarchyChange(previousBytes: ByteArray, currentBytes: ByteArray): Boolean {
+        val prev = runCatching { parseDetailedClass(previousBytes) }.getOrNull() ?: return false
+        val curr = runCatching { parseDetailedClass(currentBytes) }.getOrNull() ?: return false
+        val hierarchyFlagsMask = ACC_INTERFACE or ACC_ABSTRACT
+        return prev.superInternalName != curr.superInternalName ||
+            prev.interfaces != curr.interfaces ||
+            (prev.accessFlags and hierarchyFlagsMask) != (curr.accessFlags and hierarchyFlagsMask)
+    }
+
+    fun remapSingleInternalClassName(internalName: String, renameMap: Map<String, String>): String {
+        if (renameMap.isEmpty()) return internalName
+        for ((oldKey, newKey) in renameMap.entries.sortedByDescending { it.key.length }) {
+            if (internalName == oldKey) return newKey
+            if (internalName.startsWith("$oldKey\$")) {
+                return newKey + internalName.substring(oldKey.length)
+            }
+        }
+        return internalName
+    }
+
+    fun remapInternalClassNames(classBytes: ByteArray, renameMap: Map<String, String>): ByteArray {
+        if (renameMap.isEmpty() || classBytes.size < MIN_CLASS_BYTES) return classBytes
+        val buf = ByteBuffer.wrap(classBytes)
+        if (buf.int != CLASS_MAGIC) return classBytes
+        buf.short // minor
+        buf.short // major
+        val cpCount = buf.short.toInt() and U16_MASK
+        val cpStartOffset = buf.position()
+
+        val sortedEntries = renameMap.entries
+            .sortedByDescending { it.key.length }
+            .map { (oldInternal, newInternal) ->
+                ClassRenameRule(
+                    oldInternal = oldInternal,
+                    newInternal = newInternal,
+                    oldBinary = oldInternal.replace('/', '.'),
+                    newBinary = newInternal.replace('/', '.')
+                )
+            }
+
+        val cpOut = ByteArrayOutputStream(classBytes.size)
+        var anyChanged = false
+        var slot = 1
+        while (slot < cpCount) {
+            val entryStart = buf.position()
+            if (entryStart >= classBytes.size) return classBytes
+            val tag = buf.get().toInt() and 0xFF
+            if (tag == CP_TAG_UTF8) {
+                if (buf.remaining() < 2) return classBytes
+                val len = buf.short.toInt() and U16_MASK
+                if (buf.remaining() < len) return classBytes
+                val strOffset = buf.position()
+                buf.position(strOffset + len)
+                val decoded = String(classBytes, strOffset, len, Charsets.UTF_8)
+                val rewritten = remapUtf8String(decoded, sortedEntries)
+                if (rewritten !== decoded) {
+                    val encoded = rewritten.toByteArray(Charsets.UTF_8)
+                    if (encoded.size <= U16_MASK) {
+                        anyChanged = true
+                        cpOut.write(CP_TAG_UTF8)
+                        writeU2(cpOut, encoded.size)
+                        cpOut.write(encoded)
+                        slot += 1
+                        continue
+                    }
+                }
+                cpOut.write(classBytes, entryStart, (strOffset + len) - entryStart)
+                slot += 1
+            } else {
+                val skip = when (tag) {
+                    CP_TAG_CLASS, CP_TAG_STRING, CP_TAG_METHOD_TYPE, CP_TAG_MODULE, CP_TAG_PACKAGE -> 2
+                    CP_TAG_METHOD_HANDLE -> 3
+                    CP_TAG_INTEGER, CP_TAG_FLOAT, CP_TAG_FIELDREF, CP_TAG_METHODREF,
+                    CP_TAG_INTERFACE_METHODREF, CP_TAG_NAME_AND_TYPE, CP_TAG_DYNAMIC, CP_TAG_INVOKE_DYNAMIC -> 4
+                    CP_TAG_LONG, CP_TAG_DOUBLE -> 8
+                    else -> return classBytes
+                }
+                if (buf.remaining() < skip) return classBytes
+                buf.position(buf.position() + skip)
+                cpOut.write(classBytes, entryStart, 1 + skip)
+                slot += if (tag == CP_TAG_LONG || tag == CP_TAG_DOUBLE) 2 else 1
+            }
+        }
+        if (!anyChanged) return classBytes
+        val cpEndOffset = buf.position()
+        val out = ByteArrayOutputStream(cpStartOffset + cpOut.size() + (classBytes.size - cpEndOffset))
+        out.write(classBytes, 0, cpStartOffset)
+        cpOut.writeTo(out)
+        out.write(classBytes, cpEndOffset, classBytes.size - cpEndOffset)
+        return out.toByteArray()
+    }
+
+    private class ClassRenameRule(
+        val oldInternal: String,
+        val newInternal: String,
+        val oldBinary: String,
+        val newBinary: String
+    )
+
+    private fun remapUtf8String(input: String, rules: List<ClassRenameRule>): String {
+        for (rule in rules) {
+            if (input == rule.oldInternal) return rule.newInternal
+            if (input.startsWith("${rule.oldInternal}\$")) {
+                return rule.newInternal + input.substring(rule.oldInternal.length)
+            }
+            if (input == rule.oldBinary) return rule.newBinary
+            if (input.startsWith("${rule.oldBinary}\$")) {
+                return rule.newBinary + input.substring(rule.oldBinary.length)
+            }
+        }
+        if ('L' !in input) return input
+        var sb: StringBuilder? = null
+        var cursor = 0
+        var idx = 0
+        while (idx < input.length) {
+            if (input[idx] == 'L') {
+                val matchedRule = rules.firstOrNull { rule ->
+                    val afterPos = idx + 1 + rule.oldInternal.length
+                    afterPos < input.length &&
+                        input.regionMatches(idx + 1, rule.oldInternal, 0, rule.oldInternal.length) &&
+                        (input[afterPos] == ';' || input[afterPos] == '<' || input[afterPos] == '$')
+                }
+                if (matchedRule != null) {
+                    if (sb == null) sb = StringBuilder(input.length + 16)
+                    sb.append(input, cursor, idx + 1)
+                    sb.append(matchedRule.newInternal)
+                    idx += 1 + matchedRule.oldInternal.length
+                    cursor = idx
+                    continue
+                }
+            }
+            idx++
+        }
+        if (sb == null) return input
+        sb.append(input, cursor, input.length)
+        return sb.toString()
     }
 
     fun extractInterfaceDefaultMethods(interfaceBytes: ByteArray): List<Pair<String, String>> {
@@ -1382,7 +1538,12 @@ internal object ClassBytecodeAnalyzer {
                     }
                     if (desc.contains(COMPOSER_DESC) && isStatefulComposableCall(name)) {
                         val lambdaSig = findPrecedingLambdaSignature(cls, insns, i, methodsByKey)
-                        signature.add("CALL:$owner.$name:$desc|$lambdaSig")
+                        val flowSourceSig = if (name.startsWith("collectAsState")) {
+                            findPrecedingFlowSourceSignature(cls, insns, i)
+                        } else {
+                            ""
+                        }
+                        signature.add("CALL:$owner.$name:$desc|$lambdaSig|$flowSourceSig")
                         pendingChanged.clear()
                     } else if (desc.contains(COMPOSER_DESC)) {
                         pendingChanged.clear()
@@ -1390,6 +1551,18 @@ internal object ClassBytecodeAnalyzer {
                 }
             }
             i++
+        }
+        val stateDelegatePrefix = "${method.name}\$lambda\$"
+        val delegateReturnSigs = cls.methods.asSequence()
+            .filter {
+                (it.accessFlags and ACC_SYNTHETIC) != 0 &&
+                    it.name.startsWith(stateDelegatePrefix) &&
+                    it.descriptor.startsWith(STATE_DESC_PREFIX)
+            }
+            .map { it.descriptor.removePrefix(STATE_DESC_PREFIX) }
+            .toList()
+        if (delegateReturnSigs.isNotEmpty() && signature.isNotEmpty()) {
+            signature.add("DELEGATES:${delegateReturnSigs.joinToString(",")}")
         }
         return signature
     }
@@ -1456,6 +1629,24 @@ internal object ClassBytecodeAnalyzer {
             name.startsWith("collectAsState") ||
             name.startsWith("animate") ||
             name.startsWith("produceState")
+    }
+
+    private fun findPrecedingFlowSourceSignature(
+        cls: DetailedClass,
+        insns: List<BytecodeInsn>,
+        callIdx: Int
+    ): String {
+        val start = maxOf(0, callIdx - 14)
+        for (idx in (callIdx - 1) downTo start) {
+            val insn = insns[idx]
+            if (insn.opcode in 0xB2..0xB9) {
+                val ref = cls.resolveMemberRef(insn.operand) ?: continue
+                if (ref.third.contains(FLOW_PKG_MARKER)) {
+                    return "${ref.first}.${ref.second}:${ref.third}"
+                }
+            }
+        }
+        return ""
     }
 
     private fun findPrecedingLambdaSignature(

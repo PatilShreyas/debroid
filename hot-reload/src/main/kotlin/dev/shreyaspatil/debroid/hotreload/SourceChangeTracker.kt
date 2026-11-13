@@ -47,7 +47,8 @@ class SourceChangeTracker(
         private const val DELETED_SENTINEL = "<DELETED>"
         private const val DEFAULT_AWAIT_TIMEOUT_MS = 300L
         private const val FAST_POLL_SLICE_MS = 80L
-        private const val COALESCE_QUIET_WINDOW_MS = 60L
+        private const val COALESCE_QUIET_WINDOW_MS = 140L
+        private const val MAX_COALESCE_PASSES = 3
 
         private val watchKinds = arrayOf<WatchEvent.Kind<*>>(
             StandardWatchEventKinds.ENTRY_CREATE,
@@ -139,11 +140,18 @@ class SourceChangeTracker(
     }
 
     private fun coalesceMultiFileEdits(ws: WatchService) {
-        val signaled = runCatching { ws.poll(COALESCE_QUIET_WINDOW_MS, TimeUnit.MILLISECONDS) }.getOrNull()
-        if (signaled != null) {
-            drainWatchEvents(ws, signaled)
+        var passes = 0
+        while (passes++ < MAX_COALESCE_PASSES) {
+            val prevSize = dirtyCandidates.size
+            val signaled = runCatching { ws.poll(COALESCE_QUIET_WINDOW_MS, TimeUnit.MILLISECONDS) }.getOrNull()
+            if (signaled != null) {
+                drainWatchEvents(ws, signaled)
+            }
+            collectTimestampDirtyFiles()
+            if (dirtyCandidates.size == prevSize && signaled == null) {
+                break
+            }
         }
-        collectTimestampDirtyFiles()
     }
 
     private fun consumeWokenUp(): Boolean {

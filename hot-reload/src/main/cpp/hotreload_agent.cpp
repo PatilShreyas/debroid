@@ -1384,38 +1384,14 @@ bool trigger_compose_hot_reload(
                                 env->DeleteLocalRef(comp);
                             }
 
-                            // Pass 2 (Fallback): If no composition matched directly (e.g., helper class edited),
-                            // fall back to clearing app scopes across compositions.
+                            // Pass 2 (Fallback): If no composition matched directly (e.g., data class or interface
+                            // helper edited), invalidate compositions in-place without bashing SlotTable groups so all
+                            // existing remember state across the app is preserved.
                             if (!any_comp_matched) {
                                 for (jint i = 0; i < count; i++) {
                                     jobject comp = env->CallObjectMethod(comps_list, get_mid, i);
                                     if (!comp) continue;
                                     jclass comp_cls = env->GetObjectClass(comp);
-                                    bool comp_matched = false;
-
-                                    int cleared_slots = clear_stale_lambda_slots(
-                                        env,
-                                        class_loader,
-                                        load_class_mid,
-                                        comp,
-                                        comp_cls,
-                                        empty_slot_obj,
-                                        class_cls,
-                                        get_name_mid,
-                                        composable_lambda_cls,
-                                        block_fid,
-                                        kotlin_func_cls,
-                                        redefined_prefixes,
-                                        reset_scope_keys,
-                                        reset_scope_classes,
-                                        changed_scope_keys,
-                                        invalidate_all_scope_classes,
-                                        true,
-                                        &comp_matched
-                                    );
-                                    if (cleared_slots > 0) {
-                                        LOGI("Cleared %d stale cached slot(s) in CompositionImpl (fallback)", cleared_slots);
-                                    }
                                     invalidate_single_composition(env, comp, comp_cls, &triggered);
                                     env->DeleteLocalRef(comp_cls);
                                     env->DeleteLocalRef(comp);
@@ -2398,38 +2374,38 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     std::string ui_mode = "NONE";
     bool matched_compose_scope = false;
     jlong initial_change_count = 0;
-    bool composeSuccess = trigger_compose_hot_reload(
-        env,
-        class_loader,
-        load_class_mid,
-        redefined_prefixes,
-        reset_scope_keys,
-        reset_scope_classes,
-        changed_scope_keys,
-        invalidate_all_scope_classes,
-        &matched_compose_scope,
-        &initial_change_count
-    );
 
-    if (activity_or_view_edited) {
-        if (trigger_activity_recreate(env, activity_thread_cls)) {
-            ui_mode = "ACTIVITY_RECREATE";
-        } else if (composeSuccess) {
-            ui_mode = "COMPOSE_HOT_RELOAD";
-        }
-    } else if (composeSuccess) {
-        ui_mode = "COMPOSE_HOT_RELOAD";
-    } else if (trigger_activity_recreate(env, activity_thread_cls)) {
+    if (activity_or_view_edited && trigger_activity_recreate(env, activity_thread_cls)) {
         ui_mode = "ACTIVITY_RECREATE";
-    } else if (app_obj) {
-        jclass looperClass = env->FindClass("android/os/Looper");
-        jmethodID getMainLooperMid = looperClass ? env->GetStaticMethodID(looperClass, "getMainLooper", "()Landroid/os/Looper;") : nullptr;
-        jobject mainLooper = getMainLooperMid ? env->CallStaticObjectMethod(looperClass, getMainLooperMid) : nullptr;
-        if (mainLooper) {
+    } else {
+        bool composeSuccess = trigger_compose_hot_reload(
+            env,
+            class_loader,
+            load_class_mid,
+            redefined_prefixes,
+            reset_scope_keys,
+            reset_scope_classes,
+            changed_scope_keys,
+            invalidate_all_scope_classes,
+            &matched_compose_scope,
+            &initial_change_count
+        );
+        if (composeSuccess) {
+            ui_mode = "COMPOSE_HOT_RELOAD";
+        } else if (trigger_activity_recreate(env, activity_thread_cls)) {
             ui_mode = "ACTIVITY_RECREATE";
-            env->DeleteLocalRef(mainLooper);
+        } else if (app_obj) {
+            jclass looperClass = env->FindClass("android/os/Looper");
+            jmethodID getMainLooperMid = looperClass
+                ? env->GetStaticMethodID(looperClass, "getMainLooper", "()Landroid/os/Looper;")
+                : nullptr;
+            jobject mainLooper = getMainLooperMid ? env->CallStaticObjectMethod(looperClass, getMainLooperMid) : nullptr;
+            if (mainLooper) {
+                ui_mode = "ACTIVITY_RECREATE";
+                env->DeleteLocalRef(mainLooper);
+            }
+            if (looperClass) env->DeleteLocalRef(looperClass);
         }
-        if (looperClass) env->DeleteLocalRef(looperClass);
     }
     if (env->ExceptionCheck()) env->ExceptionClear();
 

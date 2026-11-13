@@ -516,6 +516,314 @@ class IncrementalDexCompilerTest {
         assertEquals(1, gradleCommands.size) // Only :core ran; :app was NOT spuriously recompiled!
     }
 
+    @Test
+    fun `skips ksp task when DI skeleton is unchanged and runs ksp when constructor signature changes`() {
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build/generated/ksp/debug").mkdirs()
+        val pkgDir = File(appDir, "build/tmp/kotlin-classes/debug/com/example/app").apply { mkdirs() }
+        val vmClassFile = File(pkgDir, "SampleViewModel.class")
+        vmClassFile.writeBytes(buildClassWithLine("com/example/app/SampleViewModel", returnConst = 1, line = 10))
+
+        val vmSrcFile = File(appDir, "src/main/kotlin/com/example/app/SampleViewModel.kt").apply {
+            parentFile.mkdirs()
+            writeText(
+                """
+                package com.example.app
+                @HiltViewModel
+                class SampleViewModel @Inject constructor(private val repo: Repo) {
+                    val state = repo.items.map { it.take(1) }
+                    fun refresh() { repo.reload(1) }
+                }
+                """.trimIndent()
+            )
+        }
+
+        val appModule = GradleModule(":app", appDir, ModuleType.ANDROID_APP)
+        val gradleCommands = mutableListOf<List<String>>()
+        val runner = mockk<CommandRunner>()
+        var pass = 0
+        every { runner.runCommand(any(), any()) } answers {
+            val cmd = firstArg<List<String>>()
+            if (cmd.first() == "gradle" || cmd.first().endsWith("gradlew") || cmd.first().endsWith("gradlew.bat")) {
+                gradleCommands.add(cmd)
+                pass++
+                vmClassFile.writeBytes(
+                    buildClassWithLine("com/example/app/SampleViewModel", returnConst = 10 + pass, line = 10)
+                )
+                Result.success("BUILD SUCCESSFUL")
+            } else if (cmd.first() == "/mock/d8") {
+                val outIdx = cmd.indexOf("--output")
+                val outDir = File(cmd[outIdx + 1]).apply { mkdirs() }
+                File(outDir, "classes.dex").writeBytes(byteArrayOf(0x64, 0x65, 0x78))
+                Result.success("")
+            } else {
+                Result.failure(RuntimeException("Unexpected command: $cmd"))
+            }
+        }
+
+        val compiler = IncrementalDexCompiler(
+            projectRoot = tempDir,
+            variant = "debug",
+            commandRunner = runner,
+            d8PathProvider = { "/mock/d8" }
+        )
+        compiler.snapshotModuleClasses(listOf(appModule))
+
+        // Pass 1: Only initializer & method body changed -> must pass `-x :app:kspDebugKotlin`!
+        vmSrcFile.writeText(
+            """
+            package com.example.app
+            @HiltViewModel
+            class SampleViewModel @Inject constructor(private val repo: Repo) {
+                val state = repo.items.map { it.take(5) }
+                fun refresh() { repo.reload(99) }
+            }
+            """.trimIndent()
+        )
+        val res1 = compiler.compileAndDex(mapOf(appModule to listOf(vmSrcFile)), File(tempDir, "ksp1"))
+        assertTrue(res1 is CompilationOutcome.Success)
+        assertTrue(":app:kspDebugKotlin" in gradleCommands.single())
+
+        // Pass 2: Constructor dependency signature changed -> must NOT exclude `:app:kspDebugKotlin`!
+        gradleCommands.clear()
+        vmSrcFile.writeText(
+            """
+            package com.example.app
+            @HiltViewModel
+            class SampleViewModel @Inject constructor(private val repo: Repo, private val logger: Logger) {
+                val state = repo.items.map { it.take(5) }
+                fun refresh() { repo.reload(99) }
+            }
+            """.trimIndent()
+        )
+        val res2 = compiler.compileAndDex(mapOf(appModule to listOf(vmSrcFile)), File(tempDir, "ksp2"))
+        assertTrue(res2 is CompilationOutcome.Success)
+        assertFalse(":app:kspDebugKotlin" in gradleCommands.single())
+    }
+
+    @Test
+    fun `renames anonymous inner class when hierarchy changes and reuses renamed target on follow-up edits`() {
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        val pkgDir = File(appDir, "build/tmp/kotlin-classes/debug/com/example/app").apply { mkdirs() }
+        val outerFile = File(pkgDir, "DigestViewModel.class")
+        val lambdaFile = File(pkgDir, "DigestViewModel\$uiState\$1.class")
+
+        outerFile.writeBytes(
+            buildOuterReferencingAnonymous(
+                "com/example/app/DigestViewModel",
+                "com/example/app/DigestViewModel\$uiState\$1"
+            )
+        )
+        lambdaFile.writeBytes(
+            buildAnonymousWithInterface(
+                "com/example/app/DigestViewModel\$uiState\$1",
+                "java/lang/Runnable",
+                returnConst = 10
+            )
+        )
+
+        val appModule = GradleModule(":app", appDir, ModuleType.ANDROID_APP)
+        var pass = 0
+        val runner = mockk<CommandRunner>()
+        every { runner.runCommand(any(), any()) } answers {
+            val cmd = firstArg<List<String>>()
+            if (cmd.first() == "gradle" || cmd.first().endsWith("gradlew") || cmd.first().endsWith("gradlew.bat")) {
+                pass++
+                if (pass == 1) {
+                    // Hierarchy changes from Runnable -> Cloneable while outer raw bytes stay identical!
+                    lambdaFile.writeBytes(
+                        buildAnonymousWithInterface(
+                            "com/example/app/DigestViewModel\$uiState\$1",
+                            "java/lang/Cloneable",
+                            returnConst = 20
+                        )
+                    )
+                } else if (pass == 2) {
+                    // Body of Cloneable lambda changes (returnConst 20 -> 35), hierarchy unchanged!
+                    lambdaFile.writeBytes(
+                        buildAnonymousWithInterface(
+                            "com/example/app/DigestViewModel\$uiState\$1",
+                            "java/lang/Cloneable",
+                            returnConst = 35
+                        )
+                    )
+                }
+                Result.success("BUILD SUCCESSFUL")
+            } else if (cmd.first() == "/mock/d8") {
+                val outIdx = cmd.indexOf("--output")
+                val outDir = File(cmd[outIdx + 1]).apply { mkdirs() }
+                if ("--file-per-class" in cmd) {
+                    for (arg in cmd.filter { it.endsWith(".class") }) {
+                        val fileName = File(arg).name.removeSuffix(".class").replace(Regex("^\\d+_"), "")
+                        File(outDir, "com/example/app/$fileName.dex").apply {
+                            parentFile.mkdirs()
+                            writeBytes(byteArrayOf(0x64, 0x65, 0x78))
+                        }
+                    }
+                } else {
+                    File(outDir, "classes.dex").writeBytes(byteArrayOf(0x64, 0x65, 0x78))
+                }
+                Result.success("")
+            } else {
+                Result.failure(RuntimeException("Unexpected command: $cmd"))
+            }
+        }
+
+        val compiler = IncrementalDexCompiler(
+            projectRoot = tempDir,
+            variant = "debug",
+            commandRunner = runner,
+            d8PathProvider = { "/mock/d8" }
+        )
+        compiler.snapshotModuleClasses(listOf(appModule))
+        val srcFile = File(appDir, "src/main/kotlin/com/example/app/DigestFeature.kt")
+
+        val pass1 = compiler.compileAndDex(mapOf(appModule to listOf(srcFile)), File(tempDir, "hr_s1"))
+        assertTrue(pass1 is CompilationOutcome.Success)
+        val pass1Classes = (pass1 as CompilationOutcome.Success).classPayloads.map { it.className }.sorted()
+        assertEquals(
+            listOf(
+                "com.example.app.DigestViewModel",
+                "com.example.app.DigestViewModel\$uiState\$1\$hr1"
+            ),
+            pass1Classes
+        )
+
+        val pass2 = compiler.compileAndDex(mapOf(appModule to listOf(srcFile)), File(tempDir, "hr_s2"))
+        assertTrue(pass2 is CompilationOutcome.Success)
+        val pass2Classes = (pass2 as CompilationOutcome.Success).classPayloads.map { it.className }
+        assertEquals(
+            listOf("com.example.app.DigestViewModel\$uiState\$1\$hr1"),
+            pass2Classes
+        )
+    }
+
+    private fun buildOuterReferencingAnonymous(outerInternal: String, anonInternal: String): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        val utf8s =
+            listOf(
+                outerInternal,
+                "java/lang/Object",
+                anonInternal,
+                "Code",
+                "make",
+                "()Ljava/lang/Object;",
+                "<init>",
+                "()V"
+            )
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(14)
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1) // #9 outer
+        out.write(7)
+        u2(2) // #10 Object
+        out.write(7)
+        u2(3) // #11 anon
+        out.write(12)
+        u2(7)
+        u2(8) // #12 <init>:()V
+        out.write(10)
+        u2(11)
+        u2(12) // #13 anon.<init>:()V
+        u2(0x0021)
+        u2(9)
+        u2(10)
+        u2(0)
+        u2(0)
+        u2(1)
+        u2(0x0001)
+        u2(5)
+        u2(6)
+        u2(1)
+        // new #11; dup; invokespecial #13; areturn
+        val codeBytes = byteArrayOf(0xBB.toByte(), 0x00, 11, 0x59, 0xB7.toByte(), 0x00, 13, 0xB0.toByte())
+        u2(4)
+        u4(12 + codeBytes.size)
+        u2(2)
+        u2(1)
+        u4(codeBytes.size)
+        out.write(codeBytes)
+        u2(0)
+        u2(0)
+        u2(0)
+        return out.toByteArray()
+    }
+
+    private fun buildAnonymousWithInterface(
+        anonInternal: String,
+        ifaceInternal: String,
+        returnConst: Int
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        val utf8s = listOf(anonInternal, "java/lang/Object", ifaceInternal, "Code", "eval", "()I")
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(10)
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1) // #7 anon
+        out.write(7)
+        u2(2) // #8 Object
+        out.write(7)
+        u2(3) // #9 iface
+        u2(0x0021)
+        u2(7)
+        u2(8)
+        u2(1)
+        u2(9)
+        u2(0)
+        u2(1)
+        u2(0x0001)
+        u2(5)
+        u2(6)
+        u2(1)
+        val codeBytes = byteArrayOf(0x10, returnConst.toByte(), 0xAC.toByte())
+        u2(4)
+        u4(12 + codeBytes.size)
+        u2(1)
+        u2(1)
+        u4(codeBytes.size)
+        out.write(codeBytes)
+        u2(0)
+        u2(0)
+        u2(0)
+        return out.toByteArray()
+    }
+
     private fun buildClassWithLine(internalName: String, returnConst: Int, line: Int): ByteArray {
         val out = ByteArrayOutputStream()
         fun u2(v: Int) {

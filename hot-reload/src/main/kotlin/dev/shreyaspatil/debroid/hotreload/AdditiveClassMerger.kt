@@ -68,7 +68,8 @@ object AdditiveClassMerger {
         val count: Int,
         val startOffset: Int,
         val endOffset: Int,
-        val utf8Pool: Map<Int, String>
+        val utf8Pool: Map<Int, String>,
+        val classNameIdxByCp: Map<Int, Int> = emptyMap()
     )
 
     private class MemberSection(
@@ -80,10 +81,15 @@ object AdditiveClassMerger {
 
     private class ParsedClass(
         val rawBytes: ByteArray,
+        val superClassCpIdx: Int,
+        val superInternalName: String,
         val cp: ConstantPoolSection,
         val fields: MemberSection,
         val methods: MemberSection
-    )
+    ) {
+        fun canSynthesizeConstructorStub(): Boolean =
+            superInternalName == "java/lang/Object" || superInternalName == "androidx/lifecycle/ViewModel"
+    }
 
     fun mergePreservingRemovedMembers(previousBytes: ByteArray, currentBytes: ByteArray): ByteArray {
         val hiltTransformed = ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(currentBytes)
@@ -93,9 +99,14 @@ object AdditiveClassMerger {
         val currentFieldKeys = curr.fields.members.map { it.name to it.descriptor }.toSet()
         val missingFields = prev.fields.members.filter { (it.name to it.descriptor) !in currentFieldKeys }
 
+        val allowInitStub = curr.canSynthesizeConstructorStub()
         val currentMethodKeys = curr.methods.members.map { it.name to it.descriptor }.toSet()
         val missingMethods = prev.methods.members
-            .filter { it.name != "<init>" && it.name != "<clinit>" && (it.name to it.descriptor) !in currentMethodKeys }
+            .filter {
+                it.name != "<clinit>" &&
+                    (allowInitStub || it.name != "<init>") &&
+                    (it.name to it.descriptor) !in currentMethodKeys
+            }
             .map { normalizeLambdaStubFlags(it) }
 
         if (missingFields.isEmpty() && missingMethods.isEmpty()) {
@@ -137,8 +148,11 @@ object AdditiveClassMerger {
             currDex.methods.forEach { add(it.name to it.descriptor) }
             currClass.methods.members.forEach { add(it.name to it.descriptor) }
         }
+        val allowInitStub = currClass.canSynthesizeConstructorStub()
         val missingMethods = prevDex.methods.filter {
-            it.name != "<init>" && it.name != "<clinit>" && (it.name to it.descriptor) !in currMethodKeys
+            it.name != "<clinit>" &&
+                (allowInitStub || it.name != "<init>") &&
+                (it.name to it.descriptor) !in currMethodKeys
         }
 
         if (missingFields.isEmpty() && missingMethods.isEmpty()) {
@@ -182,10 +196,11 @@ object AdditiveClassMerger {
         val currFieldKeys = currClass.fields.members.map { it.name to it.descriptor }.toSet()
         val missingFields = knownStubs.fields.filter { (it.name to it.descriptor) !in currFieldKeys }
 
+        val allowInitStub = currClass.canSynthesizeConstructorStub()
         val currMethodKeys = currClass.methods.members.map { it.name to it.descriptor }.toSet()
         val missingMethods = knownStubs.methods.filter {
-            it.name != "<init>" &&
-                it.name != "<clinit>" &&
+            it.name != "<clinit>" &&
+                (allowInitStub || it.name != "<init>") &&
                 !it.name.startsWith("\$r8\$lambda\$") &&
                 (it.name to it.descriptor) !in currMethodKeys
         }
@@ -254,6 +269,21 @@ object AdditiveClassMerger {
         }
 
         val codeAttrNameIdx = if (missingMethods.isNotEmpty()) getOrAddUtf8("Code") else 0
+        val superNoArgInitRefIdx = if (missingMethods.any { it.name == "<init>" }) {
+            val initNameIdx = getOrAddUtf8("<init>")
+            val voidDescIdx = getOrAddUtf8("()V")
+            val natIdx = nextCpIndex++
+            extraCpBytes.write(CP_TAG_NAME_AND_TYPE)
+            writeU2(extraCpBytes, initNameIdx)
+            writeU2(extraCpBytes, voidDescIdx)
+            val mrefIdx = nextCpIndex++
+            extraCpBytes.write(CP_TAG_METHODREF)
+            writeU2(extraCpBytes, curr.superClassCpIdx)
+            writeU2(extraCpBytes, natIdx)
+            mrefIdx
+        } else {
+            0
+        }
         val extraMethodsBytes = ByteArrayOutputStream()
         for (method in missingMethods) {
             val nameIdx = getOrAddUtf8(method.name)
@@ -265,7 +295,12 @@ object AdditiveClassMerger {
                 writeU2(extraMethodsBytes, 0)
             } else {
                 writeU2(extraMethodsBytes, 1)
-                writeStubCodeAttribute(extraMethodsBytes, codeAttrNameIdx, method.accessFlags, method.descriptor)
+                writeStubCodeAttribute(
+                    out = extraMethodsBytes,
+                    codeAttrNameIdx = codeAttrNameIdx,
+                    method = method,
+                    superInitMethodRefIdx = superNoArgInitRefIdx
+                )
             }
         }
 
@@ -291,11 +326,21 @@ object AdditiveClassMerger {
     private fun writeStubCodeAttribute(
         out: ByteArrayOutputStream,
         codeAttrNameIdx: Int,
-        accessFlags: Int,
-        descriptor: String
+        method: MemberSignature,
+        superInitMethodRefIdx: Int
     ) {
-        val codeBytes = returnInstructionForDescriptor(descriptor)
-        val maxLocals = computeMaxLocals(accessFlags, descriptor)
+        val codeBytes = if (method.name == "<init>" && superInitMethodRefIdx > 0) {
+            byteArrayOf(
+                0x2A, // aload_0
+                0xB7.toByte(), // invokespecial super.<init>:()V
+                ((superInitMethodRefIdx ushr 8) and 0xFF).toByte(),
+                (superInitMethodRefIdx and 0xFF).toByte(),
+                OP_RETURN
+            )
+        } else {
+            returnInstructionForDescriptor(method.descriptor)
+        }
+        val maxLocals = computeMaxLocals(method.accessFlags, method.descriptor)
         val attrLen = 12 + codeBytes.size
         writeU2(out, codeAttrNameIdx)
         out.write((attrLen ushr 24) and 0xFF)
@@ -368,6 +413,7 @@ object AdditiveClassMerger {
         val cpCount = buf.short.toInt() and U16_MASK
         val cpStartOffset = buf.position()
         val utf8Pool = HashMap<Int, String>()
+        val classNameIdxByCp = HashMap<Int, Int>()
 
         var slot = 1
         while (slot < cpCount) {
@@ -378,9 +424,12 @@ object AdditiveClassMerger {
                 buf.get(strBytes)
                 utf8Pool[slot] = String(strBytes, Charsets.UTF_8)
                 slot += 1
+            } else if (tag == CP_TAG_CLASS) {
+                classNameIdxByCp[slot] = buf.short.toInt() and U16_MASK
+                slot += 1
             } else {
                 val skip = when (tag) {
-                    CP_TAG_CLASS, CP_TAG_STRING, CP_TAG_METHOD_TYPE, CP_TAG_MODULE, CP_TAG_PACKAGE -> 2
+                    CP_TAG_STRING, CP_TAG_METHOD_TYPE, CP_TAG_MODULE, CP_TAG_PACKAGE -> 2
                     CP_TAG_METHOD_HANDLE -> 3
                     CP_TAG_INTEGER, CP_TAG_FLOAT, CP_TAG_FIELDREF, CP_TAG_METHODREF,
                     CP_TAG_INTERFACE_METHODREF, CP_TAG_NAME_AND_TYPE, CP_TAG_DYNAMIC, CP_TAG_INVOKE_DYNAMIC -> 4
@@ -393,7 +442,10 @@ object AdditiveClassMerger {
         }
         val cpEndOffset = buf.position()
 
-        buf.position(buf.position() + 6)
+        buf.short // access_flags
+        buf.short // this_class
+        val superClassCpIdx = buf.short.toInt() and U16_MASK
+        val superInternalName = classNameIdxByCp[superClassCpIdx]?.let { utf8Pool[it] }.orEmpty()
         val interfacesCount = buf.short.toInt() and U16_MASK
         buf.position(buf.position() + interfacesCount * 2)
 
@@ -434,7 +486,9 @@ object AdditiveClassMerger {
 
         return ParsedClass(
             rawBytes = bytes,
-            cp = ConstantPoolSection(cpCount, cpStartOffset, cpEndOffset, utf8Pool),
+            superClassCpIdx = superClassCpIdx,
+            superInternalName = superInternalName,
+            cp = ConstantPoolSection(cpCount, cpStartOffset, cpEndOffset, utf8Pool, classNameIdxByCp),
             fields = MemberSection(fieldsStartOffset, fieldsCount, fieldsEndOffset, fields),
             methods = MemberSection(methodsStartOffset, methodsCount, methodsEndOffset, methods)
         )
