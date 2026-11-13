@@ -37,14 +37,23 @@ class HotReloadSession(
             layout.resolveVariant(config.appId, config.variant),
             commandRunner
         )
-    }
+    },
+    private val syncRegistryDir: File = HotReloadSyncCoordinator.defaultRegistryDir()
 ) {
     private val isRunning = AtomicBoolean(true)
     private var lastReportedCrashBlock: String? = null
+    private val syncMonitor = Object()
+    private var isPassInProgress = false
+    private var pendingSyncCount = 0
+    private var completedSyncGeneration = 0L
+    private var lastPassLines: List<String> = emptyList()
+    private var lastPassEndMs: Long = 0L
 
     companion object {
         private const val INSTALL_TIMEOUT_SECONDS = 180L
         private const val CRASH_LOG_TAIL_LINES = "150"
+        private const val RECENT_SYNC_WINDOW_MS = 5_000L
+        private const val SYNC_WAIT_SLICE_MS = 200L
         private const val COMPOSE_ERROR_PREFIX = "Error was captured in composition"
         private val stackFrameRegex = Regex("""^at\s+([\w.$]+)\.[\w$<>]+\(([^():]+):(\d+)\)$""")
         private val frameworkPrefixes = listOf(
@@ -79,6 +88,10 @@ class HotReloadSession(
 
     fun stop() {
         isRunning.set(false)
+        tracker.wakeUp()
+        synchronized(syncMonitor) {
+            syncMonitor.notifyAll()
+        }
     }
 
     fun run(onEvent: (HotReloadEvent) -> Unit) {
@@ -117,17 +130,46 @@ class HotReloadSession(
         )
 
         val stagingDir = Files.createTempDirectory("debroid_dex_stage").toFile()
+        val syncServer = if (!config.once) {
+            HotReloadSyncCoordinator.Server.startOrNull(
+                appId = config.appId,
+                projectDir = config.projectDir,
+                registryDir = syncRegistryDir,
+                onSyncRequest = ::awaitNextWatcherSync
+            )
+        } else {
+            null
+        }
         try {
             var isFirstPass = true
             while (isRunning.get()) {
-                val changes = if (isFirstPass || config.once) {
+                val forcePoll = synchronized(syncMonitor) {
+                    val forced = pendingSyncCount > 0
+                    pendingSyncCount = 0
+                    isPassInProgress = true
+                    forced
+                }
+                val changes = if (isFirstPass || config.once || forcePoll) {
                     isFirstPass = false
                     tracker.pollChanges()
                 } else {
                     tracker.awaitChanges(config.intervalMs)
                 }
                 if (!changes.isEmpty()) {
-                    processDetectedChanges(changes, stagingDir, onEvent)
+                    val passCaptured = mutableListOf<String>()
+                    processDetectedChanges(changes, stagingDir) { event ->
+                        passCaptured.add(event.formatPlainText())
+                        onEvent(event)
+                    }
+                    synchronized(syncMonitor) {
+                        lastPassLines = passCaptured
+                        lastPassEndMs = System.currentTimeMillis()
+                    }
+                }
+                synchronized(syncMonitor) {
+                    isPassInProgress = false
+                    completedSyncGeneration++
+                    syncMonitor.notifyAll()
                 }
                 if (config.once) {
                     break
@@ -136,8 +178,43 @@ class HotReloadSession(
         } catch (_: InterruptedException) {
             onEvent(HotReloadEvent.Stopped(config.appId))
         } finally {
+            runCatching { syncServer?.close() }
+            synchronized(syncMonitor) {
+                isPassInProgress = false
+                syncMonitor.notifyAll()
+            }
             runCatching { tracker.close() }
             stagingDir.deleteRecursively()
+        }
+    }
+
+    private fun awaitNextWatcherSync(): List<String> {
+        val targetGen: Long
+        synchronized(syncMonitor) {
+            targetGen = if (isPassInProgress) completedSyncGeneration + 2L else completedSyncGeneration + 1L
+            pendingSyncCount++
+        }
+        tracker.wakeUp()
+        synchronized(syncMonitor) {
+            while (isRunning.get() && completedSyncGeneration < targetGen) {
+                syncMonitor.wait(SYNC_WAIT_SLICE_MS)
+            }
+            val recentWindow = System.currentTimeMillis() - lastPassEndMs <= RECENT_SYNC_WINDOW_MS
+            val hasUnresolvedFailure = lastPassLines.any {
+                it.startsWith("[COMPILE_ERROR]") || it.startsWith("[ERROR]")
+            }
+            if (lastPassLines.isNotEmpty() && (recentWindow || hasUnresolvedFailure)) {
+                return lastPassLines
+            }
+            return listOf(
+                HotReloadEvent.Reloaded(
+                    mode = ReloadMode.JVMTI_HOT_SWAP,
+                    redefinedCount = 0,
+                    newClassesCount = 0,
+                    uiRefresh = UiRefreshMode.NONE,
+                    durationMs = 0L
+                ).formatPlainText()
+            )
         }
     }
 
@@ -175,6 +252,15 @@ class HotReloadSession(
             is CompilationOutcome.Success -> {
                 if (compileOutcome.classPayloads.isEmpty()) {
                     tracker.commitChanges(changes)
+                    onEvent(
+                        HotReloadEvent.Reloaded(
+                            mode = ReloadMode.JVMTI_HOT_SWAP,
+                            redefinedCount = 0,
+                            newClassesCount = 0,
+                            uiRefresh = UiRefreshMode.NONE,
+                            durationMs = System.currentTimeMillis() - startMs
+                        )
+                    )
                     return
                 }
                 applyDexToDevice(compileOutcome, changes, fileNames, pid, startMs, onEvent)

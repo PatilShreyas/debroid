@@ -36,6 +36,8 @@ class IncrementalDexCompiler(
     private val knownModulesByPath = LinkedHashMap<String, GradleModule>()
     private val cumulativeStubsByModule =
         mutableMapOf<String, MutableMap<String, AdditiveClassMerger.DexClassMembers>>()
+    private val redirectedInterfacesByModule =
+        mutableMapOf<String, MutableMap<String, List<Pair<String, String>>>>()
     private var reloadGeneration = 0
 
     companion object {
@@ -51,7 +53,9 @@ class IncrementalDexCompiler(
         private const val BASE36_RADIX = 36
         private const val MARKER_TOKEN_LENGTH = 5
         private const val DEFAULT_SYNTHETIC_MARKER = "\$\$ExternalSyntheticLambda"
-        private val kotlincErrorRegex = Regex("""e:\s*(?:file://)?([^\s:]+):(\d+):(\d+)\s*(.+)""")
+        private const val R8_SYNTHESIZED_ANNOTATION = "Lcom/android/tools/r8/annotations/SynthesizedClass"
+        private const val R8_SYNTHESIZED_NEUTRALIZED = "Lcom/android/tools/r8/annotations/SynthesizedClast"
+        private val kotlincErrorRegex = Regex("""^\s*e:\s*(?:file://)?([^\s:]+):(\d+):(\d+)\s*(.+)""")
         private val taskNotFoundRegex = Regex(
             """Task\s+'([^']+)'\s+not found in (?:project|root project)\s+'([^']+)'""",
             RegexOption.IGNORE_CASE
@@ -83,6 +87,7 @@ class IncrementalDexCompiler(
     fun snapshotModuleClasses(modules: Collection<GradleModule>) {
         baselineDexMembersByClassName.clear()
         knownModulesByPath.clear()
+        redirectedInterfacesByModule.clear()
         for (module in modules) {
             snapshotSingleModule(module)
         }
@@ -340,6 +345,8 @@ class IncrementalDexCompiler(
         val reinitClinit: Boolean = false,
         val resetScopeKeys: Set<Int> = emptySet(),
         val resetScope: Boolean = false,
+        val changedScopeKeys: Set<Int> = emptySet(),
+        val invalidateAllClassScopes: Boolean = true,
         val staticFieldUpdates: List<StaticFieldUpdate> = emptyList()
     )
 
@@ -352,19 +359,31 @@ class IncrementalDexCompiler(
         val syntheticMarker: String
     )
 
-    private fun collectModifiedClasses(
-        changesByModule: Map<GradleModule, List<File>>
-    ): List<ModifiedClassEntry> {
-        val changedClasses = LinkedHashMap<String, ModifiedClassEntry>()
+    private inner class ModuleCollectState(
+        val module: GradleModule,
+        val previousMeta: Map<String, ClassFileMeta>,
+        val previousBytesMap: Map<String, ByteArray>,
+        val currentClasses: Map<String, File>,
+        val editedBaseNames: Set<String>,
+        val redirectedIfaces: MutableMap<String, List<Pair<String, String>>>
+    ) {
+        val updatedMeta = mutableMapOf<String, ClassFileMeta>()
+        val updatedBytesMap = previousBytesMap.toMutableMap()
+        val newlyRedirectedIfaces = LinkedHashMap<String, List<Pair<String, String>>>()
+        val synthesizedDefaultImplsByClass = LinkedHashMap<String, Pair<File, ByteArray>>()
+        val interfaceStaticFieldUpdates = mutableListOf<StaticFieldUpdate>()
+        var anyInterfaceCrossModuleChange = false
+        val modifiedRawBytesByClass = LinkedHashMap<String, Pair<File, ByteArray>>()
 
-        for ((module, sourceFiles) in changesByModule) {
-            val previousMeta = classMetaByModule[module.gradlePath].orEmpty()
-            val previousBytesMap = classBytesByModule[module.gradlePath].orEmpty()
-            val currentClasses = scanModuleClassFiles(module)
-            val updatedMeta = mutableMapOf<String, ClassFileMeta>()
-            val updatedBytesMap = previousBytesMap.toMutableMap()
-            val editedBaseNames = sourceFiles.map { it.nameWithoutExtension }.toSet()
+        fun resolveClassBytes(internalName: String): ByteArray? {
+            val dotName = internalName.replace('/', '.')
+            updatedBytesMap[dotName]?.let { return it }
+            val file = currentClasses[dotName] ?: return null
+            if (!file.exists()) return null
+            return file.readBytes().also { updatedBytesMap[dotName] = it }
+        }
 
+        fun scanModifiedCandidates() {
             for ((className, classFile) in currentClasses) {
                 val prevMeta = previousMeta[className]
                 val curLastModified = classFile.lastModified()
@@ -380,67 +399,219 @@ class IncrementalDexCompiler(
                 updatedMeta[className] = ClassFileMeta(curLastModified, currentBytes.size.toLong(), hash)
 
                 val simpleName = className.substringAfterLast('.')
-                val matchesEditedSource = editedBaseNames.any { base ->
-                    matchesEditedSourceName(simpleName, base)
-                }
-
+                val matchesEditedSource = editedBaseNames.any { base -> matchesEditedSourceName(simpleName, base) }
                 val isModified = isClassModified(
                     prevHash = prevMeta?.sha256,
                     currentHash = hash,
                     hasNoPreviousHashes = previousMeta.isEmpty(),
                     matchesEditedSource = matchesEditedSource
                 )
-                if (isModified) {
-                    val prevBytes = previousBytesMap[className]
-                    val baselineSuper = resolveBaselineSuperClass(module.gradlePath, className)
-                    val hiltSibling = hasHiltSibling(className, currentClasses, previousMeta)
-                    val hiltCurrentBytes = ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(
-                        classBytes = currentBytes,
-                        baselineSuperClass = baselineSuper,
-                        hasHiltSiblingClass = hiltSibling
-                    )
-                    val hiltPrevBytes = prevBytes?.let {
-                        ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(
-                            classBytes = it,
-                            baselineSuperClass = baselineSuper,
-                            hasHiltSiblingClass = hiltSibling
-                        )
-                    }
-                    updatedBytesMap[className] = hiltCurrentBytes
-                    val crossModuleChange = previousMeta.isNotEmpty() &&
-                        ClassBytecodeAnalyzer.hasCrossModuleVisibleChange(hiltPrevBytes, hiltCurrentBytes)
-                    val rememberDiff = if (hiltPrevBytes != null) {
-                        ClassBytecodeAnalyzer.analyzeComposeRememberChanges(hiltPrevBytes, hiltCurrentBytes)
-                    } else {
-                        ClassBytecodeAnalyzer.ComposeRememberDiff()
-                    }
-                    val staticDiff = ClassBytecodeAnalyzer.prepareStaticFieldUpdates(hiltPrevBytes, hiltCurrentBytes)
-                    val knownStubs = cumulativeStubsByModule[module.gradlePath]?.get(className)
-                    val preMergedBytes = if (knownStubs != null) {
-                        AdditiveClassMerger.mergeWithKnownStubs(staticDiff.patchedClassBytes, knownStubs)
-                    } else {
-                        staticDiff.patchedClassBytes
-                    }
-                    changedClasses[className] = ModifiedClassEntry(
-                        modulePath = module.gradlePath,
-                        className = className,
-                        originalFile = classFile,
-                        previousClassBytes = hiltPrevBytes,
-                        unpatchedCurrentBytes = hiltCurrentBytes,
-                        mergedBytes = preMergedBytes,
-                        hasCrossModuleChange = crossModuleChange,
-                        reinitClinit = staticDiff.reinitClinit,
-                        resetScopeKeys = rememberDiff.resetScopeKeys,
-                        resetScope = rememberDiff.resetAllClassScopes,
-                        staticFieldUpdates = staticDiff.constantFieldUpdates
-                    )
+                if (!isModified) continue
+
+                if (!tryHandleNonStructuralInterfaceChange(className, simpleName, classFile, currentBytes)) {
+                    modifiedRawBytesByClass[className] = classFile to currentBytes
                 }
             }
-            classMetaByModule[module.gradlePath] = updatedMeta
-            classBytesByModule[module.gradlePath] = updatedBytesMap
+            ensureRedirectedDefaultImplsSynthesized()
         }
 
+        private fun tryHandleNonStructuralInterfaceChange(
+            className: String,
+            simpleName: String,
+            classFile: File,
+            currentBytes: ByteArray
+        ): Boolean {
+            val isKnownInterface = ClassBytecodeAnalyzer.isInterfaceClass(currentBytes) &&
+                (className in previousMeta || className in baselineDexMembersByClassName)
+            if (!isKnownInterface) return false
+
+            val internalIface = className.replace('.', '/')
+            val prevBytes = previousBytesMap[className]
+            if (prevBytes != null && !ClassBytecodeAnalyzer.hasExecutableBytecodeChange(prevBytes, currentBytes)) {
+                updatedBytesMap[className] = currentBytes
+                if (internalIface in redirectedIfaces) {
+                    recordSynthesizedDefaultImpls(className, simpleName, classFile, currentBytes)
+                }
+                return true
+            }
+            if (ClassBytecodeAnalyzer.hasInterfaceStructureChange(prevBytes, currentBytes)) {
+                return false
+            }
+
+            updatedBytesMap[className] = currentBytes
+            if (previousMeta.isNotEmpty() &&
+                ClassBytecodeAnalyzer.hasCrossModuleVisibleChange(prevBytes, currentBytes)
+            ) {
+                anyInterfaceCrossModuleChange = true
+            }
+            val staticDiff = ClassBytecodeAnalyzer.prepareStaticFieldUpdates(prevBytes, currentBytes)
+            interfaceStaticFieldUpdates.addAll(staticDiff.constantFieldUpdates)
+            if (recordSynthesizedDefaultImpls(className, simpleName, classFile, currentBytes)) {
+                val defaults = ClassBytecodeAnalyzer.extractInterfaceDefaultMethods(currentBytes)
+                redirectedIfaces[internalIface] = defaults
+                newlyRedirectedIfaces[internalIface] = defaults
+            }
+            return true
+        }
+
+        private fun recordSynthesizedDefaultImpls(
+            className: String,
+            simpleName: String,
+            classFile: File,
+            interfaceBytes: ByteArray
+        ): Boolean {
+            val synthesized = ClassBytecodeAnalyzer.synthesizeDefaultImplsFromInterface(interfaceBytes) ?: return false
+            val defaultImplsName = "$className\$DefaultImpls"
+            val defaultImplsFile = currentClasses[defaultImplsName]
+                ?: File(classFile.parentFile, "$simpleName\$DefaultImpls.class")
+            synthesizedDefaultImplsByClass[defaultImplsName] = defaultImplsFile to synthesized
+            return true
+        }
+
+        private fun ensureRedirectedDefaultImplsSynthesized() {
+            for (className in modifiedRawBytesByClass.keys.toList()) {
+                if (!className.endsWith("\$DefaultImpls") || className in synthesizedDefaultImplsByClass) continue
+                val ifaceName = className.removeSuffix("\$DefaultImpls")
+                if (ifaceName.replace('.', '/') !in redirectedIfaces) continue
+                val ifaceFile = currentClasses[ifaceName] ?: continue
+                val ifaceBytes = updatedBytesMap[ifaceName] ?: ifaceFile.takeIf { it.exists() }?.readBytes() ?: continue
+                recordSynthesizedDefaultImpls(ifaceName, ifaceName.substringAfterLast('.'), ifaceFile, ifaceBytes)
+            }
+        }
+
+        fun collectNewlyRedirectedInterfaceCallers() {
+            if (newlyRedirectedIfaces.isEmpty()) return
+            for ((className, classFile) in currentClasses) {
+                if (className in modifiedRawBytesByClass || className in synthesizedDefaultImplsByClass) {
+                    continue
+                }
+                val rawBytes = classFile.readBytes()
+                val bridged = ClassBytecodeAnalyzer.injectMissingInterfaceDefaultBridges(
+                    classBytes = rawBytes,
+                    defaultMethodsByIface = newlyRedirectedIfaces,
+                    classBytesLookup = ::resolveClassBytes
+                )
+                val rewritten = ClassBytecodeAnalyzer.rewriteInterfaceSpecialCallsToDefaultImpls(
+                    classBytes = bridged,
+                    interfaceInternalNames = newlyRedirectedIfaces.keys
+                )
+                if (!rewritten.contentEquals(rawBytes)) {
+                    modifiedRawBytesByClass[className] = classFile to rawBytes
+                }
+            }
+        }
+    }
+
+    private fun collectModifiedClasses(
+        changesByModule: Map<GradleModule, List<File>>
+    ): List<ModifiedClassEntry> {
+        val changedClasses = LinkedHashMap<String, ModifiedClassEntry>()
+        for ((module, sourceFiles) in changesByModule) {
+            val state = ModuleCollectState(
+                module = module,
+                previousMeta = classMetaByModule[module.gradlePath].orEmpty(),
+                previousBytesMap = classBytesByModule[module.gradlePath].orEmpty(),
+                currentClasses = scanModuleClassFiles(module),
+                editedBaseNames = sourceFiles.map { it.nameWithoutExtension }.toSet(),
+                redirectedIfaces = redirectedInterfacesByModule.getOrPut(module.gradlePath) { LinkedHashMap() }
+            )
+
+            state.scanModifiedCandidates()
+            state.collectNewlyRedirectedInterfaceCallers()
+            state.modifiedRawBytesByClass.putAll(state.synthesizedDefaultImplsByClass)
+
+            for ((className, fileAndBytes) in state.modifiedRawBytesByClass) {
+                val entry = buildModifiedClassEntry(state, className, fileAndBytes.first, fileAndBytes.second)
+                if (entry != null) {
+                    changedClasses[className] = entry
+                }
+            }
+            classMetaByModule[module.gradlePath] = state.updatedMeta
+            classBytesByModule[module.gradlePath] = state.updatedBytesMap
+        }
         return changedClasses.values.toList()
+    }
+
+    private fun buildModifiedClassEntry(
+        state: ModuleCollectState,
+        className: String,
+        classFile: File,
+        rawOrSynthesizedBytes: ByteArray
+    ): ModifiedClassEntry? {
+        val modulePath = state.module.gradlePath
+        val prevBytes = state.previousBytesMap[className]
+        val baselineSuper = resolveBaselineSuperClass(modulePath, className)
+        val hiltSibling = hasHiltSibling(className, state.currentClasses, state.previousMeta)
+        val isSynthesizedDefaultImpls = className in state.synthesizedDefaultImplsByClass
+        val hiltCurrentBytes = if (isSynthesizedDefaultImpls) {
+            rawOrSynthesizedBytes
+        } else {
+            val transformed = ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(
+                classBytes = rawOrSynthesizedBytes,
+                baselineSuperClass = baselineSuper,
+                hasHiltSiblingClass = hiltSibling
+            )
+            val bridged = ClassBytecodeAnalyzer.injectMissingInterfaceDefaultBridges(
+                classBytes = transformed,
+                defaultMethodsByIface = state.redirectedIfaces,
+                classBytesLookup = state::resolveClassBytes
+            )
+            ClassBytecodeAnalyzer.rewriteInterfaceSpecialCallsToDefaultImpls(bridged, state.redirectedIfaces.keys)
+        }
+        val hiltPrevBytes = prevBytes?.let {
+            ClassBytecodeAnalyzer.applyHiltTransformIfNeeded(
+                classBytes = it,
+                baselineSuperClass = baselineSuper,
+                hasHiltSiblingClass = hiltSibling
+            )
+        }
+        state.updatedBytesMap[className] = hiltCurrentBytes
+
+        if (hiltPrevBytes != null &&
+            !ClassBytecodeAnalyzer.hasExecutableBytecodeChange(hiltPrevBytes, hiltCurrentBytes)
+        ) {
+            return null
+        }
+
+        val crossModuleChange = state.previousMeta.isNotEmpty() &&
+            (
+                state.anyInterfaceCrossModuleChange ||
+                    ClassBytecodeAnalyzer.hasCrossModuleVisibleChange(hiltPrevBytes, hiltCurrentBytes)
+                )
+        val rememberDiff = if (hiltPrevBytes != null) {
+            ClassBytecodeAnalyzer.analyzeComposeRememberChanges(hiltPrevBytes, hiltCurrentBytes)
+        } else {
+            ClassBytecodeAnalyzer.ComposeRememberDiff()
+        }
+        val staticDiff = ClassBytecodeAnalyzer.prepareStaticFieldUpdates(hiltPrevBytes, hiltCurrentBytes)
+        val knownStubs = cumulativeStubsByModule[modulePath]?.get(className)
+        val preMergedBytes = if (knownStubs != null) {
+            AdditiveClassMerger.mergeWithKnownStubs(staticDiff.patchedClassBytes, knownStubs)
+        } else {
+            staticDiff.patchedClassBytes
+        }
+        val combinedStaticUpdates = if (state.interfaceStaticFieldUpdates.isNotEmpty()) {
+            val list = staticDiff.constantFieldUpdates + state.interfaceStaticFieldUpdates
+            state.interfaceStaticFieldUpdates.clear()
+            list
+        } else {
+            staticDiff.constantFieldUpdates
+        }
+        return ModifiedClassEntry(
+            modulePath = modulePath,
+            className = className,
+            originalFile = classFile,
+            previousClassBytes = hiltPrevBytes,
+            unpatchedCurrentBytes = hiltCurrentBytes,
+            mergedBytes = preMergedBytes,
+            hasCrossModuleChange = crossModuleChange,
+            reinitClinit = staticDiff.reinitClinit,
+            resetScopeKeys = rememberDiff.resetScopeKeys,
+            resetScope = rememberDiff.resetAllClassScopes,
+            changedScopeKeys = rememberDiff.changedScopeKeys,
+            invalidateAllClassScopes = if (hiltPrevBytes == null) false else rememberDiff.invalidateAllClassScopes,
+            staticFieldUpdates = combinedStaticUpdates
+        )
     }
 
     private fun resolveBaselineSuperClass(modulePath: String, className: String): String? {
@@ -554,15 +725,14 @@ class IncrementalDexCompiler(
                     .removeSuffix(".dex")
                     .replace('/', '.')
                 val matchingEntry = entryByClassName[rawDexClassName]
+                val rawBytes = dexFile.readBytes()
                 if (matchingEntry != null) {
-                    val dexBytes = dexFile.readBytes()
-                    dexBytesByModule.getOrPut(matchingEntry.modulePath) { mutableMapOf() }[rawDexClassName] = dexBytes
-                    persistRedefinedDex(matchingEntry.modulePath, rawDexClassName, dexBytes)
+                    dexBytesByModule.getOrPut(matchingEntry.modulePath) { mutableMapOf() }[rawDexClassName] = rawBytes
+                    persistRedefinedDex(matchingEntry.modulePath, rawDexClassName, rawBytes)
                 }
                 val dexClassName = rawDexClassName.replace(DEFAULT_SYNTHETIC_MARKER, syntheticMarker)
                 val targetDex = File(stagingDir, "redefine_${payloads.size}.dex")
-                dexFile.copyTo(targetDex, overwrite = true)
-                rewriteSyntheticLambdaMarker(targetDex, syntheticMarker)
+                targetDex.writeBytes(transformDexBytesWithSyntheticMarker(rawBytes, syntheticMarker))
                 payloads.add(
                     ClassDexPayload(
                         className = dexClassName,
@@ -570,6 +740,8 @@ class IncrementalDexCompiler(
                         reinitClinit = matchingEntry?.reinitClinit ?: false,
                         resetScopeKeys = matchingEntry?.resetScopeKeys.orEmpty(),
                         resetScope = matchingEntry?.resetScope ?: false,
+                        changedScopeKeys = matchingEntry?.changedScopeKeys.orEmpty(),
+                        invalidateAllClassScopes = matchingEntry?.invalidateAllClassScopes ?: false,
                         staticFieldUpdates = matchingEntry?.staticFieldUpdates.orEmpty()
                     )
                 )
@@ -577,10 +749,10 @@ class IncrementalDexCompiler(
         } else {
             val fallbackDex = File(perClassOutDir, "classes.dex")
             if (fallbackDex.exists()) {
+                val rewrittenFallback = transformDexBytesWithSyntheticMarker(fallbackDex.readBytes(), syntheticMarker)
                 for (entry in modifiedClasses) {
                     val targetDex = File(stagingDir, "redefine_${payloads.size}.dex")
-                    fallbackDex.copyTo(targetDex, overwrite = true)
-                    rewriteSyntheticLambdaMarker(targetDex, syntheticMarker)
+                    targetDex.writeBytes(rewrittenFallback)
                     payloads.add(
                         ClassDexPayload(
                             className = entry.className,
@@ -588,6 +760,8 @@ class IncrementalDexCompiler(
                             reinitClinit = entry.reinitClinit,
                             resetScopeKeys = entry.resetScopeKeys,
                             resetScope = entry.resetScope,
+                            changedScopeKeys = entry.changedScopeKeys,
+                            invalidateAllClassScopes = entry.invalidateAllClassScopes,
                             staticFieldUpdates = entry.staticFieldUpdates
                         )
                     )
@@ -598,7 +772,8 @@ class IncrementalDexCompiler(
         val combinedDex = buildCombinedDex(
             ctx = ctx,
             finalInputFiles = finalInputFiles,
-            payloads = payloads
+            payloads = payloads,
+            hasPerClassDexFiles = perClassDexFiles.isNotEmpty()
         ) ?: return CompilationOutcome.Failure(
             module = "d8",
             diagnostic = "d8 combined dex failed"
@@ -617,21 +792,32 @@ class IncrementalDexCompiler(
     private fun buildCombinedDex(
         ctx: D8BatchContext,
         finalInputFiles: List<File>,
-        payloads: List<ClassDexPayload>
+        payloads: List<ClassDexPayload>,
+        hasPerClassDexFiles: Boolean
     ): File? {
-        if (payloads.size == 1) {
+        if (payloads.size == 1 || (!hasPerClassDexFiles && payloads.isNotEmpty())) {
             val target = File(ctx.stagingDir, "new_classes.dex")
             payloads.first().dexFile.copyTo(target, overwrite = true)
             return target
         }
 
         val combinedOutDir = File(ctx.stagingDir, "combined").apply { mkdirs() }
+        val combinedFile = File(combinedOutDir, "classes.dex")
+        if (hasPerClassDexFiles && payloads.isNotEmpty()) {
+            val dexMergeArgs = listOf("--min-api", "26", "--output", combinedOutDir.absolutePath) +
+                payloads.map { it.dexFile.absolutePath }
+            if (executeD8(ctx.d8Path, dexMergeArgs).isSuccess && combinedFile.exists()) {
+                val target = File(ctx.stagingDir, "new_classes.dex")
+                combinedFile.copyTo(target, overwrite = true)
+                return target
+            }
+        }
+
         val combinedArgs = ctx.baseFlags + listOf("--output", combinedOutDir.absolutePath) +
             finalInputFiles.map { it.absolutePath }
         val combinedRes = executeD8(ctx.d8Path, combinedArgs)
         if (combinedRes.isFailure) return null
 
-        val combinedFile = File(combinedOutDir, "classes.dex")
         if (!combinedFile.exists()) return null
         val target = File(ctx.stagingDir, "new_classes.dex")
         combinedFile.copyTo(target, overwrite = true)
@@ -640,8 +826,8 @@ class IncrementalDexCompiler(
     }
 
     private fun prepareInputClassFile(entry: ModifiedClassEntry, mergedInputsDir: File, index: Int): File {
-        val rawBytes = entry.originalFile.readBytes()
-        if (entry.mergedBytes.contentEquals(rawBytes)) {
+        val rawBytes = entry.originalFile.takeIf { it.exists() }?.readBytes()
+        if (rawBytes != null && entry.mergedBytes.contentEquals(rawBytes)) {
             return entry.originalFile
         }
         val out = File(mergedInputsDir, "${index}_${entry.originalFile.name}")
@@ -678,12 +864,6 @@ class IncrementalDexCompiler(
             if (reconciledClassBytes.contentEquals(entry.mergedBytes)) continue
 
             recordCumulativeStubs(entry.modulePath, entry.className, prevMembers)
-            val reconciledUnpatched = AdditiveClassMerger.mergeWithPreviousDexMembers(
-                prevDex = prevMembers,
-                currDex = currMembers,
-                currentClassBytes = entry.unpatchedCurrentBytes
-            )
-            classBytesByModule.getOrPut(entry.modulePath) { mutableMapOf() }[entry.className] = reconciledUnpatched
             val outClassFile = File(ctx.mergedInputsDir, "reconciled_${index}_${entry.originalFile.name}")
             outClassFile.writeBytes(reconciledClassBytes)
             updatedFiles[index] = outClassFile
@@ -743,7 +923,9 @@ class IncrementalDexCompiler(
         return if (merged.contentEquals(entry.mergedBytes)) {
             null
         } else {
-            classBytesByModule.getOrPut(entry.modulePath) { mutableMapOf() }[entry.className] = merged
+            AdditiveClassMerger.extractClassMembers(prevClassBytes)?.let {
+                recordCumulativeStubs(entry.modulePath, entry.className, it)
+            }
             File(mergedInputsDir, "${index}_${entry.originalFile.name}").apply { writeBytes(merged) }
         }
     }
@@ -815,12 +997,25 @@ class IncrementalDexCompiler(
     }
 
     private fun rewriteSyntheticLambdaMarker(dexFile: File, newMarker: String) {
-        val bytes = dexFile.readBytes()
-        if (!isValidDexHeader(bytes)) return
+        val raw = dexFile.readBytes()
+        val transformed = transformDexBytesWithSyntheticMarker(raw, newMarker)
+        if (transformed !== raw) {
+            dexFile.writeBytes(transformed)
+        }
+    }
 
+    private fun transformDexBytesWithSyntheticMarker(rawBytes: ByteArray, newMarker: String): ByteArray {
+        if (!isValidDexHeader(rawBytes)) return rawBytes
+        val bytes = rawBytes.clone()
         val oldBytes = DEFAULT_SYNTHETIC_MARKER.toByteArray(Charsets.US_ASCII)
         val newBytes = newMarker.toByteArray(Charsets.US_ASCII)
-        if (oldBytes.size != newBytes.size || !replaceAsciiBytesInPlace(bytes, oldBytes, newBytes)) return
+        val replacedMarker = oldBytes.size == newBytes.size && replaceAsciiBytesInPlace(bytes, oldBytes, newBytes)
+        val replacedSynthAnn = replaceAsciiBytesInPlace(
+            bytes,
+            R8_SYNTHESIZED_ANNOTATION.toByteArray(Charsets.US_ASCII),
+            R8_SYNTHESIZED_NEUTRALIZED.toByteArray(Charsets.US_ASCII)
+        )
+        if (!replacedMarker && !replacedSynthAnn) return rawBytes
 
         val sha1 = MessageDigest.getInstance("SHA-1")
         sha1.update(bytes, DEX_HEADER_MIN_BYTES, bytes.size - DEX_HEADER_MIN_BYTES)
@@ -832,7 +1027,7 @@ class IncrementalDexCompiler(
             .order(ByteOrder.LITTLE_ENDIAN)
             .putInt(adler.value.toInt())
 
-        dexFile.writeBytes(bytes)
+        return bytes
     }
 
     private fun isValidDexHeader(bytes: ByteArray): Boolean {

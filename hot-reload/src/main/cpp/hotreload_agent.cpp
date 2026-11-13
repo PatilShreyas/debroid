@@ -497,6 +497,8 @@ int clear_stale_lambda_slots(
     const std::vector<std::string>& redefined_prefixes,
     const std::vector<jint>& reset_scope_keys,
     const std::vector<std::string>& reset_scope_classes,
+    const std::vector<jint>& changed_scope_keys,
+    const std::vector<std::string>& invalidate_all_scope_classes,
     bool allow_fallback,
     bool* out_comp_matched
 ) {
@@ -623,6 +625,14 @@ int clear_stale_lambda_slots(
                 if (blk && inspect_app_cached_lambda(
                         env, blk, class_cls, get_name_mid, composable_lambda_cls, block_fid, kotlin_func_cls,
                         redefined_prefixes, &matches_redefined)) {
+                    bool has_fine_grained = !changed_scope_keys.empty() || !invalidate_all_scope_classes.empty();
+                    bool matches_unscoped_class = false;
+                    if (!invalidate_all_scope_classes.empty()) {
+                        inspect_app_cached_lambda(
+                            env, blk, class_cls, get_name_mid, composable_lambda_cls, block_fid, kotlin_func_cls,
+                            invalidate_all_scope_classes, &matches_unscoped_class
+                        );
+                    }
                     bool matches_reset = false;
                     if (!reset_scope_classes.empty()) {
                         inspect_app_cached_lambda(
@@ -630,13 +640,18 @@ int clear_stale_lambda_slots(
                             reset_scope_classes, &matches_reset
                         );
                     }
-                    if (!matches_reset && !reset_scope_keys.empty() &&
-                        composable_lambda_cls && lambda_key_fid &&
+                    bool matches_changed_lkey = false;
+                    if (composable_lambda_cls && lambda_key_fid &&
                         env->IsInstanceOf(blk, composable_lambda_cls)) {
                         jint lkey = env->GetIntField(blk, lambda_key_fid);
-                        if (!env->ExceptionCheck() && contains_int(reset_scope_keys, lkey)) {
-                            matches_reset = true;
-                        } else if (env->ExceptionCheck()) {
+                        if (!env->ExceptionCheck()) {
+                            if (!matches_reset && !reset_scope_keys.empty() && contains_int(reset_scope_keys, lkey)) {
+                                matches_reset = true;
+                            }
+                            if (!changed_scope_keys.empty() && contains_int(changed_scope_keys, lkey)) {
+                                matches_changed_lkey = true;
+                            }
+                        } else {
                             env->ExceptionClear();
                         }
                     }
@@ -652,7 +667,10 @@ int clear_stale_lambda_slots(
                         if (g_idx >= 0) {
                             all_app_scope_groups.push_back(g_idx);
                             scope_slot_indices.push_back({g_idx, k});
-                            if (matches_redefined || matches_reset) {
+                            bool scope_changed = has_fine_grained
+                                ? (matches_unscoped_class || matches_changed_lkey)
+                                : matches_redefined;
+                            if (scope_changed || matches_reset) {
                                 matched_scope_groups.push_back(g_idx);
                             }
                             if (matches_reset) {
@@ -686,14 +704,19 @@ int clear_stale_lambda_slots(
         groups_arr = nullptr;
     }
     jint* g_ptr = groups_arr ? env->GetIntArrayElements(groups_arr, nullptr) : nullptr;
-    if (g_ptr && !reset_scope_keys.empty()) {
+    if (g_ptr && (!reset_scope_keys.empty() || !changed_scope_keys.empty())) {
         for (jint scope_g : all_app_scope_groups) {
             if (scope_g >= 0 && scope_g < groups_size) {
                 jint scope_key = g_ptr[scope_g * 5 + 0];
-                if (contains_int(reset_scope_keys, scope_key)) {
+                if (!reset_scope_keys.empty() && contains_int(reset_scope_keys, scope_key)) {
                     if (!contains_int(reset_remember_scope_groups, scope_g)) {
                         reset_remember_scope_groups.push_back(scope_g);
                     }
+                    if (!contains_int(matched_scope_groups, scope_g)) {
+                        matched_scope_groups.push_back(scope_g);
+                    }
+                }
+                if (!changed_scope_keys.empty() && contains_int(changed_scope_keys, scope_key)) {
                     if (!contains_int(matched_scope_groups, scope_g)) {
                         matched_scope_groups.push_back(scope_g);
                     }
@@ -702,7 +725,8 @@ int clear_stale_lambda_slots(
         }
     }
 
-    bool comp_matched = !matched_scope_groups.empty() || !matched_lambda_slots.empty();
+    bool scoped_only = !changed_scope_keys.empty() && invalidate_all_scope_classes.empty();
+    bool comp_matched = !matched_scope_groups.empty() || (!scoped_only && !matched_lambda_slots.empty());
     if (out_comp_matched) {
         *out_comp_matched = comp_matched;
     }
@@ -730,7 +754,9 @@ int clear_stale_lambda_slots(
     }
 
     const std::vector<jint>& target_scope_groups =
-        !matched_scope_groups.empty() ? matched_scope_groups : all_app_scope_groups;
+        !matched_scope_groups.empty()
+            ? matched_scope_groups
+            : (allow_fallback ? all_app_scope_groups : matched_scope_groups);
 
     int extra_cleared_slots = 0;
     if (!target_scope_groups.empty() && g_ptr) {
@@ -1124,7 +1150,7 @@ std::string await_compose_recomposition_error(
         if (has_pending) {
             saw_pending = true;
         }
-        if (current_change_count > initial_change_count || (saw_pending && !has_pending) || (attempt >= 5 && !has_pending)) {
+        if (current_change_count > initial_change_count || (saw_pending && !has_pending) || (attempt >= 2 && !has_pending)) {
             return extract_compose_recomposer_error(env, class_loader, load_class_mid, redefined_prefixes);
         }
     }
@@ -1181,6 +1207,8 @@ bool trigger_compose_hot_reload(
     const std::vector<std::string>& redefined_prefixes,
     const std::vector<jint>& reset_scope_keys,
     const std::vector<std::string>& reset_scope_classes,
+    const std::vector<jint>& changed_scope_keys,
+    const std::vector<std::string>& invalidate_all_scope_classes,
     bool* out_matched_any_scope,
     jlong* out_initial_change_count
 ) {
@@ -1339,6 +1367,8 @@ bool trigger_compose_hot_reload(
                                     redefined_prefixes,
                                     reset_scope_keys,
                                     reset_scope_classes,
+                                    changed_scope_keys,
+                                    invalidate_all_scope_classes,
                                     false,
                                     &comp_matched
                                 );
@@ -1378,6 +1408,8 @@ bool trigger_compose_hot_reload(
                                         redefined_prefixes,
                                         reset_scope_keys,
                                         reset_scope_classes,
+                                        changed_scope_keys,
+                                        invalidate_all_scope_classes,
                                         true,
                                         &comp_matched
                                     );
@@ -1536,6 +1568,407 @@ bool trigger_activity_recreate(JNIEnv* env, jclass activity_thread_cls) {
     return recreated;
 }
 
+void clear_matching_viewmodels_in_store(
+    JNIEnv* env,
+    jobject vm_store,
+    jclass vm_store_cls,
+    jclass vm_owner_cls,
+    jclass vm_base_cls,
+    jmethodID get_vm_store_mid,
+    jmethodID vm_clear_mid,
+    jclass map_cls,
+    jclass class_cls,
+    jmethodID get_name_mid,
+    const std::vector<std::string>& target_vm_names,
+    int depth,
+    bool* out_cleared_root,
+    bool* out_cleared_child
+) {
+    if (!vm_store || !vm_store_cls || !map_cls || depth > 3) return;
+
+    jfieldID map_fid = env->GetFieldID(vm_store_cls, "map", "Ljava/util/Map;");
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        map_fid = env->GetFieldID(vm_store_cls, "mMap", "Ljava/util/HashMap;");
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            map_fid = env->GetFieldID(vm_store_cls, "mMap", "Ljava/util/Map;");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+    if (!map_fid) return;
+
+    jobject store_map = env->GetObjectField(vm_store, map_fid);
+    if (env->ExceptionCheck() || !store_map) {
+        env->ExceptionClear();
+        return;
+    }
+
+    jmethodID entry_set_mid = env->GetMethodID(map_cls, "entrySet", "()Ljava/util/Set;");
+    jmethodID remove_mid = env->GetMethodID(map_cls, "remove", "(Ljava/lang/Object;)Ljava/lang/Object;");
+    jmethodID values_mid = env->GetMethodID(map_cls, "values", "()Ljava/util/Collection;");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    jclass iterable_cls = env->FindClass("java/lang/Iterable");
+    jclass iterator_cls = env->FindClass("java/util/Iterator");
+    jclass entry_cls = env->FindClass("java/util/Map$Entry");
+    jmethodID iter_mid = iterable_cls ? env->GetMethodID(iterable_cls, "iterator", "()Ljava/util/Iterator;") : nullptr;
+    jmethodID has_next_mid = iterator_cls ? env->GetMethodID(iterator_cls, "hasNext", "()Z") : nullptr;
+    jmethodID next_mid = iterator_cls ? env->GetMethodID(iterator_cls, "next", "()Ljava/lang/Object;") : nullptr;
+    jmethodID get_key_mid = entry_cls ? env->GetMethodID(entry_cls, "getKey", "()Ljava/lang/Object;") : nullptr;
+    jmethodID get_val_mid = entry_cls ? env->GetMethodID(entry_cls, "getValue", "()Ljava/lang/Object;") : nullptr;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    jobject entry_set = entry_set_mid ? env->CallObjectMethod(store_map, entry_set_mid) : nullptr;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        entry_set = nullptr;
+    }
+
+    std::vector<jobject> keys_to_remove;
+    std::vector<jobject> vms_to_clear;
+
+    if (entry_set && iter_mid && has_next_mid && next_mid && get_key_mid && get_val_mid) {
+        jobject iter = env->CallObjectMethod(entry_set, iter_mid);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            iter = nullptr;
+        }
+        while (iter && env->CallBooleanMethod(iter, has_next_mid)) {
+            jobject entry = env->CallObjectMethod(iter, next_mid);
+            if (env->ExceptionCheck() || !entry) {
+                env->ExceptionClear();
+                continue;
+            }
+            jobject key_obj = env->CallObjectMethod(entry, get_key_mid);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                key_obj = nullptr;
+            }
+            jobject vm_obj = env->CallObjectMethod(entry, get_val_mid);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                vm_obj = nullptr;
+            }
+            if (vm_obj && class_cls && get_name_mid) {
+                jclass vm_cls = env->GetObjectClass(vm_obj);
+                jstring jname = vm_cls ? static_cast<jstring>(env->CallObjectMethod(vm_cls, get_name_mid)) : nullptr;
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    jname = nullptr;
+                }
+                std::string vm_name;
+                if (jname) {
+                    const char* chars = env->GetStringUTFChars(jname, nullptr);
+                    if (chars) {
+                        vm_name = chars;
+                        env->ReleaseStringUTFChars(jname, chars);
+                    }
+                    env->DeleteLocalRef(jname);
+                }
+
+                if (!vm_name.empty() && contains_str(target_vm_names, vm_name)) {
+                    if (key_obj) keys_to_remove.push_back(env->NewLocalRef(key_obj));
+                    vms_to_clear.push_back(env->NewLocalRef(vm_obj));
+                    if (depth == 0) {
+                        if (out_cleared_root) *out_cleared_root = true;
+                    } else {
+                        if (out_cleared_child) *out_cleared_child = true;
+                    }
+                } else if (vm_cls && depth < 3 && values_mid) {
+                    const char* child_field_names[] = {"owners", "viewModelStores", "mViewModelStores"};
+                    const char* child_field_sigs[] = {"Ljava/util/Map;", "Ljava/util/HashMap;"};
+                    for (const char* fname : child_field_names) {
+                        jfieldID child_fid = nullptr;
+                        for (const char* fsig : child_field_sigs) {
+                            child_fid = env->GetFieldID(vm_cls, fname, fsig);
+                            if (env->ExceptionCheck()) {
+                                env->ExceptionClear();
+                                child_fid = nullptr;
+                            }
+                            if (child_fid) break;
+                        }
+                        if (!child_fid) continue;
+                        jobject child_map = env->GetObjectField(vm_obj, child_fid);
+                        if (env->ExceptionCheck() || !child_map) {
+                            env->ExceptionClear();
+                            continue;
+                        }
+                        jobject child_vals = env->CallObjectMethod(child_map, values_mid);
+                        if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                            child_vals = nullptr;
+                        }
+                        if (child_vals) {
+                            jobject child_iter = env->CallObjectMethod(child_vals, iter_mid);
+                            if (env->ExceptionCheck()) {
+                                env->ExceptionClear();
+                                child_iter = nullptr;
+                            }
+                            while (child_iter && env->CallBooleanMethod(child_iter, has_next_mid)) {
+                                jobject child_val = env->CallObjectMethod(child_iter, next_mid);
+                                if (env->ExceptionCheck() || !child_val) {
+                                    env->ExceptionClear();
+                                    continue;
+                                }
+                                if (env->IsInstanceOf(child_val, vm_store_cls)) {
+                                    clear_matching_viewmodels_in_store(
+                                        env, child_val, vm_store_cls, vm_owner_cls, vm_base_cls,
+                                        get_vm_store_mid, vm_clear_mid, map_cls, class_cls, get_name_mid,
+                                        target_vm_names, depth + 1, out_cleared_root, out_cleared_child
+                                    );
+                                } else if (vm_owner_cls && get_vm_store_mid &&
+                                           env->IsInstanceOf(child_val, vm_owner_cls)) {
+                                    jobject nested_store = env->CallObjectMethod(child_val, get_vm_store_mid);
+                                    if (env->ExceptionCheck()) {
+                                        env->ExceptionClear();
+                                        nested_store = nullptr;
+                                    }
+                                    if (nested_store) {
+                                        clear_matching_viewmodels_in_store(
+                                            env, nested_store, vm_store_cls, vm_owner_cls, vm_base_cls,
+                                            get_vm_store_mid, vm_clear_mid, map_cls, class_cls, get_name_mid,
+                                            target_vm_names, depth + 1, out_cleared_root, out_cleared_child
+                                        );
+                                        env->DeleteLocalRef(nested_store);
+                                    }
+                                }
+                                env->DeleteLocalRef(child_val);
+                            }
+                            if (child_iter) env->DeleteLocalRef(child_iter);
+                            env->DeleteLocalRef(child_vals);
+                        }
+                        env->DeleteLocalRef(child_map);
+                    }
+                }
+                if (vm_cls) env->DeleteLocalRef(vm_cls);
+            }
+            if (key_obj) env->DeleteLocalRef(key_obj);
+            if (vm_obj) env->DeleteLocalRef(vm_obj);
+            env->DeleteLocalRef(entry);
+        }
+        if (iter) env->DeleteLocalRef(iter);
+    }
+
+    for (jobject k : keys_to_remove) {
+        if (remove_mid) {
+            jobject removed = env->CallObjectMethod(store_map, remove_mid, k);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (removed) env->DeleteLocalRef(removed);
+        }
+        env->DeleteLocalRef(k);
+    }
+
+    for (jobject v : vms_to_clear) {
+        if (vm_clear_mid) {
+            env->CallVoidMethod(v, vm_clear_mid);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        LOGI("Cleared edited ViewModel instance from ViewModelStore (depth=%d)", depth);
+        env->DeleteLocalRef(v);
+    }
+
+    if (entry_set) env->DeleteLocalRef(entry_set);
+    if (iterable_cls) env->DeleteLocalRef(iterable_cls);
+    if (iterator_cls) env->DeleteLocalRef(iterator_cls);
+    if (entry_cls) env->DeleteLocalRef(entry_cls);
+    env->DeleteLocalRef(store_map);
+}
+
+void check_and_record_viewmodel_candidate(
+    JNIEnv* env,
+    jobject class_loader,
+    jmethodID find_loaded_class_mid,
+    jclass vm_base_cls,
+    const std::string& candidate_name,
+    std::vector<std::string>& edited_vm_names
+) {
+    if (!vm_base_cls || !class_loader || !find_loaded_class_mid || candidate_name.empty()) return;
+    if (contains_str(edited_vm_names, candidate_name)) return;
+    jstring jcand = env->NewStringUTF(candidate_name.c_str());
+    jclass cand_cls = static_cast<jclass>(
+        env->CallObjectMethod(class_loader, find_loaded_class_mid, jcand)
+    );
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        cand_cls = nullptr;
+    }
+    env->DeleteLocalRef(jcand);
+    if (cand_cls) {
+        if (env->IsAssignableFrom(cand_cls, vm_base_cls)) {
+            edited_vm_names.push_back(candidate_name);
+        }
+        env->DeleteLocalRef(cand_cls);
+    }
+}
+
+void collect_edited_viewmodel_names_from_binary_name(
+    JNIEnv* env,
+    jobject class_loader,
+    jmethodID find_loaded_class_mid,
+    jclass vm_base_cls,
+    const std::string& binary_name,
+    std::vector<std::string>& edited_vm_names
+) {
+    if (!vm_base_cls || binary_name.empty()) return;
+    size_t dollar_pos = binary_name.find('$');
+    std::string base_name = (dollar_pos != std::string::npos)
+        ? binary_name.substr(0, dollar_pos)
+        : binary_name;
+    check_and_record_viewmodel_candidate(
+        env, class_loader, find_loaded_class_mid, vm_base_cls, base_name, edited_vm_names
+    );
+    if (base_name.size() > 2 && base_name.compare(base_name.size() - 2, 2, "Kt") == 0) {
+        std::string stem_name = base_name.substr(0, base_name.size() - 2);
+        check_and_record_viewmodel_candidate(
+            env, class_loader, find_loaded_class_mid, vm_base_cls, stem_name, edited_vm_names
+        );
+    }
+}
+
+void clear_edited_viewmodels(
+    JNIEnv* env,
+    jclass activity_thread_cls,
+    jobject class_loader,
+    jmethodID load_class_mid,
+    const std::vector<std::string>& target_vm_names,
+    bool* out_cleared_root,
+    bool* out_cleared_child
+) {
+    if (out_cleared_root) *out_cleared_root = false;
+    if (out_cleared_child) *out_cleared_child = false;
+    if (!activity_thread_cls || !class_loader || !load_class_mid || target_vm_names.empty()) return;
+
+    jclass vm_owner_cls = load_app_class(
+        env, class_loader, load_class_mid, "androidx.lifecycle.ViewModelStoreOwner"
+    );
+    jclass vm_store_cls = load_app_class(
+        env, class_loader, load_class_mid, "androidx.lifecycle.ViewModelStore"
+    );
+    jclass vm_base_cls = load_app_class(
+        env, class_loader, load_class_mid, "androidx.lifecycle.ViewModel"
+    );
+    if (!vm_owner_cls || !vm_store_cls || !vm_base_cls) {
+        if (vm_owner_cls) env->DeleteLocalRef(vm_owner_cls);
+        if (vm_store_cls) env->DeleteLocalRef(vm_store_cls);
+        if (vm_base_cls) env->DeleteLocalRef(vm_base_cls);
+        return;
+    }
+
+    jmethodID get_vm_store_mid = env->GetMethodID(
+        vm_owner_cls, "getViewModelStore", "()Landroidx/lifecycle/ViewModelStore;"
+    );
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    jmethodID vm_clear_mid = nullptr;
+    const char* clear_names[] = {
+        "clear$lifecycle_viewmodel",
+        "clear$lifecycle_viewmodel_release",
+        "clear",
+        "onCleared"
+    };
+    for (const char* cname : clear_names) {
+        vm_clear_mid = env->GetMethodID(vm_base_cls, cname, "()V");
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            vm_clear_mid = nullptr;
+        }
+        if (vm_clear_mid) break;
+    }
+
+    jmethodID current_thread_mid = env->GetStaticMethodID(
+        activity_thread_cls, "currentActivityThread", "()Landroid/app/ActivityThread;"
+    );
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    jobject act_thread = current_thread_mid
+        ? env->CallStaticObjectMethod(activity_thread_cls, current_thread_mid)
+        : nullptr;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        act_thread = nullptr;
+    }
+
+    if (act_thread && get_vm_store_mid) {
+        jfieldID activities_fid = env->GetFieldID(activity_thread_cls, "mActivities", "Landroid/util/ArrayMap;");
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            activities_fid = env->GetFieldID(activity_thread_cls, "mActivities", "Ljava/util/Map;");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        jobject activities_map = activities_fid ? env->GetObjectField(act_thread, activities_fid) : nullptr;
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            activities_map = nullptr;
+        }
+        if (activities_map) {
+            jclass map_cls = env->FindClass("java/util/Map");
+            jclass class_cls = env->FindClass("java/lang/Class");
+            jmethodID get_name_mid = class_cls ? env->GetMethodID(class_cls, "getName", "()Ljava/lang/String;") : nullptr;
+            jmethodID values_mid = map_cls ? env->GetMethodID(map_cls, "values", "()Ljava/util/Collection;") : nullptr;
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            jobject values_col = values_mid ? env->CallObjectMethod(activities_map, values_mid) : nullptr;
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                values_col = nullptr;
+            }
+            if (values_col) {
+                jclass iterable_cls = env->FindClass("java/lang/Iterable");
+                jclass iterator_cls = env->FindClass("java/util/Iterator");
+                jmethodID iter_mid = iterable_cls ? env->GetMethodID(iterable_cls, "iterator", "()Ljava/util/Iterator;") : nullptr;
+                jmethodID has_next_mid = iterator_cls ? env->GetMethodID(iterator_cls, "hasNext", "()Z") : nullptr;
+                jmethodID next_mid = iterator_cls ? env->GetMethodID(iterator_cls, "next", "()Ljava/lang/Object;") : nullptr;
+
+                jobject iter = iter_mid ? env->CallObjectMethod(values_col, iter_mid) : nullptr;
+                while (iter && has_next_mid && env->CallBooleanMethod(iter, has_next_mid)) {
+                    jobject record = env->CallObjectMethod(iter, next_mid);
+                    if (!record) continue;
+                    jclass rec_cls = env->GetObjectClass(record);
+                    jfieldID activity_fid = rec_cls
+                        ? env->GetFieldID(rec_cls, "activity", "Landroid/app/Activity;")
+                        : nullptr;
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    jobject activity_obj = activity_fid ? env->GetObjectField(record, activity_fid) : nullptr;
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        activity_obj = nullptr;
+                    }
+                    if (activity_obj && env->IsInstanceOf(activity_obj, vm_owner_cls)) {
+                        jobject root_store = env->CallObjectMethod(activity_obj, get_vm_store_mid);
+                        if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                            root_store = nullptr;
+                        }
+                        if (root_store) {
+                            clear_matching_viewmodels_in_store(
+                                env, root_store, vm_store_cls, vm_owner_cls, vm_base_cls,
+                                get_vm_store_mid, vm_clear_mid, map_cls, class_cls, get_name_mid,
+                                target_vm_names, 0, out_cleared_root, out_cleared_child
+                            );
+                            env->DeleteLocalRef(root_store);
+                        }
+                    }
+                    if (activity_obj) env->DeleteLocalRef(activity_obj);
+                    if (rec_cls) env->DeleteLocalRef(rec_cls);
+                    env->DeleteLocalRef(record);
+                }
+                if (iter) env->DeleteLocalRef(iter);
+                if (iterable_cls) env->DeleteLocalRef(iterable_cls);
+                if (iterator_cls) env->DeleteLocalRef(iterator_cls);
+                env->DeleteLocalRef(values_col);
+            }
+            if (class_cls) env->DeleteLocalRef(class_cls);
+            if (map_cls) env->DeleteLocalRef(map_cls);
+            env->DeleteLocalRef(activities_map);
+        }
+        env->DeleteLocalRef(act_thread);
+    }
+
+    env->DeleteLocalRef(vm_owner_cls);
+    env->DeleteLocalRef(vm_store_cls);
+    env->DeleteLocalRef(vm_base_cls);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
 } // namespace
 
 extern "C" JNIEXPORT jint JNICALL
@@ -1555,6 +1988,8 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     std::vector<std::string> reinit_clinit_classes;
     std::vector<jint> reset_scope_keys;
     std::vector<std::string> reset_scope_classes;
+    std::vector<jint> changed_scope_keys;
+    std::vector<std::string> invalidate_all_scope_classes;
     std::vector<StaticFieldUpdate> static_field_updates;
 
     std::ifstream manifest_file(manifest_path);
@@ -1585,6 +2020,11 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
             reset_scope_keys.push_back(key);
         } else if (line.rfind("reset_scope_class=", 0) == 0) {
             reset_scope_classes.push_back(line.substr(18));
+        } else if (line.rfind("changed_scope_key=", 0) == 0) {
+            jint ckey = static_cast<jint>(strtol(line.substr(18).c_str(), nullptr, 10));
+            changed_scope_keys.push_back(ckey);
+        } else if (line.rfind("invalidate_all_scopes=", 0) == 0) {
+            invalidate_all_scope_classes.push_back(line.substr(22));
         } else if (line.rfind("static_field=", 0) == 0) {
             std::string raw = line.substr(13);
             size_t p1 = raw.find('|');
@@ -1823,10 +2263,13 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     if (env->ExceptionCheck()) env->ExceptionClear();
     jclass view_base_cls = env->FindClass("android/view/View");
     if (env->ExceptionCheck()) env->ExceptionClear();
+    jclass vm_base_cls = load_app_class(env, class_loader, load_class_mid, "androidx.lifecycle.ViewModel");
+    if (env->ExceptionCheck()) env->ExceptionClear();
 
     bool activity_or_view_edited = false;
     bool has_composable_singleton_edit = false;
     std::vector<std::string> redefined_prefixes;
+    std::vector<std::string> edited_vm_names;
     std::string runtime_error;
 
     // Re-run <clinit> on any redefined ComposableSingletons$ classes or classes with changed
@@ -1841,6 +2284,10 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
             std::string outer_prefix = item.binary_name.substr(0, cs_pos) +
                                        item.binary_name.substr(cs_pos + strlen("ComposableSingletons$"));
             redefined_prefixes.push_back(outer_prefix);
+            if (contains_str(invalidate_all_scope_classes, item.binary_name) &&
+                !contains_str(invalidate_all_scope_classes, outer_prefix)) {
+                invalidate_all_scope_classes.push_back(outer_prefix);
+            }
         } else if (should_reinit) {
             size_t dollar_pos = item.binary_name.find('$');
             if (dollar_pos != std::string::npos) {
@@ -1876,9 +2323,45 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
             (view_base_cls && env->IsAssignableFrom(item.klass, view_base_cls))) {
             activity_or_view_edited = true;
         }
+        if (vm_base_cls) {
+            if (env->IsAssignableFrom(item.klass, vm_base_cls)) {
+                if (!contains_str(edited_vm_names, item.binary_name)) {
+                    edited_vm_names.push_back(item.binary_name);
+                }
+            } else {
+                collect_edited_viewmodel_names_from_binary_name(
+                    env, class_loader, find_loaded_class_mid, vm_base_cls, item.binary_name, edited_vm_names
+                );
+            }
+        }
+    }
+    if (vm_base_cls) {
+        for (const auto& payload : class_payloads) {
+            collect_edited_viewmodel_names_from_binary_name(
+                env, class_loader, find_loaded_class_mid, vm_base_cls, payload.binary_name, edited_vm_names
+            );
+        }
     }
     if (activity_base_cls) env->DeleteLocalRef(activity_base_cls);
     if (view_base_cls) env->DeleteLocalRef(view_base_cls);
+    if (vm_base_cls) env->DeleteLocalRef(vm_base_cls);
+
+    if (!edited_vm_names.empty()) {
+        bool cleared_root_vm = false;
+        bool cleared_child_vm = false;
+        clear_edited_viewmodels(
+            env,
+            activity_thread_cls,
+            class_loader,
+            load_class_mid,
+            edited_vm_names,
+            &cleared_root_vm,
+            &cleared_child_vm
+        );
+        if (cleared_root_vm) {
+            activity_or_view_edited = true;
+        }
+    }
 
     // Apply ConstantValue static field updates
     for (const auto& u : static_field_updates) {
@@ -1922,6 +2405,8 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
         redefined_prefixes,
         reset_scope_keys,
         reset_scope_classes,
+        changed_scope_keys,
+        invalidate_all_scope_classes,
         &matched_compose_scope,
         &initial_change_count
     );

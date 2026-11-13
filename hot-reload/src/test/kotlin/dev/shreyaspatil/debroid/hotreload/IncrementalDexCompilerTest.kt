@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 class IncrementalDexCompilerTest {
@@ -107,6 +108,7 @@ class IncrementalDexCompilerTest {
         every { runner.runCommand(any(), any()) } returns Result.failure(
             RuntimeException(
                 "Task :feature:home:compileDebugKotlin FAILED\n" +
+                    "w: file:///path/to/OtherFile.kt:10:5 Deprecated annotation target warning\n" +
                     "e: file:///path/to/feature/home/src/main/kotlin/HomeScreen.kt:42:17 Unresolved reference 'foo'\n" +
                     "FAILURE: Build failed with an exception."
             )
@@ -270,5 +272,580 @@ class IncrementalDexCompilerTest {
             listOf("com.example.core.CoreKt", "com.example.feature.FeatureKt"),
             reloadedClasses
         )
+    }
+
+    @Test
+    fun `skips interface and LineNumberTable-only siblings and synthesizes DefaultImpls on default method edit`() {
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        val pkgDir = File(appDir, "build/tmp/kotlin-classes/debug/com/example/app").apply { mkdirs() }
+        val vmFile = File(pkgDir, "MainActivityViewModel.class")
+        val ifaceFile = File(pkgDir, "MainActivityUiState.class")
+        val defaultImplsFile = File(pkgDir, "MainActivityUiState\$DefaultImpls.class")
+        val loadingFile = File(pkgDir, "MainActivityUiState\$Loading.class")
+
+        vmFile.writeBytes(buildClassWithLine("com/example/app/MainActivityViewModel", returnConst = 7, line = 10))
+        ifaceFile.writeBytes(
+            buildInterfaceWithDefault("com/example/app/MainActivityUiState", returnConst = 1, line = 20)
+        )
+        defaultImplsFile.writeBytes(
+            buildKotlincCompatibilityDefaultImpls(
+                defaultImplsInternalName = "com/example/app/MainActivityUiState\$DefaultImpls",
+                ifaceInternalName = "com/example/app/MainActivityUiState",
+                line = 20
+            )
+        )
+        loadingFile.writeBytes(
+            buildImplementingCaller(
+                implInternalName = "com/example/app/MainActivityUiState\$Loading",
+                ifaceInternalName = "com/example/app/MainActivityUiState",
+                line = 30
+            )
+        )
+
+        val appModule = GradleModule(":app", appDir, ModuleType.ANDROID_APP)
+        var pass = 0
+        val d8Commands = mutableListOf<List<String>>()
+        val runner = mockk<CommandRunner>()
+        every { runner.runCommand(any(), any()) } answers {
+            val cmd = firstArg<List<String>>()
+            if (cmd.first() == "gradle" || cmd.first().endsWith("gradlew") || cmd.first().endsWith("gradlew.bat")) {
+                pass++
+                if (pass == 1) {
+                    // Pass 1: ViewModel code changes; interface, $DefaultImpls & Loading only shift LineNumberTable!
+                    vmFile.writeBytes(
+                        buildClassWithLine("com/example/app/MainActivityViewModel", returnConst = 42, line = 12)
+                    )
+                    ifaceFile.writeBytes(
+                        buildInterfaceWithDefault("com/example/app/MainActivityUiState", returnConst = 1, line = 28)
+                    )
+                    defaultImplsFile.writeBytes(
+                        buildKotlincCompatibilityDefaultImpls(
+                            defaultImplsInternalName = "com/example/app/MainActivityUiState\$DefaultImpls",
+                            ifaceInternalName = "com/example/app/MainActivityUiState",
+                            line = 28
+                        )
+                    )
+                    loadingFile.writeBytes(
+                        buildImplementingCaller(
+                            implInternalName = "com/example/app/MainActivityUiState\$Loading",
+                            ifaceInternalName = "com/example/app/MainActivityUiState",
+                            line = 38
+                        )
+                    )
+                } else if (pass == 2) {
+                    // Pass 2: Interface default method body changes, kotlinc also regenerates $jd DefaultImpls!
+                    ifaceFile.writeBytes(
+                        buildInterfaceWithDefault("com/example/app/MainActivityUiState", returnConst = 99, line = 28)
+                    )
+                    defaultImplsFile.writeBytes(
+                        buildKotlincCompatibilityDefaultImpls(
+                            defaultImplsInternalName = "com/example/app/MainActivityUiState\$DefaultImpls",
+                            ifaceInternalName = "com/example/app/MainActivityUiState",
+                            line = 29
+                        )
+                    )
+                } else if (pass == 3) {
+                    // Pass 3: ViewModel edited again; kotlinc regenerates interface & $jd DefaultImpls with new lines!
+                    // Regression check: must NOT revert MainActivityUiState$DefaultImpls back to kotlinc's $jd bridge!
+                    vmFile.writeBytes(
+                        buildClassWithLine("com/example/app/MainActivityViewModel", returnConst = 77, line = 15)
+                    )
+                    ifaceFile.writeBytes(
+                        buildInterfaceWithDefault("com/example/app/MainActivityUiState", returnConst = 99, line = 35)
+                    )
+                    defaultImplsFile.writeBytes(
+                        buildKotlincCompatibilityDefaultImpls(
+                            defaultImplsInternalName = "com/example/app/MainActivityUiState\$DefaultImpls",
+                            ifaceInternalName = "com/example/app/MainActivityUiState",
+                            line = 35
+                        )
+                    )
+                    loadingFile.writeBytes(
+                        buildImplementingCaller(
+                            implInternalName = "com/example/app/MainActivityUiState\$Loading",
+                            ifaceInternalName = "com/example/app/MainActivityUiState",
+                            line = 45
+                        )
+                    )
+                }
+                Result.success("BUILD SUCCESSFUL")
+            } else if (cmd.first() == "/mock/d8") {
+                d8Commands.add(cmd)
+                val outIdx = cmd.indexOf("--output")
+                val outDir = File(cmd[outIdx + 1]).apply { mkdirs() }
+                if ("--file-per-class" in cmd) {
+                    for (arg in cmd.filter { it.endsWith(".class") }) {
+                        val fileName = File(arg).name.removeSuffix(".class").replace(Regex("^\\d+_"), "")
+                        File(outDir, "com/example/app/$fileName.dex").apply {
+                            parentFile.mkdirs()
+                            writeBytes(byteArrayOf(0x64, 0x65, 0x78))
+                        }
+                    }
+                } else {
+                    File(outDir, "classes.dex").writeBytes(byteArrayOf(0x64, 0x65, 0x78))
+                }
+                Result.success("")
+            } else {
+                Result.failure(RuntimeException("Unexpected command: $cmd"))
+            }
+        }
+
+        val compiler = IncrementalDexCompiler(
+            projectRoot = tempDir,
+            variant = "debug",
+            commandRunner = runner,
+            d8PathProvider = { "/mock/d8" }
+        )
+        compiler.snapshotModuleClasses(listOf(appModule))
+
+        val sourceFile = File(appDir, "src/main/kotlin/com/example/app/MainActivityViewModel.kt")
+        val pass1Outcome = compiler.compileAndDex(
+            mapOf(appModule to listOf(sourceFile)),
+            File(tempDir, "staging1")
+        )
+        assertTrue(pass1Outcome is CompilationOutcome.Success)
+        val pass1Success = pass1Outcome as CompilationOutcome.Success
+        assertEquals(
+            listOf("com.example.app.MainActivityViewModel"),
+            pass1Success.classPayloads.map { it.className }
+        )
+
+        d8Commands.clear()
+        val pass2Outcome = compiler.compileAndDex(
+            mapOf(appModule to listOf(sourceFile)),
+            File(tempDir, "staging2")
+        )
+        assertTrue(pass2Outcome is CompilationOutcome.Success)
+        val pass2Success = pass2Outcome as CompilationOutcome.Success
+        val pass2Classes = pass2Success.classPayloads.map { it.className }.sorted()
+        assertFalse("com.example.app.MainActivityUiState" in pass2Classes)
+        assertEquals(
+            listOf(
+                "com.example.app.MainActivityUiState\$DefaultImpls",
+                "com.example.app.MainActivityUiState\$Loading"
+            ),
+            pass2Classes
+        )
+        // Verify buildCombinedDex merges per-class .dex files instead of re-compiling .class files
+        val combinedD8Cmd = d8Commands.last()
+        assertTrue(combinedD8Cmd.filter { it.endsWith(".dex") }.size == 2)
+        assertTrue(combinedD8Cmd.none { it.endsWith(".class") })
+
+        // Pass 3: Editing ViewModel again must NOT revert $DefaultImpls to kotlinc's $jd bridge
+        val pass3Outcome = compiler.compileAndDex(
+            mapOf(appModule to listOf(sourceFile)),
+            File(tempDir, "staging3")
+        )
+        assertTrue(pass3Outcome is CompilationOutcome.Success)
+        val pass3Success = pass3Outcome as CompilationOutcome.Success
+        assertEquals(
+            listOf("com.example.app.MainActivityViewModel"),
+            pass3Success.classPayloads.map { it.className }
+        )
+    }
+
+    @Test
+    fun `preserves removed method stubs without breaking subsequent line-shift skipping`() {
+        val coreDir = File(tempDir, "core").apply { mkdirs() }
+        val corePkg = File(coreDir, "build/classes/kotlin/main/com/example/core").apply { mkdirs() }
+        val helperFile = File(corePkg, "Helper.class")
+        helperFile.writeBytes(
+            buildClassWithMethods(
+                internalName = "com/example/core/Helper",
+                methodNames = listOf("keep", "removedHelper"),
+                line = 10
+            )
+        )
+
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        val appPkg = File(appDir, "build/tmp/kotlin-classes/debug/com/example/app").apply { mkdirs() }
+        File(appPkg, "App.class").writeBytes(buildClassWithLine("com/example/app/App", returnConst = 1, line = 10))
+
+        val coreModule = GradleModule(":core", coreDir, ModuleType.KOTLIN_JVM)
+        val appModule = GradleModule(":app", appDir, ModuleType.ANDROID_APP, dependencies = setOf(":core"))
+
+        var pass = 0
+        val gradleCommands = mutableListOf<List<String>>()
+        val runner = mockk<CommandRunner>()
+        every { runner.runCommand(any(), any()) } answers {
+            val cmd = firstArg<List<String>>()
+            if (cmd.first() == "gradle" || cmd.first().endsWith("gradlew") || cmd.first().endsWith("gradlew.bat")) {
+                gradleCommands.add(cmd)
+                if (":core:compileKotlin" in cmd) {
+                    pass++
+                    if (pass == 1) {
+                        // Pass 1: remove removedHelper() -> triggers cross-module compile + cumulative stub recording
+                        helperFile.writeBytes(
+                            buildClassWithMethods("com/example/core/Helper", listOf("keep"), line = 10)
+                        )
+                    } else if (pass == 2) {
+                        // Pass 2: only LineNumberTable shifts on Helper -> must skip completely!
+                        helperFile.writeBytes(
+                            buildClassWithMethods("com/example/core/Helper", listOf("keep"), line = 24)
+                        )
+                    }
+                }
+                Result.success("BUILD SUCCESSFUL")
+            } else if (cmd.first() == "/mock/d8") {
+                val outIdx = cmd.indexOf("--output")
+                val outDir = File(cmd[outIdx + 1]).apply { mkdirs() }
+                File(outDir, "classes.dex").writeBytes(byteArrayOf(0x64, 0x65, 0x78))
+                Result.success("")
+            } else {
+                Result.failure(RuntimeException("Unexpected command: $cmd"))
+            }
+        }
+
+        val compiler = IncrementalDexCompiler(
+            projectRoot = tempDir,
+            variant = "debug",
+            commandRunner = runner,
+            d8PathProvider = { "/mock/d8" }
+        )
+        compiler.snapshotModuleClasses(listOf(coreModule, appModule))
+
+        val coreSrc = File(coreDir, "src/main/kotlin/com/example/core/Helper.kt")
+        val pass1 = compiler.compileAndDex(mapOf(coreModule to listOf(coreSrc)), File(tempDir, "s1"))
+        assertTrue(pass1 is CompilationOutcome.Success)
+        assertEquals(2, gradleCommands.size) // :core + dependent :app
+
+        gradleCommands.clear()
+        val pass2 = compiler.compileAndDex(mapOf(coreModule to listOf(coreSrc)), File(tempDir, "s2"))
+        assertTrue(pass2 is CompilationOutcome.Success)
+        assertTrue((pass2 as CompilationOutcome.Success).classPayloads.isEmpty())
+        assertEquals(1, gradleCommands.size) // Only :core ran; :app was NOT spuriously recompiled!
+    }
+
+    private fun buildClassWithLine(internalName: String, returnConst: Int, line: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        val utf8s = listOf(internalName, "java/lang/Object", "Code", "LineNumberTable", "compute", "()I")
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(9)
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1)
+        out.write(7)
+        u2(2)
+        u2(0x0021)
+        u2(7)
+        u2(8)
+        u2(0)
+        u2(0)
+        u2(1)
+        u2(0x0009)
+        u2(5)
+        u2(6)
+        u2(1)
+        val codeBytes = byteArrayOf(0x10, returnConst.toByte(), 0xAC.toByte())
+        u2(3)
+        u4(12 + codeBytes.size + 12)
+        u2(1)
+        u2(0)
+        u4(codeBytes.size)
+        out.write(codeBytes)
+        u2(0)
+        u2(1)
+        u2(4)
+        u4(6)
+        u2(1)
+        u2(0)
+        u2(line)
+        u2(0)
+        return out.toByteArray()
+    }
+
+    private fun buildInterfaceWithDefault(ifaceInternalName: String, returnConst: Int, line: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        val utf8s = listOf(
+            ifaceInternalName,
+            "java/lang/Object",
+            "Code",
+            "LineNumberTable",
+            "shouldKeepSplashScreen",
+            "()I"
+        )
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(9)
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1)
+        out.write(7)
+        u2(2)
+        u2(0x0601)
+        u2(7)
+        u2(8)
+        u2(0)
+        u2(0)
+        u2(1)
+        u2(0x0001)
+        u2(5)
+        u2(6)
+        u2(1)
+        val codeBytes = byteArrayOf(0x10, returnConst.toByte(), 0xAC.toByte())
+        u2(3)
+        u4(12 + codeBytes.size + 12)
+        u2(1)
+        u2(1)
+        u4(codeBytes.size)
+        out.write(codeBytes)
+        u2(0)
+        u2(1)
+        u2(4)
+        u4(6)
+        u2(1)
+        u2(0)
+        u2(line)
+        u2(0)
+        return out.toByteArray()
+    }
+
+    private fun buildImplementingCaller(
+        implInternalName: String,
+        ifaceInternalName: String,
+        line: Int
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        val utf8s = listOf(
+            implInternalName, // 1
+            "java/lang/Object", // 2
+            ifaceInternalName, // 3
+            "Code", // 4
+            "LineNumberTable", // 5
+            "shouldKeepSplashScreen", // 6
+            "()I" // 7
+        )
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(13)
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1) // #8 impl
+        out.write(7)
+        u2(2) // #9 Object
+        out.write(7)
+        u2(3) // #10 iface
+        out.write(12)
+        u2(6)
+        u2(7) // #11 NameAndType
+        out.write(11)
+        u2(10)
+        u2(11) // #12 InterfaceMethodref
+        u2(0x0021)
+        u2(8)
+        u2(9)
+        u2(1)
+        u2(10)
+        u2(0)
+        u2(1)
+        u2(0x0001)
+        u2(6)
+        u2(7)
+        u2(1)
+        val bridgeCode = byteArrayOf(0x2A, 0xB7.toByte(), 0x00, 12, 0xAC.toByte())
+        u2(4)
+        u4(12 + bridgeCode.size + 12)
+        u2(1)
+        u2(1)
+        u4(bridgeCode.size)
+        out.write(bridgeCode)
+        u2(0)
+        u2(1)
+        u2(5)
+        u4(6)
+        u2(1)
+        u2(0)
+        u2(line)
+        u2(0)
+        return out.toByteArray()
+    }
+
+    private fun buildKotlincCompatibilityDefaultImpls(
+        defaultImplsInternalName: String,
+        ifaceInternalName: String,
+        line: Int
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        val staticDesc = "(L$ifaceInternalName;)I"
+        val utf8s = listOf(
+            defaultImplsInternalName, // 1
+            "java/lang/Object", // 2
+            ifaceInternalName, // 3
+            "Code", // 4
+            "LineNumberTable", // 5
+            "shouldKeepSplashScreen", // 6
+            staticDesc, // 7
+            "access\$shouldKeepSplashScreen\$jd" // 8
+        )
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(14)
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1) // #9 DefaultImpls
+        out.write(7)
+        u2(2) // #10 Object
+        out.write(7)
+        u2(3) // #11 iface
+        out.write(12)
+        u2(8)
+        u2(7) // #12 NameAndType access$shouldKeepSplashScreen$jd:(Liface;)I
+        out.write(11)
+        u2(11)
+        u2(12) // #13 InterfaceMethodref iface.access$shouldKeepSplashScreen$jd
+        u2(0x0031) // ACC_PUBLIC | ACC_FINAL | ACC_SUPER
+        u2(9)
+        u2(10)
+        u2(0)
+        u2(0)
+        u2(1)
+        u2(0x0009) // public static
+        u2(6)
+        u2(7)
+        u2(1)
+        val jdDelegateCode = byteArrayOf(0x2A, 0xB8.toByte(), 0x00, 13, 0xAC.toByte())
+        u2(4)
+        u4(12 + jdDelegateCode.size + 12)
+        u2(1)
+        u2(1)
+        u4(jdDelegateCode.size)
+        out.write(jdDelegateCode)
+        u2(0)
+        u2(1)
+        u2(5)
+        u4(6)
+        u2(1)
+        u2(0)
+        u2(line)
+        u2(0)
+        return out.toByteArray()
+    }
+
+    private fun buildClassWithMethods(
+        internalName: String,
+        methodNames: List<String>,
+        line: Int
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun u2(v: Int) {
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        fun u4(v: Int) {
+            out.write((v ushr 24) and 0xFF)
+            out.write((v ushr 16) and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+            out.write(v and 0xFF)
+        }
+        val utf8s = listOf(internalName, "java/lang/Object", "Code", "LineNumberTable", "()I") + methodNames
+        val thisClsSlot = utf8s.size + 1
+        val superClsSlot = utf8s.size + 2
+        u4(0xCAFEBABE.toInt())
+        u2(0)
+        u2(52)
+        u2(utf8s.size + 3)
+        for (s in utf8s) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            out.write(1)
+            u2(b.size)
+            out.write(b)
+        }
+        out.write(7)
+        u2(1)
+        out.write(7)
+        u2(2)
+        u2(0x0021)
+        u2(thisClsSlot)
+        u2(superClsSlot)
+        u2(0)
+        u2(0)
+        u2(methodNames.size)
+        for ((idx, _) in methodNames.withIndex()) {
+            u2(0x0009) // public static
+            u2(6 + idx)
+            u2(5) // ()I
+            u2(1)
+            val code = byteArrayOf(0x04, 0xAC.toByte())
+            u2(3)
+            u4(12 + code.size + 12)
+            u2(1)
+            u2(0)
+            u4(code.size)
+            out.write(code)
+            u2(0)
+            u2(1)
+            u2(4)
+            u4(6)
+            u2(1)
+            u2(0)
+            u2(line + idx)
+        }
+        u2(0)
+        return out.toByteArray()
     }
 }

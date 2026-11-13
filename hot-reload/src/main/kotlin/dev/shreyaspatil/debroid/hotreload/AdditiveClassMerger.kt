@@ -205,6 +205,12 @@ object AdditiveClassMerger {
     internal fun parseAllDexClasses(dexBytes: ByteArray): Map<String, DexClassMembers> =
         DexMemberParser.parseAllClasses(dexBytes)
 
+    internal fun extractClassMembers(classBytes: ByteArray): DexClassMembers? {
+        val parsed = runCatching { parseClass(classBytes) }.getOrNull() ?: return null
+        val methods = parsed.methods.members.map { normalizeLambdaStubFlags(it) }
+        return DexClassMembers(fields = parsed.fields.members, methods = methods)
+    }
+
     private fun normalizeLambdaStubFlags(method: MemberSignature): MemberSignature {
         val isComposableSingletonLambda = method.name.startsWith("lambda_") && method.name.contains("\$lambda\$")
         val isPrivateSynthetic = (method.accessFlags and (ACC_PRIVATE or ACC_SYNTHETIC)) ==

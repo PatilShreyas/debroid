@@ -35,6 +35,8 @@ data class ClassDexPayload(
     val reinitClinit: Boolean = false,
     val resetScopeKeys: Set<Int> = emptySet(),
     val resetScope: Boolean = false,
+    val changedScopeKeys: Set<Int> = emptySet(),
+    val invalidateAllClassScopes: Boolean = true,
     val staticFieldUpdates: List<StaticFieldUpdate> = emptyList()
 )
 

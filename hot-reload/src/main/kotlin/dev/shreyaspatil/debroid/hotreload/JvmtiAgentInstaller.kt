@@ -138,42 +138,42 @@ class JvmtiAgentInstaller(
         val manifestFile = File(hostTempDir, "manifest.txt")
         manifestFile.writeText(manifestLines.joinToString("\n") + "\n")
 
-        adbManager.runShell("rm", "-rf", remoteTmpDir)
-        adbManager.runShell("mkdir", "-p", remoteTmpDir)
+        adbManager.runShell("rm -rf $remoteTmpDir && mkdir -p $remoteTmpDir")
 
         val filesToPush = hostTempDir.listFiles().orEmpty().sortedBy { it.name }
         val pushError = pushStagedFiles(hostTempDir, filesToPush, remoteTmpDir)
         if (pushError != null) return pushError
 
-        adbManager.runShell("chmod", "-R", "755", remoteTmpDir)
+        val stageCommands = mutableListOf<String>()
         if (includeAgentBinary) {
-            adbManager.runAs(appId, "mkdir", "-p", appAgentDir)
+            stageCommands.add("mkdir -p $appAgentDir")
         }
-
-        val pathsToRemove = buildList {
+        val rmTargets = buildList {
             add("$appAgentDir/result.txt")
             filesToPush.forEach { add("$appAgentDir/${it.name}") }
-        }.toTypedArray()
-        adbManager.runAs(appId, "rm", "-f", *pathsToRemove)
+        }.joinToString(" ")
+        stageCommands.add("rm -f $rmTargets")
 
-        val remoteSources = filesToPush.map { "$remoteTmpDir/${it.name}" }.toTypedArray()
-        val cpRes = adbManager.runAs(appId, "cp", *remoteSources, "$appAgentDir/")
-        if (cpRes.isFailure) {
-            return AgentExecutionResult.Error(
-                "RUN_AS_COPY_FAILED",
-                "Failed to copy staged payload into app code_cache: ${cpRes.exceptionOrNull()?.message}"
-            )
-        }
+        val cpSources = filesToPush.joinToString(" ") { "$remoteTmpDir/${it.name}" }
+        stageCommands.add("cp $cpSources $appAgentDir/")
 
         val dexTargets = filesToPush
             .filter { it.extension == "dex" }
-            .map { "$appAgentDir/${it.name}" }
-            .toTypedArray()
+            .joinToString(" ") { "$appAgentDir/${it.name}" }
         if (dexTargets.isNotEmpty()) {
-            adbManager.runAs(appId, "chmod", "400", *dexTargets)
+            stageCommands.add("chmod 400 $dexTargets")
         }
         if (includeAgentBinary) {
-            adbManager.runAs(appId, "chmod", "700", "$appAgentDir/$AGENT_FILENAME")
+            stageCommands.add("chmod 700 $appAgentDir/$AGENT_FILENAME")
+        }
+
+        val innerScript = stageCommands.joinToString(" && ")
+        val stageRes = adbManager.runShell("chmod -R 755 $remoteTmpDir && run-as $appId sh -c '$innerScript'")
+        if (stageRes.isFailure) {
+            return AgentExecutionResult.Error(
+                "RUN_AS_COPY_FAILED",
+                "Failed to copy staged payload into app code_cache: ${stageRes.exceptionOrNull()?.message}"
+            )
         }
         return null
     }
@@ -182,6 +182,7 @@ class JvmtiAgentInstaller(
         payload: ClassDexPayload,
         manifestLines: MutableList<String>
     ) {
+        if (payload.className.contains(SYNTHETIC_MARKER_PREFIX)) return
         if (payload.reinitClinit) {
             manifestLines.add("reinit_clinit=${payload.className}")
         }
@@ -190,6 +191,12 @@ class JvmtiAgentInstaller(
         }
         if (payload.resetScope) {
             manifestLines.add("reset_scope_class=${payload.className}")
+        }
+        for (changedKey in payload.changedScopeKeys) {
+            manifestLines.add("changed_scope_key=$changedKey")
+        }
+        if (payload.invalidateAllClassScopes) {
+            manifestLines.add("invalidate_all_scopes=${payload.className}")
         }
         for (update in payload.staticFieldUpdates) {
             manifestLines.add(
@@ -220,13 +227,13 @@ class JvmtiAgentInstaller(
     }
 
     private fun pollAgentResult(appId: String, remoteResultPath: String): AgentExecutionResult {
-        repeat(RESULT_POLL_ATTEMPTS) {
-            val catRes = adbManager.runAs(appId, "cat", remoteResultPath)
-            val text = catRes.getOrNull()?.trim().orEmpty()
-            if (text.isNotEmpty() && !text.contains("No such file")) {
-                return parseResultLine(text)
-            }
-            Thread.sleep(RESULT_POLL_SLEEP_MS)
+        val waitScript = "i=0; while [ \$i -lt $RESULT_POLL_ATTEMPTS ]; do " +
+            "if [ -s $remoteResultPath ]; then cat $remoteResultPath; exit 0; fi; " +
+            "sleep 0.015; i=\$((i+1)); done; exit 0"
+        val waitRes = adbManager.runShell("run-as $appId sh -c '$waitScript'")
+        val waitedText = waitRes.getOrNull()?.trim().orEmpty()
+        if (waitedText.isNotEmpty() && !waitedText.contains("No such file")) {
+            return parseResultLine(waitedText)
         }
         return AgentExecutionResult.Error(
             "AGENT_TIMEOUT",

@@ -40,6 +40,7 @@ import dev.shreyaspatil.debroid.cli.models.JsonSchemaGenerator
 import dev.shreyaspatil.debroid.cli.update.AutoUpdateManager
 import dev.shreyaspatil.debroid.hotreload.HotReloadConfig
 import dev.shreyaspatil.debroid.hotreload.HotReloadSession
+import dev.shreyaspatil.debroid.hotreload.HotReloadSyncCoordinator
 import dev.shreyaspatil.debroid.models.StepAction
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
@@ -677,7 +678,7 @@ object CliRunner {
     }
 
     class HotReloadCommand(
-        private val sessionFactory: (HotReloadConfig) -> HotReloadSession = { HotReloadSession(it) }
+        private val sessionFactory: ((HotReloadConfig) -> HotReloadSession)? = null
     ) : CliktCommand(
         name = "hot-reload",
         help = "Watches project source files and automatically hot-reloads Kotlin/Java and Compose UI changes " +
@@ -721,7 +722,14 @@ object CliRunner {
                 once = once,
                 allowFallback = !noFallback
             )
-            val session = sessionFactory(config)
+            if (once && sessionFactory == null) {
+                val synced = HotReloadSyncCoordinator.trySyncWithRunningWatcher(config) { line ->
+                    println(line)
+                    System.out.flush()
+                }
+                if (synced) return
+            }
+            val session = sessionFactory?.invoke(config) ?: HotReloadSession(config)
             Runtime.getRuntime().addShutdownHook(Thread { session.stop() })
             session.run { event ->
                 println(event.formatPlainText())

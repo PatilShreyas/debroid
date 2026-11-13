@@ -31,13 +31,13 @@ class JvmtiAgentInstallerTest {
             runner.runCommand(match { it.contains("ro.product.cpu.abi") }, any())
         } returns Result.success("arm64-v8a\n")
         every { runner.runCommand(match { it.contains("push") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("mkdir") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("cp") }, any()) } returns Result.success("")
+        every {
+            runner.runCommand(match { it.any { arg -> arg.contains("mkdir -p") || arg.contains("cp ") } }, any())
+        } returns Result.success("")
         every { runner.runCommand(match { it.contains("chmod") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("rm") }, any()) } returns Result.success("")
         every { runner.runCommand(match { it.contains("attach-agent") }, any()) } returns Result.success("")
         every {
-            runner.runCommand(match { it.contains("cat") && it.last().endsWith("result.txt") }, any())
+            runner.runCommand(match { it.any { arg -> arg.contains("result.txt") && arg.contains("while") } }, any())
         } returns Result.success("status=OK mode=JVMTI_HOT_SWAP redefined=2 new=1 ui=COMPOSE_HOT_RELOAD\n")
 
         val adbManager = AdbManager(adbPath = "adb", commandRunner = runner)
@@ -67,13 +67,13 @@ class JvmtiAgentInstallerTest {
             runner.runCommand(match { it.contains("ro.product.cpu.abi") }, any())
         } returns Result.success("x86_64\n")
         every { runner.runCommand(match { it.contains("push") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("mkdir") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("cp") }, any()) } returns Result.success("")
+        every {
+            runner.runCommand(match { it.any { arg -> arg.contains("mkdir -p") || arg.contains("cp ") } }, any())
+        } returns Result.success("")
         every { runner.runCommand(match { it.contains("chmod") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("rm") }, any()) } returns Result.success("")
         every { runner.runCommand(match { it.contains("attach-agent") }, any()) } returns Result.success("")
         every {
-            runner.runCommand(match { it.contains("cat") && it.last().endsWith("result.txt") }, any())
+            runner.runCommand(match { it.any { arg -> arg.contains("result.txt") && arg.contains("while") } }, any())
         } returns Result.success("status=STRUCTURAL_INCOMPATIBLE reason=JVMTI_ERROR_63\n")
 
         val adbManager = AdbManager(adbPath = "adb", commandRunner = runner)
@@ -97,8 +97,9 @@ class JvmtiAgentInstallerTest {
         every {
             runner.runCommand(match { it.contains("ro.product.cpu.abi") }, any())
         } returns Result.success("arm64-v8a\n")
-        every { runner.runCommand(match { it.contains("mkdir") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("rm") }, any()) } returns Result.success("")
+        every {
+            runner.runCommand(match { it.any { arg -> arg.contains("mkdir -p") } }, any())
+        } returns Result.success("")
         every {
             runner.runCommand(match { it.contains("push") }, any())
         } returns Result.failure(Exception("device offline"))
@@ -124,11 +125,12 @@ class JvmtiAgentInstallerTest {
             runner.runCommand(match { it.contains("ro.product.cpu.abi") }, any())
         } returns Result.success("arm64-v8a\n")
         every { runner.runCommand(match { it.contains("push") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("mkdir") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("chmod") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("rm") }, any()) } returns Result.success("")
         every {
-            runner.runCommand(match { it.contains("cp") }, any())
+            runner.runCommand(match { it.any { arg -> arg.contains("mkdir -p") && !arg.contains("cp ") } }, any())
+        } returns Result.success("")
+        every { runner.runCommand(match { it.contains("chmod") }, any()) } returns Result.success("")
+        every {
+            runner.runCommand(match { it.any { arg -> arg.contains("cp ") } }, any())
         } returns Result.failure(Exception("Permission denied"))
 
         val adbManager = AdbManager(adbPath = "adb", commandRunner = runner)
@@ -152,10 +154,10 @@ class JvmtiAgentInstallerTest {
             runner.runCommand(match { it.contains("ro.product.cpu.abi") }, any())
         } returns Result.success("arm64-v8a\n")
         every { runner.runCommand(match { it.contains("push") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("mkdir") }, any()) } returns Result.success("")
+        every {
+            runner.runCommand(match { it.any { arg -> arg.contains("mkdir -p") || arg.contains("cp ") } }, any())
+        } returns Result.success("")
         every { runner.runCommand(match { it.contains("chmod") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("rm") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("cp") }, any()) } returns Result.success("")
         every {
             runner.runCommand(match { it.contains("attach-agent") }, any())
         } returns Result.failure(Exception("attach error"))
@@ -181,14 +183,14 @@ class JvmtiAgentInstallerTest {
             runner.runCommand(match { it.contains("ro.product.cpu.abi") }, any())
         } returns Result.success("arm64-v8a\n")
         every { runner.runCommand(match { it.contains("push") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("mkdir") }, any()) } returns Result.success("")
+        every {
+            runner.runCommand(match { it.any { arg -> arg.contains("mkdir -p") || arg.contains("cp ") } }, any())
+        } returns Result.success("")
         every { runner.runCommand(match { it.contains("chmod") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("rm") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("cp") }, any()) } returns Result.success("")
         every { runner.runCommand(match { it.contains("attach-agent") }, any()) } returns Result.success("")
         every {
-            runner.runCommand(match { it.contains("cat") && it.last().endsWith("result.txt") }, any())
-        } returns Result.success("cat: /data/data/com.example.app/code_cache/debroid_hr/result.txt: No such file")
+            runner.runCommand(match { it.any { arg -> arg.contains("result.txt") && arg.contains("while") } }, any())
+        } returns Result.success("")
 
         val adbManager = AdbManager(adbPath = "adb", commandRunner = runner)
         val installer = JvmtiAgentInstaller(adbManager)
@@ -275,13 +277,13 @@ class JvmtiAgentInstallerTest {
             }
             Result.success("")
         }
-        every { runner.runCommand(match { it.contains("mkdir") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("cp") }, any()) } returns Result.success("")
+        every {
+            runner.runCommand(match { it.any { arg -> arg.contains("mkdir -p") || arg.contains("cp ") } }, any())
+        } returns Result.success("")
         every { runner.runCommand(match { it.contains("chmod") }, any()) } returns Result.success("")
-        every { runner.runCommand(match { it.contains("rm") }, any()) } returns Result.success("")
         every { runner.runCommand(match { it.contains("attach-agent") }, any()) } returns Result.success("")
         every {
-            runner.runCommand(match { it.contains("cat") && it.last().endsWith("result.txt") }, any())
+            runner.runCommand(match { it.any { arg -> arg.contains("result.txt") && arg.contains("while") } }, any())
         } returns Result.success("status=OK mode=JVMTI_HOT_SWAP redefined=1 new=0 ui=COMPOSE_HOT_RELOAD\n")
 
         val adbManager = AdbManager(adbPath = "adb", commandRunner = runner)

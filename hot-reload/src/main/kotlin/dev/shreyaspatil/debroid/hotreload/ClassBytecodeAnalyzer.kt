@@ -2,6 +2,7 @@ package dev.shreyaspatil.debroid.hotreload
 
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.util.IdentityHashMap
 import java.util.Locale
 
 @Suppress(
@@ -17,7 +18,9 @@ import java.util.Locale
 internal object ClassBytecodeAnalyzer {
     data class ComposeRememberDiff(
         val resetScopeKeys: Set<Int> = emptySet(),
-        val resetAllClassScopes: Boolean = false
+        val resetAllClassScopes: Boolean = false,
+        val changedScopeKeys: Set<Int> = emptySet(),
+        val invalidateAllClassScopes: Boolean = true
     )
 
     data class StaticFieldDiffResult(
@@ -47,17 +50,34 @@ internal object ClassBytecodeAnalyzer {
     private const val CP_TAG_MODULE = 19
     private const val CP_TAG_PACKAGE = 20
 
+    private const val ACC_PUBLIC = 0x0001
     private const val ACC_PRIVATE = 0x0002
     private const val ACC_STATIC = 0x0008
+    private const val ACC_FINAL = 0x0010
+    private const val ACC_SUPER = 0x0020
+    private const val ACC_INTERFACE = 0x0200
+    private const val ACC_ABSTRACT = 0x0400
     private const val ACC_SYNTHETIC = 0x1000
 
     private const val COMPOSER_DESC = "Landroidx/compose/runtime/Composer;"
     private const val COMPOSER_OWNER = "androidx/compose/runtime/Composer"
+    private const val COMPOSER_KT_OWNER = "androidx/compose/runtime/ComposerKt"
     private const val COMPOSABLE_LAMBDA_KT = "androidx/compose/runtime/internal/ComposableLambdaKt"
+    private const val MH_REF_INVOKE_STATIC = 6
     private val anonymousClassSuffixRegex = Regex("""\$\d+""")
     private val hiltAnnotations = setOf(
         "Ldagger/hilt/android/AndroidEntryPoint;",
         "Ldagger/hilt/android/HiltAndroidApp;"
+    )
+    private val ignoredDebugAnnotations = setOf(
+        "Lkotlin/Metadata;",
+        "Lkotlin/coroutines/jvm/internal/DebugMetadata;",
+        "Lkotlin/jvm/internal/SourceDebugExtension;"
+    )
+    private val composeSourceInfoMethods = setOf(
+        "sourceInformation",
+        "sourceInformationMarkerStart",
+        "traceEventStart"
     )
     private val composableLambdaFactories = setOf(
         "rememberComposableLambda",
@@ -69,18 +89,24 @@ internal object ClassBytecodeAnalyzer {
         val accessFlags: Int,
         val name: String,
         val descriptor: String,
-        val constantValue: String?
+        val constantValue: String?,
+        val visibleAnnotationsSig: String = ""
     )
 
     private class ParsedMethod(
         val accessFlags: Int,
         val name: String,
         val descriptor: String,
+        val nameCpIdx: Int = 0,
         val codeBytes: ByteArray?,
         val codeOffsetInClass: Int,
+        val codeAttrStartOffset: Int = -1,
+        val codeAttrEndOffset: Int = -1,
         val hasInlineMarker: Boolean,
         val hasStackMapTable: Boolean,
-        val exceptionRanges: List<IntRange>
+        val exceptionRanges: List<IntRange>,
+        val exceptionTableSig: String = "",
+        val visibleAnnotationsSig: String = ""
     )
 
     private class DetailedClass(
@@ -104,7 +130,13 @@ internal object ClassBytecodeAnalyzer {
         val interfaces: List<String>,
         val fields: List<ParsedField>,
         val methods: List<ParsedMethod>,
+        val methodsCountOffset: Int = -1,
+        val methodsEndOffset: Int = -1,
         val bootstrapTargets: Map<Int, Pair<String, String>>,
+        val bootstrapArgsSummary: Map<Int, String> = emptyMap(),
+        val bootstrapAttrStartOffset: Int = -1,
+        val bootstrapAttrEndOffset: Int = -1,
+        val visibleAnnotationsSig: String = "",
         val hasHiltAnnotation: Boolean
     ) {
         fun resolveClassName(cpIdx: Int): String {
@@ -273,6 +305,617 @@ internal object ClassBytecodeAnalyzer {
         return true
     }
 
+    fun hasExecutableBytecodeChange(previousBytes: ByteArray?, currentBytes: ByteArray): Boolean {
+        if (previousBytes == null) return true
+        if (previousBytes.contentEquals(currentBytes)) return false
+        val prev = runCatching { parseDetailedClass(previousBytes) }.getOrNull() ?: return true
+        val curr = runCatching { parseDetailedClass(currentBytes) }.getOrNull() ?: return true
+
+        if (prev.accessFlags != curr.accessFlags ||
+            prev.thisInternalName != curr.thisInternalName ||
+            prev.superInternalName != curr.superInternalName ||
+            prev.interfaces != curr.interfaces ||
+            prev.visibleAnnotationsSig != curr.visibleAnnotationsSig
+        ) {
+            return true
+        }
+
+        val prevFields = prev.fields.map {
+            listOf(it.accessFlags, it.name, it.descriptor, it.constantValue, it.visibleAnnotationsSig)
+        }
+        val currFields = curr.fields.map {
+            listOf(it.accessFlags, it.name, it.descriptor, it.constantValue, it.visibleAnnotationsSig)
+        }
+        if (prevFields != currFields) return true
+
+        if (prev.methods.size != curr.methods.size) return true
+        val prevMethods = prev.methods.associateBy { it.name to it.descriptor }
+        val currMethods = curr.methods.associateBy { it.name to it.descriptor }
+        if (prevMethods.keys != currMethods.keys) return true
+
+        for ((key, currMethod) in currMethods) {
+            val prevMethod = prevMethods[key] ?: return true
+            if (prevMethod.accessFlags != currMethod.accessFlags) return true
+            if (prevMethod.exceptionTableSig != currMethod.exceptionTableSig) return true
+            if (prevMethod.visibleAnnotationsSig != currMethod.visibleAnnotationsSig) return true
+            val prevSig = normalizeMethodInstructions(prev, prevMethod, expandIndy = true)
+            val currSig = normalizeMethodInstructions(curr, currMethod, expandIndy = true)
+            if (prevSig != currSig) return true
+        }
+
+        return false
+    }
+
+    fun isInterfaceClass(classBytes: ByteArray): Boolean {
+        val parsed = runCatching { parseDetailedClass(classBytes) }.getOrNull() ?: return false
+        return (parsed.accessFlags and ACC_INTERFACE) != 0
+    }
+
+    fun extractInterfaceDefaultMethods(interfaceBytes: ByteArray): List<Pair<String, String>> {
+        val parsed = runCatching { parseDetailedClass(interfaceBytes) }.getOrNull() ?: return emptyList()
+        if ((parsed.accessFlags and ACC_INTERFACE) == 0) return emptyList()
+        return parsed.methods
+            .filter { m ->
+                (m.accessFlags and ACC_ABSTRACT) == 0 &&
+                    (m.accessFlags and ACC_STATIC) == 0 &&
+                    (m.accessFlags and ACC_PRIVATE) == 0 &&
+                    !m.name.endsWith("\$jd") &&
+                    m.name != "<init>" &&
+                    m.name != "<clinit>" &&
+                    m.codeAttrStartOffset >= 0
+            }
+            .map { it.name to it.descriptor }
+    }
+
+    fun hasInterfaceStructureChange(previousBytes: ByteArray?, currentBytes: ByteArray): Boolean {
+        if (previousBytes == null) return false
+        val prev = runCatching { parseDetailedClass(previousBytes) }.getOrNull() ?: return true
+        val curr = runCatching { parseDetailedClass(currentBytes) }.getOrNull() ?: return true
+
+        if (prev.accessFlags != curr.accessFlags || prev.interfaces != curr.interfaces) {
+            return true
+        }
+        val prevFields = prev.fields.map { Triple(it.accessFlags, it.name, it.descriptor) }
+        val currFields = curr.fields.map { Triple(it.accessFlags, it.name, it.descriptor) }
+        if (prevFields != currFields) return true
+
+        val prevMethods = prev.methods
+            .filter { !it.name.endsWith("\$jd") }
+            .map { Triple(it.accessFlags, it.name, it.descriptor) }
+        val currMethods = curr.methods
+            .filter { !it.name.endsWith("\$jd") }
+            .map { Triple(it.accessFlags, it.name, it.descriptor) }
+        return prevMethods != currMethods
+    }
+
+    fun synthesizeDefaultImplsFromInterface(interfaceBytes: ByteArray): ByteArray? {
+        val parsed = runCatching { parseDetailedClass(interfaceBytes) }.getOrNull() ?: return null
+        if ((parsed.accessFlags and ACC_INTERFACE) == 0 || parsed.thisInternalName.isEmpty()) return null
+
+        val defaultMethods = parsed.methods.filter { m ->
+            (m.accessFlags and ACC_ABSTRACT) == 0 &&
+                !m.name.endsWith("\$jd") &&
+                m.name != "<init>" &&
+                m.name != "<clinit>" &&
+                m.codeAttrStartOffset >= 0 &&
+                m.codeAttrEndOffset > m.codeAttrStartOffset
+        }
+        if (defaultMethods.isEmpty()) return null
+
+        val privateInstanceMethods = defaultMethods
+            .filter { (it.accessFlags and ACC_PRIVATE) != 0 && (it.accessFlags and ACC_STATIC) == 0 }
+            .map { it.name to it.descriptor }
+            .toSet()
+
+        var nextCpSlot = parsed.cpCount
+        val extraCp = ByteArrayOutputStream(256)
+
+        fun appendUtf8(value: String): Int {
+            val encoded = value.toByteArray(Charsets.UTF_8)
+            val slot = nextCpSlot++
+            extraCp.write(CP_TAG_UTF8)
+            writeU2(extraCp, encoded.size)
+            extraCp.write(encoded)
+            return slot
+        }
+
+        val defaultImplsInternalName = "${parsed.thisInternalName}\$DefaultImpls"
+        val defaultImplsUtf8Slot = appendUtf8(defaultImplsInternalName)
+        val defaultImplsClassSlot = nextCpSlot++
+        extraCp.write(CP_TAG_CLASS)
+        writeU2(extraCp, defaultImplsUtf8Slot)
+
+        val descSlotByMethod = IdentityHashMap<ParsedMethod, Int>()
+        for (method in defaultMethods) {
+            val newDesc = if ((method.accessFlags and ACC_STATIC) == 0) {
+                "(L${parsed.thisInternalName};${method.descriptor.removePrefix("(")}"
+            } else {
+                method.descriptor
+            }
+            descSlotByMethod[method] = appendUtf8(newDesc)
+        }
+
+        val patchedBootstrapAttr = patchBootstrapAttrForDefaultImpls(
+            interfaceBytes = interfaceBytes,
+            parsed = parsed,
+            defaultMethods = defaultMethods,
+            defaultImplsClassSlot = defaultImplsClassSlot,
+            descSlotByMethod = descSlotByMethod,
+            extraCp = extraCp,
+            allocateCpSlot = { nextCpSlot++ }
+        )
+
+        val out = ByteArrayOutputStream(interfaceBytes.size + extraCp.size() + 64)
+        out.write(interfaceBytes, 0, 8)
+        writeU2(out, nextCpSlot)
+        out.write(interfaceBytes, parsed.cpStartOffset, parsed.cpEndOffset - parsed.cpStartOffset)
+        extraCp.writeTo(out)
+
+        writeU2(out, ACC_PUBLIC or ACC_FINAL or ACC_SUPER)
+        writeU2(out, defaultImplsClassSlot)
+        writeU2(out, parsed.superClassCpIdx)
+        writeU2(out, 0) // interfaces_count
+        writeU2(out, 0) // fields_count
+        writeU2(out, defaultMethods.size) // methods_count
+
+        for (method in defaultMethods) {
+            val newFlags = ACC_PUBLIC or ACC_STATIC or (method.accessFlags and ACC_SYNTHETIC)
+            writeU2(out, newFlags)
+            writeU2(out, method.nameCpIdx)
+            writeU2(out, descSlotByMethod.getValue(method))
+            writeU2(out, 1) // attributes_count = 1 (Code attribute only)
+            out.write(
+                interfaceBytes,
+                method.codeAttrStartOffset,
+                method.codeAttrEndOffset - method.codeAttrStartOffset
+            )
+        }
+
+        if (patchedBootstrapAttr != null) {
+            writeU2(out, 1)
+            out.write(patchedBootstrapAttr)
+        } else {
+            writeU2(out, 0)
+        }
+
+        return rewriteInterfaceSpecialCallsToDefaultImpls(
+            classBytes = out.toByteArray(),
+            interfaceInternalNames = setOf(parsed.thisInternalName),
+            privateInstanceMethodsByIface = mapOf(parsed.thisInternalName to privateInstanceMethods)
+        )
+    }
+
+    private fun patchBootstrapAttrForDefaultImpls(
+        interfaceBytes: ByteArray,
+        parsed: DetailedClass,
+        defaultMethods: List<ParsedMethod>,
+        defaultImplsClassSlot: Int,
+        descSlotByMethod: Map<ParsedMethod, Int>,
+        extraCp: ByteArrayOutputStream,
+        allocateCpSlot: () -> Int
+    ): ByteArray? {
+        val start = parsed.bootstrapAttrStartOffset
+        val end = parsed.bootstrapAttrEndOffset
+        if (start < 0 || end <= start + 8) return null
+
+        val rawAttr = interfaceBytes.copyOfRange(start, end)
+        val movedBySig = defaultMethods.associateBy { it.name to it.descriptor }
+        val remappedMhSlots = HashMap<Int, Int>()
+
+        fun remapMethodHandleIfNeeded(mhCpIdx: Int): Int? {
+            remappedMhSlots[mhCpIdx]?.let { return it }
+            val mh = parsed.methodHandleByCp[mhCpIdx] ?: return null
+            val ref = parsed.resolveMemberRef(mh.second) ?: return null
+            if (ref.first != parsed.thisInternalName) return null
+            val moved = movedBySig[ref.second to ref.third] ?: return null
+            val isMovedStaticOrPrivate = (moved.accessFlags and ACC_STATIC) != 0 ||
+                (moved.accessFlags and ACC_PRIVATE) != 0
+            if (!isMovedStaticOrPrivate) return null
+
+            val natSlot = allocateCpSlot()
+            extraCp.write(CP_TAG_NAME_AND_TYPE)
+            writeU2(extraCp, moved.nameCpIdx)
+            writeU2(extraCp, descSlotByMethod.getValue(moved))
+
+            val mrefSlot = allocateCpSlot()
+            extraCp.write(CP_TAG_METHODREF)
+            writeU2(extraCp, defaultImplsClassSlot)
+            writeU2(extraCp, natSlot)
+
+            val newMhSlot = allocateCpSlot()
+            extraCp.write(CP_TAG_METHOD_HANDLE)
+            extraCp.write(MH_REF_INVOKE_STATIC)
+            writeU2(extraCp, mrefSlot)
+
+            remappedMhSlots[mhCpIdx] = newMhSlot
+            return newMhSlot
+        }
+
+        val numBsm = ((rawAttr[6].toInt() and 0xFF) shl 8) or (rawAttr[7].toInt() and 0xFF)
+        var pos = 8
+        repeat(numBsm) {
+            if (pos + 4 > rawAttr.size) return rawAttr
+            val numArgs = ((rawAttr[pos + 2].toInt() and 0xFF) shl 8) or (rawAttr[pos + 3].toInt() and 0xFF)
+            pos += 4
+            repeat(numArgs) {
+                if (pos + 2 > rawAttr.size) return rawAttr
+                val argCpIdx = ((rawAttr[pos].toInt() and 0xFF) shl 8) or (rawAttr[pos + 1].toInt() and 0xFF)
+                val newSlot = remapMethodHandleIfNeeded(argCpIdx)
+                if (newSlot != null) {
+                    rawAttr[pos] = ((newSlot ushr 8) and 0xFF).toByte()
+                    rawAttr[pos + 1] = (newSlot and 0xFF).toByte()
+                }
+                pos += 2
+            }
+        }
+        return rawAttr
+    }
+
+    private data class DefaultImplsPatchSite(
+        val absPc: Int,
+        val clearTrailingTwoBytes: Boolean,
+        val target: Triple<String, String, String>
+    )
+
+    fun rewriteInterfaceSpecialCallsToDefaultImpls(
+        classBytes: ByteArray,
+        interfaceInternalNames: Set<String>,
+        privateInstanceMethodsByIface: Map<String, Set<Pair<String, String>>> = emptyMap()
+    ): ByteArray {
+        if (interfaceInternalNames.isEmpty()) return classBytes
+        val parsed = runCatching { parseDetailedClass(classBytes) }.getOrNull() ?: return classBytes
+        if ((parsed.accessFlags and ACC_INTERFACE) != 0) return classBytes
+
+        val patchSites = collectDefaultImplsPatchSites(
+            parsed = parsed,
+            interfaceInternalNames = interfaceInternalNames,
+            privateInstanceMethodsByIface = privateInstanceMethodsByIface
+        )
+        if (patchSites.isEmpty()) return classBytes
+
+        var nextCpSlot = parsed.cpCount
+        val extraCp = ByteArrayOutputStream(128)
+
+        fun appendUtf8(value: String): Int {
+            val encoded = value.toByteArray(Charsets.UTF_8)
+            val slot = nextCpSlot++
+            extraCp.write(CP_TAG_UTF8)
+            writeU2(extraCp, encoded.size)
+            extraCp.write(encoded)
+            return slot
+        }
+
+        val defaultImplsClassSlotByIface = HashMap<String, Int>()
+        val methodRefSlotByTarget = HashMap<Triple<String, String, String>, Int>()
+
+        for (site in patchSites) {
+            val target = site.target
+            if (target in methodRefSlotByTarget) continue
+            val (ifaceOwner, methodName, staticDesc) = target
+            val ownerClassSlot = defaultImplsClassSlotByIface.getOrPut(ifaceOwner) {
+                val utf8Slot = appendUtf8("$ifaceOwner\$DefaultImpls")
+                val clsSlot = nextCpSlot++
+                extraCp.write(CP_TAG_CLASS)
+                writeU2(extraCp, utf8Slot)
+                clsSlot
+            }
+            val nameUtf8Slot = appendUtf8(methodName)
+            val descUtf8Slot = appendUtf8(staticDesc)
+            val natSlot = nextCpSlot++
+            extraCp.write(CP_TAG_NAME_AND_TYPE)
+            writeU2(extraCp, nameUtf8Slot)
+            writeU2(extraCp, descUtf8Slot)
+            val mrefSlot = nextCpSlot++
+            extraCp.write(CP_TAG_METHODREF)
+            writeU2(extraCp, ownerClassSlot)
+            writeU2(extraCp, natSlot)
+            methodRefSlotByTarget[target] = mrefSlot
+        }
+
+        val patched = classBytes.clone()
+        for (site in patchSites) {
+            val mrefSlot = methodRefSlotByTarget.getValue(site.target)
+            patched[site.absPc] = 0xB8.toByte() // invokestatic
+            patched[site.absPc + 1] = ((mrefSlot ushr 8) and 0xFF).toByte()
+            patched[site.absPc + 2] = (mrefSlot and 0xFF).toByte()
+            if (site.clearTrailingTwoBytes) {
+                patched[site.absPc + 3] = 0x00 // nop
+                patched[site.absPc + 4] = 0x00 // nop
+            }
+        }
+
+        val out = ByteArrayOutputStream(patched.size + extraCp.size() + 8)
+        out.write(patched, 0, 8)
+        writeU2(out, nextCpSlot)
+        out.write(patched, parsed.cpStartOffset, parsed.cpEndOffset - parsed.cpStartOffset)
+        extraCp.writeTo(out)
+        out.write(patched, parsed.cpEndOffset, patched.size - parsed.cpEndOffset)
+        return out.toByteArray()
+    }
+
+    private fun collectDefaultImplsPatchSites(
+        parsed: DetailedClass,
+        interfaceInternalNames: Set<String>,
+        privateInstanceMethodsByIface: Map<String, Set<Pair<String, String>>>
+    ): List<DefaultImplsPatchSite> {
+        val patchSites = mutableListOf<DefaultImplsPatchSite>()
+        for (method in parsed.methods) {
+            val code = method.codeBytes ?: continue
+            if (method.codeOffsetInClass < 0) continue
+            for (insn in walkBytecode(parsed, code)) {
+                val site = resolveDefaultImplsPatchSite(
+                    parsed = parsed,
+                    method = method,
+                    insn = insn,
+                    interfaceInternalNames = interfaceInternalNames,
+                    privateInstanceMethodsByIface = privateInstanceMethodsByIface
+                )
+                if (site != null) {
+                    patchSites.add(site)
+                }
+            }
+        }
+        return patchSites
+    }
+
+    private fun resolveDefaultImplsPatchSite(
+        parsed: DetailedClass,
+        method: ParsedMethod,
+        insn: BytecodeInsn,
+        interfaceInternalNames: Set<String>,
+        privateInstanceMethodsByIface: Map<String, Set<Pair<String, String>>>
+    ): DefaultImplsPatchSite? {
+        if (insn.opcode !in 0xB7..0xB9) return null
+        val ref = parsed.resolveMemberRef(insn.operand) ?: return null
+        val (owner, name, desc) = ref
+        if (owner !in interfaceInternalNames || name == "<init>" || name == "<clinit>") return null
+
+        val absPc = method.codeOffsetInClass + insn.pc
+        return when (insn.opcode) {
+            0xB7 -> { // invokespecial -> static (L$owner;...)
+                val staticDesc = "(L$owner;${desc.removePrefix("(")}"
+                DefaultImplsPatchSite(absPc, false, Triple(owner, name, staticDesc))
+            }
+            0xB8 -> { // invokestatic (e.g. $default bridge or static helper on interface)
+                if (name.endsWith("\$jd")) {
+                    null
+                } else {
+                    DefaultImplsPatchSite(absPc, false, Triple(owner, name, desc))
+                }
+            }
+            0xB9 -> { // invokeinterface -> only rewrite private instance interface methods
+                val isPrivateInstance = (name to desc) in privateInstanceMethodsByIface[owner].orEmpty()
+                if (!isPrivateInstance) {
+                    null
+                } else {
+                    val staticDesc = "(L$owner;${desc.removePrefix("(")}"
+                    DefaultImplsPatchSite(absPc, true, Triple(owner, name, staticDesc))
+                }
+            }
+            else -> null
+        }
+    }
+
+    fun injectMissingInterfaceDefaultBridges(
+        classBytes: ByteArray,
+        defaultMethodsByIface: Map<String, List<Pair<String, String>>>,
+        classBytesLookup: (String) -> ByteArray? = { null }
+    ): ByteArray {
+        if (defaultMethodsByIface.isEmpty()) return classBytes
+        val parsed = runCatching { parseDetailedClass(classBytes) }.getOrNull() ?: return classBytes
+        if ((parsed.accessFlags and (ACC_INTERFACE or ACC_ABSTRACT)) != 0) return classBytes
+        if (parsed.methodsCountOffset < 0 || parsed.methodsEndOffset < parsed.methodsCountOffset + 2) {
+            return classBytes
+        }
+
+        val missingBridges = resolveMissingInterfaceBridges(
+            parsed = parsed,
+            defaultMethodsByIface = defaultMethodsByIface,
+            classBytesLookup = classBytesLookup
+        )
+        if (missingBridges.isEmpty()) return classBytes
+
+        var nextCpSlot = parsed.cpCount
+        val extraCp = ByteArrayOutputStream(128)
+        val utf8ToSlot = parsed.utf8Pool.entries.associate { (slot, text) -> text to slot }.toMutableMap()
+
+        fun getOrAddUtf8(value: String): Int {
+            utf8ToSlot[value]?.let { return it }
+            val encoded = value.toByteArray(Charsets.UTF_8)
+            val slot = nextCpSlot++
+            extraCp.write(CP_TAG_UTF8)
+            writeU2(extraCp, encoded.size)
+            extraCp.write(encoded)
+            utf8ToSlot[value] = slot
+            return slot
+        }
+
+        val codeAttrNameSlot = getOrAddUtf8("Code")
+        val ownerClassSlotByIface = HashMap<String, Int>()
+        val extraMethods = ByteArrayOutputStream(128)
+
+        for ((ifaceOwner, methodName, methodDesc) in missingBridges) {
+            val ownerClassSlot = ownerClassSlotByIface.getOrPut(ifaceOwner) {
+                val utf8Slot = getOrAddUtf8("$ifaceOwner\$DefaultImpls")
+                val clsSlot = nextCpSlot++
+                extraCp.write(CP_TAG_CLASS)
+                writeU2(extraCp, utf8Slot)
+                clsSlot
+            }
+            val nameSlot = getOrAddUtf8(methodName)
+            val descSlot = getOrAddUtf8(methodDesc)
+            val staticDescSlot = getOrAddUtf8("(L$ifaceOwner;${methodDesc.removePrefix("(")}")
+            val natSlot = nextCpSlot++
+            extraCp.write(CP_TAG_NAME_AND_TYPE)
+            writeU2(extraCp, nameSlot)
+            writeU2(extraCp, staticDescSlot)
+            val mrefSlot = nextCpSlot++
+            extraCp.write(CP_TAG_METHODREF)
+            writeU2(extraCp, ownerClassSlot)
+            writeU2(extraCp, natSlot)
+
+            writeU2(extraMethods, ACC_PUBLIC)
+            writeU2(extraMethods, nameSlot)
+            writeU2(extraMethods, descSlot)
+            writeU2(extraMethods, 1) // Code attribute
+            writeForwardingBridgeCodeAttribute(extraMethods, codeAttrNameSlot, methodDesc, mrefSlot)
+        }
+
+        val out = ByteArrayOutputStream(classBytes.size + extraCp.size() + extraMethods.size() + 16)
+        out.write(classBytes, 0, 8)
+        writeU2(out, nextCpSlot)
+        out.write(classBytes, parsed.cpStartOffset, parsed.cpEndOffset - parsed.cpStartOffset)
+        extraCp.writeTo(out)
+        out.write(classBytes, parsed.cpEndOffset, parsed.methodsCountOffset - parsed.cpEndOffset)
+        writeU2(out, parsed.methods.size + missingBridges.size)
+        val existingMethodsStart = parsed.methodsCountOffset + 2
+        out.write(classBytes, existingMethodsStart, parsed.methodsEndOffset - existingMethodsStart)
+        extraMethods.writeTo(out)
+        out.write(classBytes, parsed.methodsEndOffset, classBytes.size - parsed.methodsEndOffset)
+        return out.toByteArray()
+    }
+
+    private fun resolveMissingInterfaceBridges(
+        parsed: DetailedClass,
+        defaultMethodsByIface: Map<String, List<Pair<String, String>>>,
+        classBytesLookup: (String) -> ByteArray?
+    ): List<Triple<String, String, String>> {
+        val implementedIfaces = LinkedHashSet<String>()
+        val declaredMethods = HashSet<Pair<String, String>>()
+        val ifaceQueue = ArrayDeque<String>()
+
+        fun enqueueInterfaces(ifaces: List<String>) {
+            for (iface in ifaces) {
+                if (implementedIfaces.add(iface)) {
+                    ifaceQueue.addLast(iface)
+                }
+            }
+        }
+
+        parsed.methods.forEach { declaredMethods.add(it.name to it.descriptor) }
+        enqueueInterfaces(parsed.interfaces)
+
+        var superName = parsed.superInternalName
+        var depth = 0
+        while (superName.isNotEmpty() && superName != "java/lang/Object" && depth++ < 16) {
+            val superBytes = classBytesLookup(superName) ?: return emptyList()
+            val superParsed = runCatching { parseDetailedClass(superBytes) }.getOrNull() ?: return emptyList()
+            superParsed.methods.forEach { declaredMethods.add(it.name to it.descriptor) }
+            enqueueInterfaces(superParsed.interfaces)
+            superName = superParsed.superInternalName
+        }
+
+        while (ifaceQueue.isNotEmpty()) {
+            val iface = ifaceQueue.removeFirst()
+            val ifaceBytes = classBytesLookup(iface) ?: continue
+            val ifaceParsed = runCatching { parseDetailedClass(ifaceBytes) }.getOrNull() ?: continue
+            enqueueInterfaces(ifaceParsed.interfaces)
+        }
+
+        val missing = mutableListOf<Triple<String, String, String>>()
+        for (iface in implementedIfaces) {
+            val defaults = defaultMethodsByIface[iface] ?: continue
+            for ((mName, mDesc) in defaults) {
+                if (declaredMethods.add(mName to mDesc)) {
+                    missing.add(Triple(iface, mName, mDesc))
+                }
+            }
+        }
+        return missing
+    }
+
+    private fun writeForwardingBridgeCodeAttribute(
+        out: ByteArrayOutputStream,
+        codeAttrNameSlot: Int,
+        methodDesc: String,
+        targetMethodRefSlot: Int
+    ) {
+        val code = ByteArrayOutputStream(32)
+        code.write(0x2A) // aload_0 (this)
+        var localSlot = 1
+        var i = methodDesc.indexOf('(') + 1
+        val endParams = methodDesc.indexOf(')')
+        while (i in 1..<endParams) {
+            val ch = methodDesc[i]
+            val loadOp: Int
+            val width: Int
+            when (ch) {
+                'J' -> {
+                    loadOp = 0x16 // lload
+                    width = 2
+                    i++
+                }
+                'D' -> {
+                    loadOp = 0x18 // dload
+                    width = 2
+                    i++
+                }
+                'F' -> {
+                    loadOp = 0x17 // fload
+                    width = 1
+                    i++
+                }
+                'L' -> {
+                    loadOp = 0x19 // aload
+                    width = 1
+                    val semi = methodDesc.indexOf(';', i)
+                    i = if (semi > i) semi + 1 else endParams
+                }
+                '[' -> {
+                    loadOp = 0x19 // aload
+                    width = 1
+                    while (i < endParams && methodDesc[i] == '[') i++
+                    if (i < endParams && methodDesc[i] == 'L') {
+                        val semi = methodDesc.indexOf(';', i)
+                        i = if (semi > i) semi + 1 else endParams
+                    } else {
+                        i++
+                    }
+                }
+                else -> {
+                    loadOp = 0x15 // iload
+                    width = 1
+                    i++
+                }
+            }
+            if (localSlot <= 0xFF) {
+                code.write(loadOp)
+                code.write(localSlot)
+            } else {
+                code.write(0xC4) // wide
+                code.write(loadOp)
+                writeU2(code, localSlot)
+            }
+            localSlot += width
+        }
+
+        code.write(0xB8) // invokestatic
+        writeU2(code, targetMethodRefSlot)
+
+        val retChar = methodDesc.getOrNull(endParams + 1) ?: 'V'
+        val (retOp, retSlots) = when (retChar) {
+            'V' -> 0xB1 to 0
+            'J' -> 0xAD to 2
+            'D' -> 0xAF to 2
+            'F' -> 0xAE to 1
+            'L', '[' -> 0xB0 to 1
+            else -> 0xAC to 1
+        }
+        code.write(retOp)
+
+        val codeBytes = code.toByteArray()
+        val maxStack = maxOf(localSlot, retSlots)
+        val attrLen = 12 + codeBytes.size
+        writeU2(out, codeAttrNameSlot)
+        writeU4(out, attrLen)
+        writeU2(out, maxStack)
+        writeU2(out, localSlot)
+        writeU4(out, codeBytes.size)
+        out.write(codeBytes)
+        writeU2(out, 0) // exception_table_length
+        writeU2(out, 0) // attributes_count
+    }
+
     fun analyzeComposeRememberChanges(
         previousBytes: ByteArray?,
         currentBytes: ByteArray
@@ -313,10 +956,82 @@ internal object ClassBytecodeAnalyzer {
             }
         }
 
+        val (changedScopeKeys, invalidateAllScopes) = computeChangedComposableScopes(
+            prev = prev,
+            curr = curr,
+            prevLambdaKeys = prevLambdaKeys,
+            currLambdaKeys = currLambdaKeys
+        )
+
         return ComposeRememberDiff(
             resetScopeKeys = resetKeys,
-            resetAllClassScopes = resetAll
+            resetAllClassScopes = resetAll,
+            changedScopeKeys = changedScopeKeys,
+            invalidateAllClassScopes = invalidateAllScopes
         )
+    }
+
+    private fun computeChangedComposableScopes(
+        prev: DetailedClass,
+        curr: DetailedClass,
+        prevLambdaKeys: Map<String, Int>,
+        currLambdaKeys: Map<String, Int>
+    ): Pair<Set<Int>, Boolean> {
+        val changedKeys = LinkedHashSet<Int>()
+        var invalidateAll = false
+        val currBootstrapTargets = curr.bootstrapTargets.values.toSet()
+        val prevBootstrapTargets = prev.bootstrapTargets.values.toSet()
+        val prevAllByKey = prev.methods.associateBy { it.name to it.descriptor }
+        val currAllKeys = curr.methods.map { it.name to it.descriptor }.toSet()
+
+        val isSingletonsClass = curr.thisInternalName.contains("ComposableSingletons\$")
+        for (currMethod in curr.methods) {
+            if (currMethod.name == "<clinit>" || currMethod.name == "<init>") continue
+            if (isSingletonsClass && currMethod.name.startsWith("getLambda")) continue
+            val sigKey = currMethod.name to currMethod.descriptor
+            val isComposable = isComposableMethod(curr, currMethod)
+            val isPrivateNonComposableHelper = !isComposable && (currMethod.accessFlags and ACC_PRIVATE) != 0
+            if (isPrivateNonComposableHelper || (!isComposable && sigKey in currBootstrapTargets)) continue
+
+            val prevMethod = prevAllByKey[sigKey]
+            val changed = prevMethod == null ||
+                normalizeMethodInstructions(prev, prevMethod, expandIndy = true) !=
+                normalizeMethodInstructions(curr, currMethod, expandIndy = true)
+            if (!changed) continue
+
+            if (isComposable) {
+                val currKey = extractMethodRestartGroupKey(curr, currMethod) ?: currLambdaKeys[currMethod.name]
+                val prevKey = prevMethod?.let {
+                    extractMethodRestartGroupKey(prev, it) ?: prevLambdaKeys[it.name]
+                }
+                if (currKey != null) changedKeys.add(currKey)
+                if (prevKey != null) changedKeys.add(prevKey)
+                if (currKey == null && prevKey == null && sigKey !in currBootstrapTargets) {
+                    invalidateAll = true
+                }
+            } else {
+                invalidateAll = true
+            }
+        }
+
+        for (prevMethod in prev.methods) {
+            if (prevMethod.name == "<clinit>" || prevMethod.name == "<init>") continue
+            if (isSingletonsClass && prevMethod.name.startsWith("getLambda")) continue
+            val sigKey = prevMethod.name to prevMethod.descriptor
+            if (sigKey in currAllKeys) continue
+            if (isComposableMethod(prev, prevMethod)) {
+                val prevKey = extractMethodRestartGroupKey(prev, prevMethod) ?: prevLambdaKeys[prevMethod.name]
+                if (prevKey != null) {
+                    changedKeys.add(prevKey)
+                } else if (sigKey !in prevBootstrapTargets) {
+                    invalidateAll = true
+                }
+            } else if ((prevMethod.accessFlags and ACC_PRIVATE) == 0 && sigKey !in prevBootstrapTargets) {
+                invalidateAll = true
+            }
+        }
+
+        return changedKeys to invalidateAll
     }
 
     fun prepareStaticFieldUpdates(
@@ -651,8 +1366,12 @@ internal object ClassBytecodeAnalyzer {
                         if (endIdx > i) {
                             val blockInsns = insns.subList(i + 1, endIdx)
                             if (!isCompilerMemoizedLambdaBlock(cls, blockInsns)) {
-                                val blockSig = blockInsns.joinToString(",") {
-                                    formatInsnSignature(cls, it, methodsByKey)
+                                val blockSig = blockInsns.indices.joinToString(",") { bIdx ->
+                                    if (isComposeSourceInfoLdc(cls, blockInsns, bIdx)) {
+                                        "LDC:COMPOSE_SOURCE_INFO"
+                                    } else {
+                                        formatRememberBlockInsn(cls, blockInsns[bIdx], methodsByKey)
+                                    }
                                 }
                                 signature.add("BLOCK:${pendingChanged.joinToString("+")}|$blockSig")
                             }
@@ -715,6 +1434,7 @@ internal object ClassBytecodeAnalyzer {
                 in 0xB6..0xB9 -> {
                     val ref = cls.resolveMemberRef(insn.operand) ?: return false
                     val (owner, name, _) = ref
+                    if (owner == COMPOSER_KT_OWNER || owner.startsWith("$COMPOSER_OWNER\$")) continue
                     val isSyntheticLambdaInit = name == "<init>" &&
                         (owner.contains("\$") || owner.contains("Lambda"))
                     if (isSyntheticLambdaInit) {
@@ -751,27 +1471,85 @@ internal object ClassBytecodeAnalyzer {
                 val indy = cls.invokeDynamicByCp[insn.operand] ?: continue
                 val target = cls.bootstrapTargets[indy.first] ?: continue
                 val targetMethod = methodsByKey[target] ?: continue
-                return normalizeMethodInstructions(cls, targetMethod)
+                val code = targetMethod.codeBytes ?: return ""
+                val targetInsns = walkBytecode(cls, code)
+                return targetInsns.indices.joinToString(";") { tIdx ->
+                    if (isComposeSourceInfoLdc(cls, targetInsns, tIdx)) {
+                        "LDC:COMPOSE_SOURCE_INFO"
+                    } else {
+                        formatRememberBlockInsn(cls, targetInsns[tIdx], methodsByKey)
+                    }
+                }
             }
         }
         return ""
     }
 
-    private fun normalizeMethodInstructions(cls: DetailedClass, method: ParsedMethod): String {
+    private fun formatRememberBlockInsn(
+        cls: DetailedClass,
+        insn: BytecodeInsn,
+        methodsByKey: Map<Pair<String, String>, ParsedMethod>
+    ): String = when (insn.opcode) {
+        0x15, in 0x1A..0x1D -> "ILOAD"
+        0x16, in 0x1E..0x21 -> "LLOAD"
+        0x17, in 0x22..0x25 -> "FLOAD"
+        0x18, in 0x26..0x29 -> "DLOAD"
+        0x19, in 0x2A..0x2D -> "ALOAD"
+        0x36, in 0x3B..0x3E -> "ISTORE"
+        0x37, in 0x3F..0x42 -> "LSTORE"
+        0x38, in 0x43..0x46 -> "FSTORE"
+        0x39, in 0x47..0x4A -> "DSTORE"
+        0x3A, in 0x4B..0x4E -> "ASTORE"
+        in 0x99..0xA8, 0xC6, 0xC7, 0xC8, 0xC9 -> "BR_${insn.opcode}"
+        else -> formatInsnSignature(cls, insn, methodsByKey)
+    }
+
+    private fun normalizeMethodInstructions(
+        cls: DetailedClass,
+        method: ParsedMethod,
+        expandIndy: Boolean = false
+    ): String {
         val code = method.codeBytes ?: return ""
         val insns = walkBytecode(cls, code)
         val methodsByKey = cls.methods.associateBy { it.name to it.descriptor }
-        return insns.joinToString(";") { formatInsnSignature(cls, it, methodsByKey, expandIndy = false) }
+        val callerKey = method.name to method.descriptor
+        return insns.indices.joinToString(";") { idx ->
+            if (isComposeSourceInfoLdc(cls, insns, idx)) {
+                "LDC:COMPOSE_SOURCE_INFO"
+            } else {
+                formatInsnSignature(
+                    cls = cls,
+                    insn = insns[idx],
+                    methodsByKey = methodsByKey,
+                    expandIndy = expandIndy,
+                    callerKey = callerKey
+                )
+            }
+        }
+    }
+
+    private fun isComposeSourceInfoLdc(
+        cls: DetailedClass,
+        insns: List<BytecodeInsn>,
+        idx: Int
+    ): Boolean {
+        val insn = insns[idx]
+        if (insn.opcode != 0x12 && insn.opcode != 0x13) return false
+        val next = insns.getOrNull(idx + 1) ?: return false
+        if (next.opcode != 0xB8) return false
+        val ref = cls.resolveMemberRef(next.operand) ?: return false
+        return ref.first == COMPOSER_KT_OWNER && ref.second in composeSourceInfoMethods
     }
 
     private fun formatInsnSignature(
         cls: DetailedClass,
         insn: BytecodeInsn,
         methodsByKey: Map<Pair<String, String>, ParsedMethod>,
-        expandIndy: Boolean = true
+        expandIndy: Boolean = true,
+        callerKey: Pair<String, String>? = null
     ): String {
         if (insn.intConstant != null) {
-            return "OP_${insn.opcode}:${insn.intConstant}"
+            return "INT:${insn.intConstant}"
         }
         return when (insn.opcode) {
             0x12, 0x13, 0x14 -> { // ldc, ldc_w, ldc2_w
@@ -784,10 +1562,15 @@ internal object ClassBytecodeAnalyzer {
                 val ref = cls.resolveMemberRef(insn.operand)
                 if (ref != null) {
                     val base = "REF_${insn.opcode}:${ref.first}.${ref.second}:${ref.third}"
-                    if (expandIndy && ref.first == cls.thisInternalName && ref.second != "<clinit>") {
+                    val isSelfCall = callerKey != null &&
+                        ref.second == callerKey.first &&
+                        ref.third == callerKey.second
+                    if (expandIndy && ref.first == cls.thisInternalName &&
+                        ref.second != "<clinit>" && !isSelfCall
+                    ) {
                         val targetMethod = methodsByKey[ref.second to ref.third]
-                        if (targetMethod != null) {
-                            "$base[${normalizeMethodInstructions(cls, targetMethod)}]"
+                        if (targetMethod != null && !isComposableMethod(cls, targetMethod)) {
+                            "$base[${normalizeMethodInstructions(cls, targetMethod, expandIndy = false)}]"
                         } else {
                             base
                         }
@@ -805,16 +1588,20 @@ internal object ClassBytecodeAnalyzer {
                 val desc = nat?.let { cls.utf8Pool[it.second] }.orEmpty()
                 val target = indy?.let { cls.bootstrapTargets[it.first] }
                 val targetSig = if (expandIndy && target != null) {
-                    methodsByKey[target]?.let { normalizeMethodInstructions(cls, it) }.orEmpty()
+                    methodsByKey[target]?.let { normalizeMethodInstructions(cls, it, expandIndy = false) }.orEmpty()
                 } else {
                     target?.toString().orEmpty()
                 }
-                "INDY:$name:$desc[$targetSig]"
+                val bsmArgs = indy?.let { cls.bootstrapArgsSummary[it.first] }.orEmpty()
+                "INDY:$name:$desc[$targetSig|$bsmArgs]"
             }
             0xBB, 0xBD, 0xC0, 0xC1 -> { // new, anewarray, checkcast, instanceof
                 "TYPE_${insn.opcode}:${cls.resolveClassName(insn.operand)}"
             }
-            else -> "OP_${insn.opcode}"
+            0xC5 -> { // multianewarray
+                "TYPE_197:${cls.resolveClassName(insn.operand and U16_MASK)}:${insn.operand ushr 16}"
+            }
+            else -> "OP_${insn.opcode}:${insn.operand}"
         }
     }
 
@@ -872,16 +1659,24 @@ internal object ClassBytecodeAnalyzer {
                         operand = ((code[pc + 1].toInt() and 0xFF) shl 8) or (code[pc + 2].toInt() and 0xFF)
                     }
                 }
-                0xB9, 0xBA, 0xC8, 0xC9 -> {
+                0xB9, 0xBA -> {
                     length = 5
                     if (pc + 2 < code.size) {
                         operand = ((code[pc + 1].toInt() and 0xFF) shl 8) or (code[pc + 2].toInt() and 0xFF)
                     }
                 }
+                0xC8, 0xC9 -> {
+                    length = 5
+                    if (pc + 5 <= code.size) {
+                        operand = readS4(code, pc + 1)
+                    }
+                }
                 0xC5 -> {
                     length = 4
-                    if (pc + 2 < code.size) {
-                        operand = ((code[pc + 1].toInt() and 0xFF) shl 8) or (code[pc + 2].toInt() and 0xFF)
+                    if (pc + 3 < code.size) {
+                        val cpIdx = ((code[pc + 1].toInt() and 0xFF) shl 8) or (code[pc + 2].toInt() and 0xFF)
+                        val dims = code[pc + 3].toInt() and 0xFF
+                        operand = cpIdx or (dims shl 16)
                     }
                 }
                 0xAA -> { // tableswitch
@@ -891,16 +1686,19 @@ internal object ClassBytecodeAnalyzer {
                     val high = readS4(code, aligned + 8)
                     val count = (high - low + 1).coerceAtLeast(0)
                     length = (aligned - pc) + 12 + count * 4
+                    operand = hashOperandBytes(code, pc + 1, minOf(code.size, pc + length))
                 }
                 0xAB -> { // lookupswitch
                     val aligned = (pc + 4) and -4
                     if (aligned + 8 > code.size) break
                     val npairs = readS4(code, aligned + 4).coerceAtLeast(0)
                     length = (aligned - pc) + 8 + npairs * 8
+                    operand = hashOperandBytes(code, pc + 1, minOf(code.size, pc + length))
                 }
                 0xC4 -> { // wide
                     val subOp = if (pc + 1 < code.size) code[pc + 1].toInt() and 0xFF else 0
                     length = if (subOp == 0x84) 6 else 4
+                    operand = hashOperandBytes(code, pc + 1, minOf(code.size, pc + length))
                 }
                 else -> length = 1
             }
@@ -918,6 +1716,14 @@ internal object ClassBytecodeAnalyzer {
             pc += length
         }
         return result
+    }
+
+    private fun hashOperandBytes(code: ByteArray, start: Int, end: Int): Int {
+        var h = 1
+        for (idx in start..<end) {
+            h = 31 * h + (code[idx].toInt() and 0xFF)
+        }
+        return h
     }
 
     private fun getMaxBranchTarget(code: ByteArray, insn: BytecodeInsn): Int {
@@ -967,6 +1773,7 @@ internal object ClassBytecodeAnalyzer {
         val classNameOffsetByCp = HashMap<Int, Int>()
         val rawConstByCp = HashMap<Int, Any>()
         val stringUtf8IdxByCp = HashMap<Int, Int>()
+        val methodTypeDescIdxByCp = HashMap<Int, Int>()
         val memberRefByCp = HashMap<Int, Triple<Int, Int, Int>>()
         val nameAndTypeByCp = HashMap<Int, Pair<Int, Int>>()
         val invokeDynamicByCp = HashMap<Int, Pair<Int, Int>>()
@@ -1034,7 +1841,11 @@ internal object ClassBytecodeAnalyzer {
                     }
                     slot += 1
                 }
-                CP_TAG_METHOD_TYPE, CP_TAG_MODULE, CP_TAG_PACKAGE -> {
+                CP_TAG_METHOD_TYPE -> {
+                    methodTypeDescIdxByCp[slot] = buf.short.toInt() and U16_MASK
+                    slot += 1
+                }
+                CP_TAG_MODULE, CP_TAG_PACKAGE -> {
                     buf.position(buf.position() + 2)
                     slot += 1
                 }
@@ -1057,6 +1868,9 @@ internal object ClassBytecodeAnalyzer {
             val str = utf8Pool[utf8Idx].orEmpty()
             val hex = str.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(Locale.US, it) }
             constValByCp[idx] = "HEX:$hex"
+        }
+        for ((idx, descIdx) in methodTypeDescIdxByCp) {
+            constValByCp[idx] = "MT:${utf8Pool[descIdx].orEmpty()}"
         }
 
         val accessFlags = buf.short.toInt() and U16_MASK
@@ -1081,6 +1895,7 @@ internal object ClassBytecodeAnalyzer {
             val fDesc = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
             val attrsCount = buf.short.toInt() and U16_MASK
             var constValue: String? = null
+            var visibleAnnsSig = ""
             repeat(attrsCount) {
                 val attrName = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
                 val attrLen = buf.int
@@ -1093,30 +1908,47 @@ internal object ClassBytecodeAnalyzer {
                     } else {
                         raw
                     }
+                } else if (attrName == "RuntimeVisibleAnnotations" && attrLen >= 2) {
+                    visibleAnnsSig = parseVisibleAnnotationsSig(
+                        buf,
+                        attrEnd,
+                        utf8Pool,
+                        constValByCp,
+                        classNameIdxByCp
+                    )
                 }
                 buf.position(attrEnd)
             }
-            fields.add(ParsedField(fFlags, fName, fDesc, constValue))
+            fields.add(ParsedField(fFlags, fName, fDesc, constValue, visibleAnnsSig))
         }
 
+        val methodsCountOffset = buf.position()
         val methodsCount = buf.short.toInt() and U16_MASK
         val methods = ArrayList<ParsedMethod>(methodsCount)
         repeat(methodsCount) {
             val mFlags = buf.short.toInt() and U16_MASK
-            val mName = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
+            val mNameIdx = buf.short.toInt() and U16_MASK
+            val mName = utf8Pool[mNameIdx].orEmpty()
             val mDesc = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
             val attrsCount = buf.short.toInt() and U16_MASK
             var codeBytes: ByteArray? = null
             var codeOffsetInClass = -1
+            var codeAttrStartOffset = -1
+            var codeAttrEndOffset = -1
             var hasInlineMarker = false
             var hasStackMapTable = false
+            var visibleAnnsSig = ""
             val exceptionRanges = mutableListOf<IntRange>()
+            val exceptionEntries = mutableListOf<String>()
 
             repeat(attrsCount) {
+                val attrStart = buf.position()
                 val attrName = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
                 val attrLen = buf.int
                 val attrEnd = buf.position() + attrLen
                 if (attrName == "Code" && attrLen >= 12) {
+                    codeAttrStartOffset = attrStart
+                    codeAttrEndOffset = attrEnd
                     buf.short // max_stack
                     buf.short // max_locals
                     val codeLen = buf.int
@@ -1128,9 +1960,11 @@ internal object ClassBytecodeAnalyzer {
                     repeat(excLen) {
                         val sPc = buf.short.toInt() and U16_MASK
                         val ePc = buf.short.toInt() and U16_MASK
-                        buf.short // handler_pc
-                        buf.short // catch_type
+                        val hPc = buf.short.toInt() and U16_MASK
+                        val catchTypeCpIdx = buf.short.toInt() and U16_MASK
+                        val catchTypeName = classNameIdxByCp[catchTypeCpIdx]?.let { utf8Pool[it] }.orEmpty()
                         exceptionRanges.add(sPc..ePc)
+                        exceptionEntries.add("$sPc:$ePc:$hPc:$catchTypeName")
                     }
                     val codeAttrs = buf.short.toInt() and U16_MASK
                     repeat(codeAttrs) {
@@ -1140,20 +1974,20 @@ internal object ClassBytecodeAnalyzer {
                         if (subAttrName == "StackMapTable") {
                             hasStackMapTable = true
                         } else if (subAttrName == "LocalVariableTable" && subAttrLen >= 2) {
-                            val lvCount = buf.short.toInt() and U16_MASK
-                            repeat(lvCount) {
-                                buf.short // start_pc
-                                buf.short // length
-                                val lvName = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
-                                buf.short // descriptor_index
-                                buf.short // index
-                                if (lvName.startsWith("\$i\$f\$")) {
-                                    hasInlineMarker = true
-                                }
+                            if (containsInlineLocalMarker(buf, utf8Pool, mName)) {
+                                hasInlineMarker = true
                             }
                         }
                         buf.position(subAttrEnd)
                     }
+                } else if (attrName == "RuntimeVisibleAnnotations" && attrLen >= 2) {
+                    visibleAnnsSig = parseVisibleAnnotationsSig(
+                        buf,
+                        attrEnd,
+                        utf8Pool,
+                        constValByCp,
+                        classNameIdxByCp
+                    )
                 }
                 buf.position(attrEnd)
             }
@@ -1162,45 +1996,55 @@ internal object ClassBytecodeAnalyzer {
                     accessFlags = mFlags,
                     name = mName,
                     descriptor = mDesc,
+                    nameCpIdx = mNameIdx,
                     codeBytes = codeBytes,
                     codeOffsetInClass = codeOffsetInClass,
+                    codeAttrStartOffset = codeAttrStartOffset,
+                    codeAttrEndOffset = codeAttrEndOffset,
                     hasInlineMarker = hasInlineMarker,
                     hasStackMapTable = hasStackMapTable,
-                    exceptionRanges = exceptionRanges
+                    exceptionRanges = exceptionRanges,
+                    exceptionTableSig = exceptionEntries.joinToString(","),
+                    visibleAnnotationsSig = visibleAnnsSig
                 )
             )
         }
+        val methodsEndOffset = buf.position()
 
         val bootstrapTargets = HashMap<Int, Pair<String, String>>()
+        val bootstrapArgsSummary = HashMap<Int, String>()
+        var bootstrapAttrStartOffset = -1
+        var bootstrapAttrEndOffset = -1
+        var classVisibleAnnsSig = ""
         var hasHiltAnnotation = utf8Pool.values.any { it in hiltAnnotations }
         val classAttrsCount = buf.short.toInt() and U16_MASK
         repeat(classAttrsCount) {
+            val attrStart = buf.position()
             val attrName = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
             val attrLen = buf.int
             val attrEnd = buf.position() + attrLen
             if (attrName == "BootstrapMethods" && attrLen >= 2) {
-                val numBsm = buf.short.toInt() and U16_MASK
-                for (bsmIdx in 0..<numBsm) {
-                    buf.short // bootstrap_method_ref
-                    val numArgs = buf.short.toInt() and U16_MASK
-                    repeat(numArgs) {
-                        val argCpIdx = buf.short.toInt() and U16_MASK
-                        val mh = methodHandleByCp[argCpIdx]
-                        val mRef = mh?.let { memberRefByCp[it.second] }
-                        if (mRef != null) {
-                            val owner = classNameIdxByCp[mRef.second]?.let { utf8Pool[it] }.orEmpty()
-                            val nat = nameAndTypeByCp[mRef.third]
-                            if (owner == thisInternalName && nat != null) {
-                                val targetName = utf8Pool[nat.first].orEmpty()
-                                val targetDesc = utf8Pool[nat.second].orEmpty()
-                                bootstrapTargets[bsmIdx] = targetName to targetDesc
-                            }
-                        }
-                    }
+                bootstrapAttrStartOffset = attrStart
+                bootstrapAttrEndOffset = attrEnd
+                parseBootstrapMethodsAttribute(
+                    buf = buf,
+                    thisInternalName = thisInternalName,
+                    utf8Pool = utf8Pool,
+                    classNameIdxByCp = classNameIdxByCp,
+                    constValByCp = constValByCp,
+                    memberRefByCp = memberRefByCp,
+                    nameAndTypeByCp = nameAndTypeByCp,
+                    methodHandleByCp = methodHandleByCp,
+                    bootstrapTargets = bootstrapTargets,
+                    bootstrapArgsSummary = bootstrapArgsSummary
+                )
+            } else if (attrName == "RuntimeVisibleAnnotations" && attrLen >= 2) {
+                val sig = parseVisibleAnnotationsSig(buf, attrEnd, utf8Pool, constValByCp, classNameIdxByCp)
+                classVisibleAnnsSig = sig
+                if (utf8Pool.values.any { it in hiltAnnotations }) {
+                    hasHiltAnnotation = true
                 }
-            } else if ((attrName == "RuntimeInvisibleAnnotations" || attrName == "RuntimeVisibleAnnotations") &&
-                attrLen >= 2
-            ) {
+            } else if (attrName == "RuntimeInvisibleAnnotations" && attrLen >= 2) {
                 val numAnns = buf.short.toInt() and U16_MASK
                 if (numAnns > 0 && utf8Pool.values.any { it in hiltAnnotations }) {
                     hasHiltAnnotation = true
@@ -1230,9 +2074,164 @@ internal object ClassBytecodeAnalyzer {
             interfaces = interfaces,
             fields = fields,
             methods = methods,
+            methodsCountOffset = methodsCountOffset,
+            methodsEndOffset = methodsEndOffset,
             bootstrapTargets = bootstrapTargets,
+            bootstrapArgsSummary = bootstrapArgsSummary,
+            bootstrapAttrStartOffset = bootstrapAttrStartOffset,
+            bootstrapAttrEndOffset = bootstrapAttrEndOffset,
+            visibleAnnotationsSig = classVisibleAnnsSig,
             hasHiltAnnotation = hasHiltAnnotation
         )
+    }
+
+    private fun containsInlineLocalMarker(
+        buf: ByteBuffer,
+        utf8Pool: Map<Int, String>,
+        methodName: String
+    ): Boolean {
+        val lvCount = buf.short.toInt() and U16_MASK
+        var found = false
+        val cleanMethod = methodName.substringBefore('-').substringBefore('$')
+        repeat(lvCount) {
+            val startPc = buf.short.toInt() and U16_MASK
+            buf.short // length
+            val lvName = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
+            buf.short // descriptor_index
+            buf.short // index
+            if (lvName.startsWith("\$i\$f\$") && startPc <= 6) {
+                val markerTarget = lvName.removePrefix("\$i\$f\$").replace("-", "")
+                if (markerTarget.equals(cleanMethod, ignoreCase = true)) {
+                    found = true
+                }
+            }
+        }
+        return found
+    }
+
+    private fun parseBootstrapMethodsAttribute(
+        buf: ByteBuffer,
+        thisInternalName: String,
+        utf8Pool: Map<Int, String>,
+        classNameIdxByCp: Map<Int, Int>,
+        constValByCp: Map<Int, String>,
+        memberRefByCp: Map<Int, Triple<Int, Int, Int>>,
+        nameAndTypeByCp: Map<Int, Pair<Int, Int>>,
+        methodHandleByCp: Map<Int, Pair<Int, Int>>,
+        bootstrapTargets: MutableMap<Int, Pair<String, String>>,
+        bootstrapArgsSummary: MutableMap<Int, String>
+    ) {
+        val numBsm = buf.short.toInt() and U16_MASK
+        for (bsmIdx in 0..<numBsm) {
+            val bsmMhCpIdx = buf.short.toInt() and U16_MASK
+            val numArgs = buf.short.toInt() and U16_MASK
+            val argSummaries = ArrayList<String>(numArgs + 1)
+            methodHandleByCp[bsmMhCpIdx]?.let { mh ->
+                memberRefByCp[mh.second]?.let { mRef ->
+                    val owner = classNameIdxByCp[mRef.second]?.let { utf8Pool[it] }.orEmpty()
+                    val nat = nameAndTypeByCp[mRef.third]
+                    val mName = nat?.let { utf8Pool[it.first] }.orEmpty()
+                    argSummaries.add("BSM:$owner.$mName")
+                }
+            }
+            repeat(numArgs) {
+                val argCpIdx = buf.short.toInt() and U16_MASK
+                val mh = methodHandleByCp[argCpIdx]
+                val mRef = mh?.let { memberRefByCp[it.second] }
+                if (mRef != null) {
+                    val owner = classNameIdxByCp[mRef.second]?.let { utf8Pool[it] }.orEmpty()
+                    val nat = nameAndTypeByCp[mRef.third]
+                    if (nat != null) {
+                        val targetName = utf8Pool[nat.first].orEmpty()
+                        val targetDesc = utf8Pool[nat.second].orEmpty()
+                        argSummaries.add("MH:$owner.$targetName:$targetDesc")
+                        if (owner == thisInternalName) {
+                            bootstrapTargets[bsmIdx] = targetName to targetDesc
+                        }
+                    }
+                } else {
+                    val constSummary = constValByCp[argCpIdx]
+                        ?: classNameIdxByCp[argCpIdx]?.let { utf8Pool[it] }
+                        ?: utf8Pool[argCpIdx]
+                        ?: argCpIdx.toString()
+                    argSummaries.add(constSummary)
+                }
+            }
+            bootstrapArgsSummary[bsmIdx] = argSummaries.joinToString(",")
+        }
+    }
+
+    private fun parseVisibleAnnotationsSig(
+        buf: ByteBuffer,
+        attrEnd: Int,
+        utf8Pool: Map<Int, String>,
+        constValByCp: Map<Int, String>,
+        classNameIdxByCp: Map<Int, Int>
+    ): String = runCatching {
+        val numAnns = buf.short.toInt() and U16_MASK
+        val parts = ArrayList<String>(numAnns)
+        repeat(numAnns) {
+            if (buf.position() + 4 > attrEnd) return@runCatching parts.joinToString(";")
+            val (typeDesc, annText) = readSingleAnnotation(buf, attrEnd, utf8Pool, constValByCp, classNameIdxByCp)
+            if (typeDesc.isNotEmpty() && typeDesc !in ignoredDebugAnnotations) {
+                parts.add(annText)
+            }
+        }
+        parts.joinToString(";")
+    }.getOrDefault("")
+
+    private fun readSingleAnnotation(
+        buf: ByteBuffer,
+        attrEnd: Int,
+        utf8Pool: Map<Int, String>,
+        constValByCp: Map<Int, String>,
+        classNameIdxByCp: Map<Int, Int>
+    ): Pair<String, String> {
+        val typeDesc = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
+        val numPairs = buf.short.toInt() and U16_MASK
+        val pairs = ArrayList<String>(numPairs)
+        repeat(numPairs) {
+            if (buf.position() + 3 > attrEnd) return typeDesc to "@$typeDesc(${pairs.joinToString(",")})"
+            val elemName = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
+            val elemVal = readAnnotationElementValue(buf, attrEnd, utf8Pool, constValByCp, classNameIdxByCp)
+            pairs.add("$elemName=$elemVal")
+        }
+        return typeDesc to "@$typeDesc(${pairs.joinToString(",")})"
+    }
+
+    private fun readAnnotationElementValue(
+        buf: ByteBuffer,
+        attrEnd: Int,
+        utf8Pool: Map<Int, String>,
+        constValByCp: Map<Int, String>,
+        classNameIdxByCp: Map<Int, Int>
+    ): String {
+        if (buf.position() >= attrEnd) return ""
+        return when (val tag = (buf.get().toInt() and 0xFF).toChar()) {
+            'B', 'C', 'D', 'F', 'I', 'J', 'S', 'Z', 's' -> {
+                val cpIdx = buf.short.toInt() and U16_MASK
+                constValByCp[cpIdx] ?: utf8Pool[cpIdx] ?: cpIdx.toString()
+            }
+            'e' -> {
+                val enumType = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
+                val enumConst = utf8Pool[buf.short.toInt() and U16_MASK].orEmpty()
+                "$enumType.$enumConst"
+            }
+            'c' -> {
+                val clsIdx = buf.short.toInt() and U16_MASK
+                utf8Pool[clsIdx] ?: classNameIdxByCp[clsIdx]?.let { utf8Pool[it] } ?: clsIdx.toString()
+            }
+            '@' -> readSingleAnnotation(buf, attrEnd, utf8Pool, constValByCp, classNameIdxByCp).second
+            '[' -> {
+                val count = buf.short.toInt() and U16_MASK
+                val items = ArrayList<String>(count)
+                repeat(count) {
+                    items.add(readAnnotationElementValue(buf, attrEnd, utf8Pool, constValByCp, classNameIdxByCp))
+                }
+                "[${items.joinToString(",")}]"
+            }
+            else -> tag.toString()
+        }
     }
 
     private fun readS4(bytes: ByteArray, offset: Int): Int {
@@ -1243,6 +2242,13 @@ internal object ClassBytecodeAnalyzer {
     }
 
     private fun writeU2(out: ByteArrayOutputStream, value: Int) {
+        out.write((value ushr 8) and 0xFF)
+        out.write(value and 0xFF)
+    }
+
+    private fun writeU4(out: ByteArrayOutputStream, value: Int) {
+        out.write((value ushr 24) and 0xFF)
+        out.write((value ushr 16) and 0xFF)
         out.write((value ushr 8) and 0xFF)
         out.write(value and 0xFF)
     }

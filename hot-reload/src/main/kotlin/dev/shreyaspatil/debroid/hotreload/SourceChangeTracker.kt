@@ -34,15 +34,20 @@ class SourceChangeTracker(
     private val canonicalFileCache = mutableMapOf<File, File>()
 
     private var watchService: WatchService? = null
-    private var isPollingWatchService: Boolean = false
     private val watchKeys = mutableMapOf<WatchKey, WatchedDir>()
     private val watchedDirTimestamps = mutableMapOf<File, WatchedDir>()
     private val dirtyCandidates = mutableSetOf<File>()
     private var needsFullScan: Boolean = false
+    private val wakeLock = Object()
+
+    @Volatile
+    private var wokenUp: Boolean = false
 
     companion object {
         private const val DELETED_SENTINEL = "<DELETED>"
         private const val DEFAULT_AWAIT_TIMEOUT_MS = 300L
+        private const val FAST_POLL_SLICE_MS = 80L
+        private const val COALESCE_QUIET_WINDOW_MS = 60L
 
         private val watchKinds = arrayOf<WatchEvent.Kind<*>>(
             StandardWatchEventKinds.ENTRY_CREATE,
@@ -71,21 +76,40 @@ class SourceChangeTracker(
         }
     }
 
+    fun wakeUp() {
+        synchronized(wakeLock) {
+            wokenUp = true
+            wakeLock.notifyAll()
+        }
+    }
+
     fun awaitChanges(timeoutMs: Long = DEFAULT_AWAIT_TIMEOUT_MS): DetectedChanges {
         val ws = watchService
         if (ws == null) {
             if (timeoutMs > 0L) {
-                Thread.sleep(timeoutMs)
+                waitOnWakeLock(timeoutMs)
             }
             return pollChanges()
         }
 
         drainWatchEvents(ws, null)
-        if (dirtyCandidates.isEmpty() && !needsFullScan && timeoutMs > 0L) {
-            val signaledKey = runCatching { ws.poll(timeoutMs, TimeUnit.MILLISECONDS) }.getOrNull()
+        if (dirtyCandidates.isEmpty() && !needsFullScan) {
+            collectTimestampDirtyFiles()
+        }
+
+        var remainingMs = timeoutMs
+        while (shouldContinueAwaiting(remainingMs)) {
+            val sliceMs = minOf(remainingMs, FAST_POLL_SLICE_MS)
+            val startNs = System.nanoTime()
+            val signaledKey = runCatching { ws.poll(sliceMs, TimeUnit.MILLISECONDS) }.getOrNull()
             if (signaledKey != null) {
                 drainWatchEvents(ws, signaledKey)
             }
+            if (dirtyCandidates.isEmpty() && !needsFullScan) {
+                collectTimestampDirtyFiles()
+            }
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs).coerceAtLeast(1L)
+            remainingMs -= elapsedMs
         }
 
         if (needsFullScan) {
@@ -94,12 +118,12 @@ class SourceChangeTracker(
             return pollChanges()
         }
 
-        if (dirtyCandidates.isEmpty() && isPollingWatchService) {
-            collectTimestampDirtyFiles()
-        }
-
         if (dirtyCandidates.isEmpty()) {
             return DetectedChanges(emptyMap(), emptyList())
+        }
+
+        if (timeoutMs > 0L) {
+            coalesceMultiFileEdits(ws)
         }
 
         val candidates = LinkedHashSet<File>(dirtyCandidates.size + failedAttemptHashes.size)
@@ -107,6 +131,36 @@ class SourceChangeTracker(
         candidates.addAll(failedAttemptHashes.keys)
         dirtyCandidates.clear()
         return evaluateCandidates(candidates)
+    }
+
+    private fun shouldContinueAwaiting(remainingMs: Long): Boolean {
+        if (dirtyCandidates.isNotEmpty() || needsFullScan || remainingMs <= 0L) return false
+        return !consumeWokenUp()
+    }
+
+    private fun coalesceMultiFileEdits(ws: WatchService) {
+        val signaled = runCatching { ws.poll(COALESCE_QUIET_WINDOW_MS, TimeUnit.MILLISECONDS) }.getOrNull()
+        if (signaled != null) {
+            drainWatchEvents(ws, signaled)
+        }
+        collectTimestampDirtyFiles()
+    }
+
+    private fun consumeWokenUp(): Boolean {
+        synchronized(wakeLock) {
+            val wasWoken = wokenUp
+            wokenUp = false
+            return wasWoken
+        }
+    }
+
+    private fun waitOnWakeLock(timeoutMs: Long) {
+        synchronized(wakeLock) {
+            if (!wokenUp && timeoutMs > 0L) {
+                wakeLock.wait(timeoutMs)
+            }
+            wokenUp = false
+        }
     }
 
     fun pollChanges(): DetectedChanges {
@@ -334,9 +388,7 @@ class SourceChangeTracker(
     private fun resetWatchService() {
         close()
         runCatching {
-            val ws = FileSystems.getDefault().newWatchService()
-            watchService = ws
-            isPollingWatchService = ws.javaClass.simpleName.contains("Polling", ignoreCase = true)
+            watchService = FileSystems.getDefault().newWatchService()
         }
     }
 

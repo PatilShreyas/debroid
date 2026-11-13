@@ -506,4 +506,133 @@ class HotReloadSessionTest {
             parsed
         )
     }
+
+    @Test
+    fun `emits zero-class Reloaded completion event when compile produces empty payloads`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+        val mainKt = File(appDir, "src/main/kotlin/MainScreen.kt").apply {
+            parentFile.mkdirs()
+            writeText("fun MainScreen() = 1")
+        }
+
+        val adbManager = mockk<AdbManager>(relaxed = true)
+        every { adbManager.isAppDebuggable("com.example.app") } returns Result.success(true)
+        every { adbManager.findPid("com.example.app") } returns Result.success(9999)
+
+        val compiler = mockk<IncrementalDexCompiler>(relaxed = true)
+        every { compiler.compileAndDex(any(), any()) } returns CompilationOutcome.Success(
+            classPayloads = emptyList(),
+            combinedDexFile = null
+        )
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        val tracker = SourceChangeTracker(layout).apply { initializeBaseline() }
+        mainKt.writeText("// comment only\nfun MainScreen() = 1")
+        mainKt.setLastModified(mainKt.lastModified() + 5000L)
+
+        val session = HotReloadSession(
+            config = HotReloadConfig(appId = "com.example.app", projectDir = tempDir, once = true),
+            adbManager = adbManager,
+            layout = layout,
+            tracker = tracker,
+            compiler = compiler,
+            agentInstaller = mockk(relaxed = true)
+        )
+
+        val events = mutableListOf<HotReloadEvent>()
+        session.run { events.add(it) }
+
+        assertEquals(3, events.size)
+        assertTrue(events[0] is HotReloadEvent.Watching)
+        assertTrue(events[1] is HotReloadEvent.Reloading)
+        val reloaded = events[2] as HotReloadEvent.Reloaded
+        assertEquals(0, reloaded.redefinedCount)
+        assertEquals(UiRefreshMode.NONE, reloaded.uiRefresh)
+    }
+
+    @Test
+    fun `trySyncWithRunningWatcher flushes pending edit on active watcher and returns completion lines`() {
+        File(tempDir, "settings.gradle.kts").writeText("include(\":app\")")
+        val appDir = File(tempDir, "app").apply { mkdirs() }
+        File(appDir, "build.gradle.kts").writeText("plugins { id(\"com.android.application\") }")
+        val mainKt = File(appDir, "src/main/kotlin/MainScreen.kt").apply {
+            parentFile.mkdirs()
+            writeText("fun MainScreen() = 1")
+        }
+        val registryDir = File(tempDir, "registry").apply { mkdirs() }
+
+        val adbManager = mockk<AdbManager>(relaxed = true)
+        every { adbManager.isAppDebuggable("com.example.app") } returns Result.success(true)
+        every { adbManager.findPid("com.example.app") } returns Result.success(9999)
+
+        val dexFile = File(tempDir, "redefine_0.dex").apply { writeBytes(byteArrayOf(1)) }
+        val compiler = mockk<IncrementalDexCompiler>(relaxed = true)
+        every { compiler.compileAndDex(any(), any()) } returns CompilationOutcome.Success(
+            classPayloads = listOf(ClassDexPayload("MainScreenKt", dexFile)),
+            combinedDexFile = dexFile
+        )
+
+        val installer = mockk<JvmtiAgentInstaller>()
+        every { installer.applyHotReload("com.example.app", any(), any()) } returns AgentExecutionResult.Success(
+            mode = ReloadMode.JVMTI_HOT_SWAP,
+            redefinedCount = 1,
+            newClassesCount = 0,
+            uiRefresh = UiRefreshMode.COMPOSE_HOT_RELOAD
+        )
+
+        val layout = GradleProjectScanner.scan(tempDir)
+        val tracker = SourceChangeTracker(layout).apply { initializeBaseline() }
+        val session = HotReloadSession(
+            config = HotReloadConfig(
+                appId = "com.example.app",
+                projectDir = tempDir,
+                once = false,
+                intervalMs = 5_000L // Long interval proves --once wakes watcher immediately!
+            ),
+            adbManager = adbManager,
+            layout = layout,
+            tracker = tracker,
+            compiler = compiler,
+            agentInstaller = installer,
+            syncRegistryDir = registryDir
+        )
+
+        val watchingLatch = java.util.concurrent.CountDownLatch(1)
+        val watcherThread = Thread {
+            session.run { event ->
+                if (event is HotReloadEvent.Watching) {
+                    watchingLatch.countDown()
+                }
+            }
+        }.apply { start() }
+
+        try {
+            assertTrue(watchingLatch.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            // Wait briefly for server socket port file to be written
+            val portFile = HotReloadSyncCoordinator.portFileFor("com.example.app", tempDir, registryDir)
+            val deadline = System.currentTimeMillis() + 2_000L
+            while (!portFile.exists() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10L)
+            }
+            assertTrue(portFile.exists())
+
+            mainKt.writeText("fun MainScreen() = 42")
+            mainKt.setLastModified(mainKt.lastModified() + 10_000L)
+
+            val syncedLines = mutableListOf<String>()
+            val synced = HotReloadSyncCoordinator.trySyncWithRunningWatcher(
+                config = HotReloadConfig(appId = "com.example.app", projectDir = tempDir, once = true),
+                registryDir = registryDir,
+                onLine = { syncedLines.add(it) }
+            )
+            assertTrue(synced)
+            assertTrue(syncedLines.any { it.startsWith("[RELOADING]") })
+            assertTrue(syncedLines.any { it.startsWith("[RELOADED] mode=JVMTI_HOT_SWAP classes=1") })
+        } finally {
+            session.stop()
+            watcherThread.join(3_000L)
+        }
+    }
 }

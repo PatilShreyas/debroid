@@ -14,14 +14,23 @@ debroid hot-reload <app_id> [-d/--project-dir <path>] [-v/--variant <variant>] [
 | `-d, --project-dir <path>` | `.` | Root directory of the Android Gradle project (containing `settings.gradle` or `settings.gradle.kts`). |
 | `-v, --variant <variant>` | `debug` *(auto-detected from `<app_id>` when flavored)* | Build variant to compile and watch (e.g. `debug`, `demoDebug`, `freeDebug`). Automatically inferred from `<app_id>` and build metadata when left as default. |
 | `--interval-ms <ms>` | `300` | File polling interval in milliseconds (minimum `100`). |
-| `--once` | `false` | Perform a single check/reload pass for modified files and exit immediately. |
+| `--once` | `false` | Synchronize with an active background watcher for `<app_id>` (flushing pending edits immediately and returning the `[STATUS]` result), or perform a single reload pass and exit if no watcher is running. |
 | `--no-fallback` | `false` | Disable automatic fallback to full APK installation (`install<Variant>`) when XML resources, `AndroidManifest.xml`, or incompatible class hierarchy changes occur. |
 
 ---
 
 ## Agent Workflow
 
-When making multiple edits across a task, run `debroid hot-reload` continuously as a background task rather than invoking `--once` repeatedly.
+Always keep a **single continuous `debroid hot-reload` watcher** running in the background for the duration of your task so Gradle module metadata, baseline `.class`/`.dex` snapshots, and the in-process `D8` compiler stay warm in memory.
+
+### Choosing How to Read Reload Events (Based on Your Harness)
+
+| Harness Capability | Recommended Mode | How It Works |
+| :--- | :--- | :--- |
+| **Has live background stream monitoring** *(e.g. Claude Code `Monitor` / live background task output, interactive terminals)* | **Continuous Watcher Stream (Preferred)** | Start `debroid hot-reload <app_id> -d <project_dir>` in the background and monitor its streamed stdout directly. **Do not run `--once` after edits** — saving a file automatically triggers the reload and streams `[RELOADED]` / `[COMPILE_ERROR]` / `[RUNTIME_ERROR]` with zero extra commands. |
+| **No live stream monitoring** *(background tasks only notify on exit; `sleep`-polling log files is undesirable)* | **Background Watcher + `--once` Sync Barrier** | Start `debroid hot-reload <app_id> -d <project_dir>` in the background once, then after saving edits run `debroid hot-reload <app_id> -d <project_dir> --once` in the foreground to flush and block until the active watcher finishes its reload pass (instead of `sleep` + log scraping). |
+
+> ⚠️ **Never invoke `--once` standalone without a running background watcher during iteration:** Without an active watcher, `--once` cannot hold a pre-edit baseline or warm compiler state across edits.
 
 ### Step 1: Ensure the App is Running on the Target Screen
 1. Check if the process is running (`adb shell pidof <app_id>`). If not, launch it:
@@ -31,7 +40,7 @@ When making multiple edits across a task, run `debroid hot-reload` continuously 
    *(If the APK is not yet installed or is out of sync with the workspace, run `./gradlew :<app-module>:installDebug` once before launching).*
 2. Navigate to the target screen and populate any necessary state (e.g. text inputs, list items, `ViewModel` state) so edits are verified against active state.
 
-### Step 2: Start the Watcher in the Background
+### Step 2: Start the Continuous Watcher in the Background
 ```bash
 debroid hot-reload <app_id> -d <project_dir>
 ```
@@ -41,13 +50,19 @@ Wait for `[WATCHING]` in the output before editing files:
 ```
 > ⚠️ Do not edit source files before `[WATCHING]` is printed; the startup scan snapshots current files as the baseline.
 
-### Step 3: Edit, Check Status, and Verify
-1. **Save changes** to the target `.kt` or `.java` file(s).
-2. **Read the watcher output**:
-   - `[RELOADING] modules=[:app] files=[MyScreen.kt]`
-   - `[RELOADED] mode=JVMTI_HOT_SWAP classes=2 new_classes=8 ui=COMPOSE_HOT_RELOAD duration=...ms`
+### Step 3: Edit, Observe `[STATUS]`, and Verify
+1. **Save changes** to the target `.kt` or `.java` file(s). Multiple rapid/parallel edits are automatically coalesced into a single reload pass.
+2. **Wait for the completion `[STATUS]` event**:
+   - **If your harness supports live background monitoring (Preferred):** Simply wait for the monitored background watcher stream to emit `[RELOADED]` (or `[COMPILE_ERROR]` / `[RUNTIME_ERROR]`) — no extra CLI command needed:
+     - `[RELOADING] modules=[:app] files=[MyScreen.kt]`
+     - `[RELOADED] mode=JVMTI_HOT_SWAP classes=2 new_classes=8 ui=COMPOSE_HOT_RELOAD duration=...ms`
+   - **Only if your harness cannot monitor live background streams:** Use `--once` as a synchronous barrier against the running background watcher instead of guessing `sleep` durations:
+     ```bash
+     debroid hot-reload <app_id> -d <project_dir> --once && android layout --pretty
+     ```
+   - *(Note: If an edit only touched comments, imports, or formatting with zero executable bytecode changes, `debroid` still emits `[RELOADED] mode=JVMTI_HOT_SWAP classes=0 new_classes=0 ui=NONE duration=...ms` so every `[RELOADING]` pairs 1-to-1 with a completion event).*
 3. **Verify the updated behavior on device**:
-   - Visual UI check: `android screen` or `adb exec-out screencap -p > screen.png`.
+   - Visual UI check: `android screen capture -o screen.png` or `adb exec-out screencap -p > screen.png`.
    - Hierarchy/bounds check: `android layout --pretty` or `adb shell uiautomator dump`.
    - Event-handler check: If you modified an action method (e.g. a button click handler or `ViewModel` function), trigger the interaction (`adb shell input tap X Y`) to execute the new logic.
 4. Stop the background watcher task once all iterations are complete.
@@ -90,7 +105,8 @@ Wait for `[WATCHING]` in the output before editing files:
 - **Static & Top-Level Properties:** Changes to `const val` constants and static top-level / `companion object` / `object` property initializers are automatically updated in memory while keeping unchanged static state intact.
 - **Cross-Module & Composite (`includeBuild`) Edits:** Modifying method signatures, `inline` functions, or `const val` values in a library or `includeBuild` module automatically recompiles dependent modules and reloads all affected call sites together.
 - **Computed Getters (`val x: String get() = ...`):** Re-evaluated automatically during the Compose recomposition triggered at the end of the reload.
-- **Constructors & `init {}` Blocks:** Do **not** re-run on already-instantiated `ViewModel` or singleton objects in memory. To execute updated `init {}` or constructor property initialization logic, navigate away and back so a new instance is created, or move the logic into a callable method.
+- **Constructors, `init {}` Blocks, & `StateFlow` Pipelines on `ViewModel`s:** Editing a `ViewModel` subclass, an inner coroutine/`Flow` lambda, or a helper in the same `*ViewModel.kt` file automatically evicts active instances from Activity, Fragment, and Jetpack Navigation `ViewModelStore`s so a fresh `ViewModel` is constructed with the updated `<init>()` / `StateFlow` pipeline. (Non-`ViewModel` singletons do not re-run `init {}` on already-constructed instances).
+- **`interface` & `sealed interface` Default Methods:** Editing default methods or properties on Kotlin `interface` / `sealed interface` types hot-reloads in-place without triggering `JVMTI_ERROR_79` fallback reinstalls.
 
 ### 3. `Activity`, `Fragment`, & Android `View` Subclasses (Including Hilt `@AndroidEntryPoint`)
 - Modifying an `Activity` or `android.view.View` subclass (including classes annotated with Hilt's `@AndroidEntryPoint` or `@HiltAndroidApp`) hot-reloads in-place and triggers `ui=ACTIVITY_RECREATE`, recreating the active `Activity` through Android's standard saved-instance-state lifecycle without reinstalling the APK.
