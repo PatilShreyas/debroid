@@ -169,7 +169,7 @@ Here is the full list of commands and their signatures (note: all commands suppo
 | `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>] [--include-static] [--include-internal] [--pretty]` | Inspects object fields. Filters out static/synthetic noise by default. |
 | `step` | `debroid step <session_id> <thread_id> <action> [--pretty]` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
 | `update` | `debroid update [--check-only] [--pretty]` | Checks for CLI updates or performs an in-place self-update to the latest release |
-| `hot-reload` | `debroid hot-reload <app_id> [-d/--project-dir=<path>] [-v/--variant=<variant>] [--interval-ms=<ms>] [--once] [--no-fallback]` | Watches source files and hot-reloads bytecode and Compose UI via JVMTI (streams plain-text `[STATUS]` events) |
+| `hot-reload` | `debroid hot-reload <app_id> [-d/--project-dir=<path>] [-v/--variant=<variant>] [--interval-ms=<ms>] [--once] [--no-fallback] [--java-home=<path>] [--gradle-args=<args>...]` | Watches source files and hot-reloads bytecode and Compose UI via JVMTI (streams plain-text `[STATUS]` events) |
 
 > **Daemon Logs:** When the background daemon is automatically spawned by CLI commands, stdout and stderr logs are recorded in `~/.debroid/daemon.log` for troubleshooting and startup diagnostics.
 >

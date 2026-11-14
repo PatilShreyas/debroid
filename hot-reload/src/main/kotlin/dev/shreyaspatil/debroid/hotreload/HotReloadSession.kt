@@ -14,20 +14,31 @@ data class HotReloadConfig(
     val variant: String = "debug",
     val intervalMs: Long = 300L,
     val once: Boolean = false,
-    val allowFallback: Boolean = true
-)
+    val allowFallback: Boolean = true,
+    val javaHome: File? = null,
+    val gradleArgs: List<String> = emptyList()
+) {
+    fun toGradleExecutionConfig(): GradleExecutionConfig = GradleExecutionConfig(
+        javaHome = javaHome?.let(GradleJvmResolver::normalizeJdkHome),
+        extraGradleArgs = gradleArgs
+    )
+}
 
 @Suppress("LongParameterList", "TooManyFunctions")
 class HotReloadSession(
     private val config: HotReloadConfig,
     private val adbManager: AdbManager = AdbManager(),
     private val commandRunner: CommandRunner = DefaultCommandRunner(),
-    private val layout: GradleProjectLayout = GradleProjectScanner.scan(config.projectDir),
+    private val layout: GradleProjectLayout = GradleProjectScanner.scan(
+        startDir = config.projectDir,
+        gradleConfig = config.toGradleExecutionConfig()
+    ),
     private val tracker: SourceChangeTracker = SourceChangeTracker(layout).apply { initializeBaseline() },
     private val compiler: IncrementalDexCompiler = IncrementalDexCompiler(
         projectRoot = layout.rootDir,
         variant = layout.resolveVariant(config.appId, config.variant),
-        commandRunner = commandRunner
+        commandRunner = commandRunner,
+        gradleConfig = layout.resolvedGradleConfig
     ).apply { snapshotModuleClasses(layout.modules) },
     private val agentInstaller: JvmtiAgentInstaller = JvmtiAgentInstaller(adbManager),
     private val fallbackInstaller: (GradleModule) -> Result<Unit> = { appModule ->
@@ -35,7 +46,8 @@ class HotReloadSession(
             layout.rootDir,
             appModule,
             layout.resolveVariant(config.appId, config.variant),
-            commandRunner
+            commandRunner,
+            layout.resolvedGradleConfig
         )
     },
     private val syncRegistryDir: File = HotReloadSyncCoordinator.defaultRegistryDir()
@@ -73,21 +85,61 @@ class HotReloadSession(
             "sun."
         )
 
+        private fun isIncompleteStaticFallback(layout: GradleProjectLayout): Boolean {
+            if (layout.scanDiagnostic == null) return false
+            val hasAppModule = layout.modules.any { it.type == ModuleType.ANDROID_APP }
+            if (!hasAppModule) return true
+            if (layout.modules.size <= 1) {
+                val settingsFile = File(layout.rootDir, "settings.gradle.kts").takeIf { it.isFile }
+                    ?: File(layout.rootDir, "settings.gradle").takeIf { it.isFile }
+                val text = settingsFile?.let { runCatching { it.readText() }.getOrNull() }.orEmpty()
+                if (text.contains("includeBuild") || Regex("""\binclude\b""").findAll(text).count() > 1) {
+                    return true
+                }
+            }
+            return false
+        }
+
         private fun runFallbackGradleInstall(
             rootDir: File,
             appModule: GradleModule,
             variant: String,
-            commandRunner: CommandRunner
+            commandRunner: CommandRunner,
+            gradleConfig: GradleExecutionConfig = GradleExecutionConfig()
         ): Result<Unit> {
             val isWin = System.getProperty("os.name").lowercase(Locale.US).contains("win")
-            val wrapper = File(rootDir, if (isWin) "gradlew.bat" else "gradlew")
-            val gradleBin = if (wrapper.exists()) wrapper.absolutePath else "gradle"
+            val wrapperName = if (isWin) "gradlew.bat" else "gradlew"
+            val wrapper = File(rootDir, wrapperName).takeIf { it.isFile }
+                ?: appModule.includedBuildRoot?.let { File(it, wrapperName).takeIf { f -> f.isFile } }
+            val gradleBin = wrapper?.absolutePath ?: "gradle"
             val capVariant = variant.replaceFirstChar { it.uppercaseChar() }
-            val task = "${appModule.gradlePath}:install$capVariant"
-            return commandRunner.runCommand(
-                listOf(gradleBin, task, "--console=plain", "-p", rootDir.absolutePath),
-                INSTALL_TIMEOUT_SECONDS
-            ).map { }
+            val prefix = if (appModule.gradlePath == ":") "" else appModule.gradlePath
+            val task = "$prefix:install$capVariant"
+            val cmd = listOf(gradleBin, task, "--console=plain", "-p", rootDir.absolutePath) +
+                gradleConfig.buildJvmAndExtraFlags()
+            val env = gradleConfig.buildEnvironment()
+            val primaryRes = if (env.isEmpty()) {
+                commandRunner.runCommand(cmd, INSTALL_TIMEOUT_SECONDS)
+            } else {
+                commandRunner.runCommand(cmd, INSTALL_TIMEOUT_SECONDS, env)
+            }
+            if (primaryRes.isSuccess || appModule.includedBuildRoot == null) {
+                return primaryRes.map { }
+            }
+            // Fallback for nested composite builds where appModule lives inside an includedBuildRoot
+            val localPrefix = if (appModule.localGradlePath == ":") "" else appModule.localGradlePath
+            val localCmd = listOf(
+                gradleBin,
+                "$localPrefix:install$capVariant",
+                "--console=plain",
+                "-p",
+                appModule.includedBuildRoot.absolutePath
+            ) + gradleConfig.buildJvmAndExtraFlags()
+            return if (env.isEmpty()) {
+                commandRunner.runCommand(localCmd, INSTALL_TIMEOUT_SECONDS).map { }
+            } else {
+                commandRunner.runCommand(localCmd, INSTALL_TIMEOUT_SECONDS, env).map { }
+            }
         }
     }
 
@@ -100,6 +152,26 @@ class HotReloadSession(
     }
 
     fun run(onEvent: (HotReloadEvent) -> Unit) {
+        if (config.javaHome != null && GradleJvmResolver.normalizeJdkHome(config.javaHome) == null) {
+            onEvent(
+                HotReloadEvent.Error(
+                    code = "INVALID_JAVA_HOME",
+                    message = "Invalid --java-home directory: ${config.javaHome.path} (no bin/java executable found)"
+                )
+            )
+            return
+        }
+
+        if (isIncompleteStaticFallback(layout)) {
+            onEvent(
+                HotReloadEvent.Error(
+                    code = "PROJECT_SCAN_FAILED",
+                    message = "Gradle project discovery failed (${layout.scanDiagnostic}). " +
+                        "Pass --java-home or --gradle-args if required by this project."
+                )
+            )
+            return
+        }
         val debuggableRes = adbManager.isAppDebuggable(config.appId)
         if (debuggableRes.isFailure || debuggableRes.getOrNull() == false) {
             onEvent(

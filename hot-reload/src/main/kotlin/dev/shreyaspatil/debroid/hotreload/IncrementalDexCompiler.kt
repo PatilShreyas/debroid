@@ -21,8 +21,10 @@ class IncrementalDexCompiler(
     private val projectRoot: File,
     private val variant: String = "debug",
     private val commandRunner: CommandRunner = DefaultCommandRunner(),
-    private val d8PathProvider: () -> String = { findD8Executable() }
+    private val d8PathProvider: () -> String = { findD8Executable() },
+    gradleConfig: GradleExecutionConfig = GradleExecutionConfig()
 ) {
+    private var activeGradleConfig: GradleExecutionConfig = gradleConfig
     private data class ClassFileMeta(
         val lastModified: Long,
         val length: Long,
@@ -120,13 +122,24 @@ class IncrementalDexCompiler(
             knownModulesByPath[module.gradlePath] = module
             moduleDirsByPath[module.gradlePath] = module.moduleDir
         }
+        if (activeGradleConfig.javaHome == null) {
+            activeGradleConfig = GradleJvmResolver.resolveForProject(
+                projectRoot = projectRoot,
+                explicitJavaHome = null,
+                extraGradleArgs = activeGradleConfig.extraGradleArgs
+            )
+        }
         desugarD8Config = CoreLibraryDesugarResolver.resolve(projectRoot, modules, ::resolveModuleVariant)
         kspChangeDetector.snapshotModules(modules, ::resolveModuleVariant)
 
         val d8Path = d8PathProvider()
         InProcessD8Runner.warmUpAsync(d8Path, d8BaseFlags(d8Path))
         if (commandRunner is DefaultCommandRunner) {
-            InProcessGradleRunner.warmUpAsync(projectRoot)
+            InProcessGradleRunner.warmUpAsync(
+                projectRoot = projectRoot,
+                javaHome = activeGradleConfig.javaHome,
+                initialArgs = listOf("--console=plain") + activeGradleConfig.buildJvmAndExtraFlags()
+            )
         }
     }
 
@@ -271,14 +284,15 @@ class IncrementalDexCompiler(
             val capVariant = modVariant.replaceFirstChar { it.uppercaseChar() }
             val hasJava = files.any { it.extension.equals("java", ignoreCase = true) }
             val kotlinTask = resolveKotlinCompileTask(module, modVariant, capVariant)
-            tasks.add("${module.gradlePath}:$kotlinTask")
+            val prefix = if (module.gradlePath == ":") "" else module.gradlePath
+            tasks.add("$prefix:$kotlinTask")
             if (hasJava) {
                 val javaTask = if (kotlinTask == "compileKotlin") {
                     "compileJava"
                 } else {
                     "compile${capVariant}JavaWithJavac"
                 }
-                tasks.add("${module.gradlePath}:$javaTask")
+                tasks.add("$prefix:$javaTask")
             }
         }
         return tasks.distinct()
@@ -326,14 +340,17 @@ class IncrementalDexCompiler(
 
         val tasks = buildGradleTasksForModules(changesByModule)
         val gradlew = resolveGradleWrapper()
-        val gradleFlags = listOf("--console=plain", "-p", projectRoot.absolutePath)
+        val gradleFlags = listOf("--console=plain", "-p", projectRoot.absolutePath) +
+            activeGradleConfig.buildJvmAndExtraFlags()
         val kspFlags = kspChangeDetector.buildKspExclusionFlags(changesByModule, ::resolveModuleVariant)
 
-        var compileResult = executeGradleCompile(gradlew, tasks, gradleFlags + kspFlags)
+        var compileResult = executeGradleCompile(gradlew, tasks, gradleFlags + kspFlags, changesByModule)
         if (compileResult.isFailure && kspFlags.isNotEmpty()) {
             val errText = compileResult.exceptionOrNull()?.message.orEmpty()
             if (shouldRetryWithoutKspSkip(errText)) {
-                compileResult = executeGradleCompile(gradlew, tasks, gradleFlags)
+                val refreshedFlags = listOf("--console=plain", "-p", projectRoot.absolutePath) +
+                    activeGradleConfig.buildJvmAndExtraFlags()
+                compileResult = executeGradleCompile(gradlew, tasks, refreshedFlags, changesByModule)
             }
         }
         if (compileResult.isFailure) {
@@ -384,7 +401,9 @@ class IncrementalDexCompiler(
                         val kspDir = File(dep.moduleDir, "build/generated/ksp/$modVar")
                         if (kspDir.isDirectory) listOf("-x", "${dep.gradlePath}:ksp${capVar}Kotlin") else null
                     }.flatten()
-                    val depResult = executeGradleCompile(gradlew, depTasks, gradleFlags + depKspFlags)
+                    val depFlags = listOf("--console=plain", "-p", projectRoot.absolutePath) +
+                        activeGradleConfig.buildJvmAndExtraFlags() + depKspFlags
+                    val depResult = executeGradleCompile(gradlew, depTasks, depFlags, depChanges)
                     if (depResult.isSuccess) {
                         val depCollected = when (val depRes = collectModifiedClasses(depChanges)) {
                             is ClassCollectionResult.Incompatible -> {
@@ -411,31 +430,88 @@ class IncrementalDexCompiler(
     private fun executeGradleCompile(
         gradlew: String,
         tasks: List<String>,
-        gradleFlags: List<String>
+        gradleFlags: List<String>,
+        changesByModule: Map<GradleModule, List<File>> = emptyMap()
     ): Result<String> {
-        var compileResult = runGradleTasks(gradlew, tasks, gradleFlags)
+        var compileResult = runGradleTasks(projectRoot, gradlew, tasks, gradleFlags)
+        if (compileResult.isFailure) {
+            val firstErr = compileResult.exceptionOrNull()?.message.orEmpty()
+            val fallbackJdk = GradleJvmResolver.findFallbackJavaHomeForError(firstErr, activeGradleConfig.javaHome)
+            if (fallbackJdk != null) {
+                activeGradleConfig = activeGradleConfig.copy(javaHome = fallbackJdk)
+                val updatedFlags = gradleFlags.filterNot { it.startsWith("-Dorg.gradle.java.home=") } +
+                    activeGradleConfig.buildJvmAndExtraFlags().filter { it.startsWith("-Dorg.gradle.java.home=") }
+                compileResult = runGradleTasks(projectRoot, gradlew, tasks, updatedFlags)
+            }
+        }
         if (compileResult.isFailure) {
             val rawError = compileResult.exceptionOrNull()?.message.orEmpty()
             val retryTasks = resolveFallbackTasksOnTaskNotFound(tasks, rawError)
             if (retryTasks != null) {
-                compileResult = runGradleTasks(gradlew, retryTasks, gradleFlags)
+                compileResult = runGradleTasks(projectRoot, gradlew, retryTasks, gradleFlags)
+            } else if (shouldRetryPerIncludedBuild(rawError, changesByModule)) {
+                compileResult = compilePerBuildRoot(gradlew, changesByModule)
             }
         }
         return compileResult
     }
 
+    private fun shouldRetryPerIncludedBuild(
+        rawError: String,
+        changesByModule: Map<GradleModule, List<File>>
+    ): Boolean {
+        if (changesByModule.keys.none { it.includedBuildRoot != null }) return false
+        return rawError.contains("not found in root project", ignoreCase = true) ||
+            rawError.contains("not found in project", ignoreCase = true) ||
+            rawError.contains("Included build", ignoreCase = true)
+    }
+
+    private fun compilePerBuildRoot(
+        defaultGradlew: String,
+        changesByModule: Map<GradleModule, List<File>>
+    ): Result<String> {
+        val grouped = changesByModule.entries.groupBy { it.key.includedBuildRoot ?: projectRoot }
+        for ((targetRoot, entries) in grouped) {
+            val localMap = entries.associate { (mod, files) ->
+                val effectivePath = if (targetRoot != projectRoot) mod.localGradlePath else mod.gradlePath
+                mod.copy(gradlePath = effectivePath) to files
+            }
+            val rawTasks = buildGradleTasksForModules(localMap).map { spec ->
+                if (spec.startsWith("::")) spec.removePrefix(":") else spec
+            }
+            val bin = resolveGradleWrapperForDir(targetRoot) ?: defaultGradlew
+            val flags = listOf("--console=plain", "-p", targetRoot.absolutePath) +
+                activeGradleConfig.buildJvmAndExtraFlags()
+            val res = runGradleTasks(targetRoot, bin, rawTasks, flags)
+            if (res.isFailure) return res
+        }
+        return Result.success("")
+    }
+
     private fun runGradleTasks(
+        targetProjectRoot: File,
         gradlew: String,
         tasks: List<String>,
         gradleFlags: List<String>
     ): Result<String> {
         if (commandRunner is DefaultCommandRunner) {
-            val inProcessRes = InProcessGradleRunner.tryRunTasks(projectRoot, tasks, gradleFlags)
+            val inProcessRes = InProcessGradleRunner.tryRunTasks(
+                projectRoot = targetProjectRoot,
+                tasks = tasks,
+                gradleFlags = gradleFlags,
+                javaHome = activeGradleConfig.javaHome
+            )
             if (inProcessRes != null) {
                 return inProcessRes
             }
         }
-        return commandRunner.runCommand(listOf(gradlew) + tasks + gradleFlags, COMPILE_TIMEOUT_SECONDS)
+        val env = activeGradleConfig.buildEnvironment()
+        val cmd = listOf(gradlew) + tasks + gradleFlags
+        return if (env.isEmpty()) {
+            commandRunner.runCommand(cmd, COMPILE_TIMEOUT_SECONDS)
+        } else {
+            commandRunner.runCommand(cmd, COMPILE_TIMEOUT_SECONDS, env)
+        }
     }
 
     private fun shouldRetryWithoutKspSkip(rawError: String): Boolean {
@@ -1424,9 +1500,18 @@ class IncrementalDexCompiler(
     }
 
     private fun resolveGradleWrapper(): String {
+        resolveGradleWrapperForDir(projectRoot)?.let { return it }
+        for (mod in knownModulesByPath.values) {
+            val ibRoot = mod.includedBuildRoot ?: continue
+            resolveGradleWrapperForDir(ibRoot)?.let { return it }
+        }
+        return "gradle"
+    }
+
+    private fun resolveGradleWrapperForDir(dir: File): String? {
         val isWin = System.getProperty("os.name").lowercase(Locale.US).contains("win")
-        val wrapper = File(projectRoot, if (isWin) "gradlew.bat" else "gradlew")
-        return if (wrapper.exists()) wrapper.absolutePath else "gradle"
+        val wrapper = File(dir, if (isWin) "gradlew.bat" else "gradlew")
+        return wrapper.takeIf { it.isFile }?.absolutePath
     }
 
     internal fun extractDiagnostic(rawError: String): String {

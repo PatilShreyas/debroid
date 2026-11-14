@@ -145,7 +145,7 @@ debroid detach <session_id>
 ### ⚡ Live Code & Compose Hot Reload
 To watch project source files and hot-reload Kotlin/Java code or Jetpack Compose UI changes onto a running device:
 ```bash
-debroid hot-reload <app_id> [-d/--project-dir <path>] [-v/--variant <variant>] [--interval-ms <ms>] [--once] [--no-fallback]
+debroid hot-reload <app_id> [-d/--project-dir <path>] [-v/--variant <variant>] [--interval-ms <ms>] [--once] [--no-fallback] [--java-home <path>] [--gradle-args <args>...]
 ```
 > 📖 **MANDATORY REFERENCE FOR HOT RELOAD:** Whenever you use `debroid hot-reload`, **read [`references/hot-reload.md`](./references/hot-reload.md) first** (also available at `~/.debroid/skills/debroid-cli/references/hot-reload.md`) for the required workflow, status event parsing, state preservation rules, Dos & Don'ts, and troubleshooting. Never run `javap` or inspect `.class`/`.dex`/`build/` internals—only edit source files, watch `debroid hot-reload` status lines, and verify on device.
 
@@ -226,4 +226,4 @@ Here is the full list of commands and their signatures (note: all commands suppo
 | `inspect` | `debroid inspect <session_id> <object_id> [-d/--max-depth=<int>] [--include-static] [--include-internal] [--pretty]` | Inspects deep object fields (`nested` map populated when `--max-depth > 1`; excludes static and `$` internal fields by default) |
 | `step` | `debroid step <session_id> <thread_id> <action> [--pretty]` | Steps execution (`STEP_OVER`, `STEP_INTO`, `STEP_OUT`, `RESUME_THREAD`, `RESUME_ALL`) |
 | `update` | `debroid update [--check-only] [--pretty]` | Checks for CLI updates or performs an in-place self-update to the latest release |
-| `hot-reload` | `debroid hot-reload <app_id> [-d/--project-dir=<path>] [-v/--variant=<variant>] [--interval-ms=<ms>] [--once] [--no-fallback]` | Watches project sources and hot-reloads bytecode and Compose UI via JVMTI (streams plain-text `[STATUS]` events) |
+| `hot-reload` | `debroid hot-reload <app_id> [-d/--project-dir=<path>] [-v/--variant=<variant>] [--interval-ms=<ms>] [--once] [--no-fallback] [--java-home=<path>] [--gradle-args=<args>...]` | Watches project sources and hot-reloads bytecode and Compose UI via JVMTI (streams plain-text `[STATUS]` events) |

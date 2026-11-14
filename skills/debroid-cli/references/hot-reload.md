@@ -16,17 +16,19 @@ Operational playbook for AI agents using `debroid hot-reload` to build, iterate 
 ## 2. Command Signature & Options
 
 ```bash
-debroid hot-reload <app_id> [-d/--project-dir <path>] [-v/--variant <variant>] [--interval-ms <ms>] [--once] [--no-fallback]
+debroid hot-reload <app_id> [-d/--project-dir <path>] [-v/--variant <variant>] [--interval-ms <ms>] [--once] [--no-fallback] [--java-home <path>] [--gradle-args <args>...]
 ```
 
 | Option | Default | When to Use |
 | :--- | :--- | :--- |
 | `<app_id>` | *(Required)* | Running debuggable Android package ID (e.g. `com.example.app` or `com.example.app.demo.debug`). |
-| `-d, --project-dir <path>` | `.` | Root directory of the Android Gradle project (containing `settings.gradle` / `settings.gradle.kts`). Always pass `-d` if your shell CWD is outside the Android project root. |
+| `-d, --project-dir <path>` | `.` | Root directory of the Android Gradle project (or composite umbrella root containing `settings.gradle` / `settings.gradle.kts`). Always pass `-d` if your shell CWD is outside the Android project root. |
 | `-v, --variant <variant>` | `debug` *(auto-inferred from `<app_id>`)* | Build variant (e.g. `debug`, `demoDebug`, `freeDebug`). Auto-resolved from `<app_id>` and build outputs in most projects; pass explicitly only when ambiguous. |
 | `--interval-ms <ms>` | `300` | File watcher polling slice in milliseconds (`>= 100`). Leave at default unless needed. |
 | `--once` | `false` | **Sync barrier for non-streaming harnesses:** Connects to your active background watcher, flushes pending edits immediately, blocks until the reload pass finishes, prints the `[STATUS]` result, and exits. |
 | `--no-fallback` | `false` | Disables automatic `install<Variant>` fallback on resource/manifest/hierarchy changes (emits `[ERROR] code=FALLBACK_DISABLED` instead). **Leave OFF** during normal feature work. |
+| `--java-home <path>` | *(Auto-detected)* | Explicit JDK home directory for Gradle commands (also via `DEBROID_JAVA_HOME`). Auto-resolved from `org.gradle.java.home`, `.java-version`, `.sdkmanrc`, `.tool-versions`, and Gradle wrapper compatibility (e.g. automatically selecting JDK 17 when global `JAVA_HOME` is Java 21+ on older Gradle wrappers). |
+| `--gradle-args <args>` | *(Empty)* | Extra arguments forwarded to all Gradle invocations (discovery, incremental compile, and fallback install), e.g. `--gradle-args="-Penv=staging --offline"`. May be passed multiple times. |
 
 ---
 
@@ -115,6 +117,7 @@ Use these patterns while iterating so 95%+ of your edits hot-swap in **~300ms–
 | `[ERROR] code=FALLBACK_DISABLED message=Cannot hot-swap <REASON> ...` | `--no-fallback` was passed and the edit changed XML resources or a named class's superclass/interfaces (`<REASON>`). | Either revert the hierarchy/resource change, or restart the watcher **without** `--no-fallback` so it can auto-reinstall when needed. |
 | `[ERROR] code=FALLBACK_FAILED` | Full Gradle `install<Variant>` failed during fallback (e.g. resource merge error, KSP/Dagger error, or device disconnected). | Read the error message, fix the underlying resource/DI/Gradle build error (verify with `./gradlew :<app>:install<Variant>`), ensure the app is running, and continue. |
 | `[ERROR] code=NO_APP_MODULE` | `-d` does not point to the Gradle root containing the `com.android.application` module for `<app_id>`. | Pass `-d <path/to/android/project/root>` where `settings.gradle(.kts)` lives. |
+| `[ERROR] code=PROJECT_SCAN_FAILED` or `INVALID_JAVA_HOME` | Gradle project discovery failed (e.g. incompatible JDK version or missing required `-P` project property in `settings.gradle`). | Inspect the surfaced Gradle diagnostic; pass `--java-home <jdk_path>` and/or `--gradle-args="-Pkey=val"` if required by the project's build setup. |
 | `[ERROR] code=AGENT_TIMEOUT` or `ATTACH_AGENT_FAILED` | Main thread of the target app is frozen (ANR / paused on a JDI breakpoint!) so `Agent_OnAttach` could not run on the main looper. | If a `debroid` JDI debug session has threads paused, run `debroid resume <session_id>` or `debroid detach <session_id>`. If the app is ANR-hung, `adb shell am force-stop <app_id> && adb shell am start ...` (watcher will auto-reapply edits). |
 | `[RUNTIME_ERROR] IllegalStateException: Expected the @HiltViewModel-annotated class ...` | A brand-new `@HiltViewModel` was added mid-session without regenerating Hilt's `:app` root component. | Stop watcher, run `./gradlew :<app>:install<Variant>`, relaunch the app, and restart `debroid hot-reload`. |
 | `[RELOADED]` printed, but UI still shows previous screen/tab | `ui=ACTIVITY_RECREATE` recreated the `Activity` (resetting unsaved tab state), OR the edited code is inside an uninvoked click/action handler. | Check `android layout`: re-tap your target tab if `Activity` recreated, or tap the relevant button to fire the updated handler. |

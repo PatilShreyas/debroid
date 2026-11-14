@@ -30,7 +30,11 @@ internal object InProcessGradleRunner {
         )
     }
 
-    fun warmUpAsync(projectRoot: File, initialArgs: List<String> = listOf("--console=plain")) {
+    fun warmUpAsync(
+        projectRoot: File,
+        javaHome: File? = null,
+        initialArgs: List<String> = listOf("--console=plain")
+    ) {
         val canonicalRoot = runCatching { projectRoot.canonicalPath }.getOrElse { projectRoot.absolutePath }
         if (!warmedProjects.add(canonicalRoot)) return
 
@@ -39,7 +43,7 @@ internal object InProcessGradleRunner {
                 getOrCreateConnection(projectRoot) ?: return@Thread
                 // Warm the daemon & configuration cache with a lightweight help/model no-op if no tasks yet
                 val noopTasks = listOf("help")
-                tryRunTasks(projectRoot, noopTasks, initialArgs + listOf("-q"))
+                tryRunTasks(projectRoot, noopTasks, initialArgs + listOf("-q"), javaHome)
             }
         }.apply {
             name = "debroid-gradle-warmup"
@@ -51,7 +55,8 @@ internal object InProcessGradleRunner {
     fun tryRunTasks(
         projectRoot: File,
         tasks: List<String>,
-        gradleFlags: List<String>
+        gradleFlags: List<String>,
+        javaHome: File? = null
     ): Result<String>? {
         if (tasks.isEmpty()) return Result.success("")
         val cached = getOrCreateConnection(projectRoot) ?: return null
@@ -68,6 +73,10 @@ internal object InProcessGradleRunner {
                 val launcher = projectConnCls.getMethod("newBuild").invoke(conn)
                 buildLauncherCls.getMethod("forTasks", Array<String>::class.java)
                     .invoke(launcher, tasks.toTypedArray())
+                if (javaHome != null) {
+                    longRunningOpCls.getMethod("setJavaHome", File::class.java)
+                        .invoke(launcher, javaHome)
+                }
                 if (filteredArgs.isNotEmpty()) {
                     longRunningOpCls.getMethod("withArguments", Array<String>::class.java)
                         .invoke(launcher, filteredArgs.toTypedArray())

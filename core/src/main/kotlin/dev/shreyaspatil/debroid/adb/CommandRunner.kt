@@ -6,19 +6,34 @@ import java.util.concurrent.TimeUnit
 interface CommandRunner {
     fun runCommand(command: List<String>, timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS): Result<String>
 
+    fun runCommand(
+        command: List<String>,
+        timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
+        environment: Map<String, String>
+    ): Result<String> = runCommand(command, timeoutSeconds)
+
     companion object {
         const val DEFAULT_TIMEOUT_SECONDS = 10L
     }
 }
 
 class DefaultCommandRunner : CommandRunner {
-    override fun runCommand(command: List<String>, timeoutSeconds: Long): Result<String> {
+    override fun runCommand(command: List<String>, timeoutSeconds: Long): Result<String> =
+        runCommand(command, timeoutSeconds, emptyMap())
+
+    override fun runCommand(
+        command: List<String>,
+        timeoutSeconds: Long,
+        environment: Map<String, String>
+    ): Result<String> {
         var process: Process? = null
         var outputFuture: CompletableFuture<String>? = null
         return try {
-            val proc = ProcessBuilder(command)
-                .redirectErrorStream(true)
-                .start()
+            val pb = ProcessBuilder(command).redirectErrorStream(true)
+            if (environment.isNotEmpty()) {
+                pb.environment().putAll(environment)
+            }
+            val proc = pb.start()
             process = proc
 
             outputFuture = CompletableFuture.supplyAsync {

@@ -77,6 +77,8 @@ class SourceChangeTracker(
         }
     }
 
+    fun trackedFileCount(): Int = baseline.size
+
     fun wakeUp() {
         synchronized(wakeLock) {
             wokenUp = true

@@ -10,7 +10,9 @@ import java.util.Locale
 
 data class GradleProjectLayout(
     val rootDir: File,
-    val modules: List<GradleModule>
+    val modules: List<GradleModule>,
+    val resolvedGradleConfig: GradleExecutionConfig = GradleExecutionConfig(),
+    val scanDiagnostic: String? = null
 ) {
     private val sortedByDepth = modules.sortedByDescending { it.moduleDir.path.length }
 
@@ -246,12 +248,15 @@ object GradleProjectScanner {
     )
 
     private val customProjectDirRegex = Regex(
-        """project\(\s*["']([^"']+)["']\s*\)\.projectDir\s*=\s*file\(\s*["']([^"']+)["']\s*\)"""
+        """project\(\s*["']([^"']+)["']\s*\)\.projectDir\s*=\s*""" +
+            """(?:file|File)\(\s*(?:settingsDir\s*,\s*)?["']([^"']+)["']\s*\)"""
     )
 
     private val includeBuildRegex = Regex(
-        """includeBuild\(\s*["']([^"']+)["']\s*\)"""
+        """\bincludeBuild(?:\s*\(\s*(?:file\(\s*)?|\s+(?:file\(\s*)?)["']([^"']+)["']\s*\)?\s*\)?(?:\s*\{([^}]*)\})?"""
     )
+
+    private val includeBuildNameBlockRegex = Regex("""\bname\s*=\s*["']([^"']+)["']""")
 
     private val projectDepRegex = Regex(
         """project\(\s*(?:path\s*=\s*)?["']([^"']+)["']\s*\)"""
@@ -297,19 +302,39 @@ object GradleProjectScanner {
 
     fun scan(
         startDir: File,
-        commandRunner: CommandRunner? = null
+        commandRunner: CommandRunner? = null,
+        gradleConfig: GradleExecutionConfig = GradleExecutionConfig()
     ): GradleProjectLayout {
         val rootDir = findGradleRoot(startDir.canonicalFile) ?: startDir.canonicalFile
+        var effectiveConfig = if (gradleConfig.javaHome != null) {
+            gradleConfig
+        } else {
+            GradleJvmResolver.resolveForProject(
+                projectRoot = rootDir,
+                explicitJavaHome = null,
+                extraGradleArgs = gradleConfig.extraGradleArgs
+            )
+        }
         val gradleWrapper = findGradleWrapper(rootDir)
         val useDiskCache = commandRunner == null && gradleWrapper != null
         if (useDiskCache) {
-            GradleLayoutDiskCache.tryLoad(rootDir)?.let { return it }
+            GradleLayoutDiskCache.tryLoad(rootDir, effectiveConfig)?.let { return it }
         }
 
+        var scanDiagnostic: String? = null
+        var queriedSuccessfully = false
         val rawModules = if (commandRunner != null || gradleWrapper != null) {
             val runner = commandRunner ?: DefaultCommandRunner()
             val gradleBin = gradleWrapper?.absolutePath ?: "gradle"
-            queryModulesFromGradle(rootDir, gradleBin, runner) ?: scanModulesStatically(rootDir)
+            val queryOutcome = queryModulesFromGradleWithFallbackJdk(rootDir, gradleBin, runner, effectiveConfig)
+            effectiveConfig = queryOutcome.effectiveConfig
+            scanDiagnostic = queryOutcome.diagnostic
+            if (queryOutcome.modules != null) {
+                queriedSuccessfully = true
+                queryOutcome.modules
+            } else {
+                scanModulesStatically(rootDir)
+            }
         } else {
             scanModulesStatically(rootDir)
         }
@@ -317,44 +342,109 @@ object GradleProjectScanner {
         val enrichedModules = populateModuleDependencies(rawModules)
         val layout = GradleProjectLayout(
             rootDir = rootDir,
-            modules = enrichedModules.sortedBy { it.gradlePath }
+            modules = enrichedModules.sortedBy { it.gradlePath },
+            resolvedGradleConfig = effectiveConfig,
+            scanDiagnostic = if (queriedSuccessfully) null else scanDiagnostic
         )
-        if (useDiskCache && layout.modules.isNotEmpty()) {
+        if (useDiskCache && queriedSuccessfully && layout.modules.isNotEmpty()) {
             GradleLayoutDiskCache.save(layout)
         }
         return layout
     }
 
+    private data class GradleQueryOutcome(
+        val modules: List<GradleModule>?,
+        val effectiveConfig: GradleExecutionConfig,
+        val diagnostic: String?
+    )
+
+    private fun queryModulesFromGradleWithFallbackJdk(
+        rootDir: File,
+        gradleBin: String,
+        commandRunner: CommandRunner,
+        initialConfig: GradleExecutionConfig
+    ): GradleQueryOutcome {
+        val firstAttempt = queryModulesFromGradle(rootDir, gradleBin, commandRunner, initialConfig)
+        if (firstAttempt.isSuccess) {
+            return GradleQueryOutcome(firstAttempt.getOrNull(), initialConfig, null)
+        }
+        val firstErr = firstAttempt.exceptionOrNull()?.message.orEmpty()
+        val fallbackJdk = GradleJvmResolver.findFallbackJavaHomeForError(firstErr, initialConfig.javaHome)
+        if (fallbackJdk != null) {
+            val retryConfig = initialConfig.copy(javaHome = fallbackJdk)
+            val retryAttempt = queryModulesFromGradle(rootDir, gradleBin, commandRunner, retryConfig)
+            if (retryAttempt.isSuccess) {
+                return GradleQueryOutcome(retryAttempt.getOrNull(), retryConfig, null)
+            }
+        }
+        val conciseDiag = extractConciseGradleFailure(firstErr)
+        return GradleQueryOutcome(null, initialConfig, conciseDiag)
+    }
+
+    private fun extractConciseGradleFailure(rawError: String): String? {
+        if (rawError.isBlank()) return null
+        val lines = rawError.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val whatWentWrongIdx = lines.indexOfFirst { it == "* What went wrong:" }
+        if (whatWentWrongIdx >= 0) {
+            val summary = lines.drop(whatWentWrongIdx + 1)
+                .takeWhile { !it.startsWith("* ") && !it.startsWith("BUILD FAILED") }
+                .take(3)
+                .joinToString(" ")
+            if (summary.isNotEmpty()) return summary
+        }
+        return lines.firstOrNull {
+            it.contains("Unsupported class file major version", ignoreCase = true) ||
+                it.contains("requires Java", ignoreCase = true) ||
+                it.startsWith("FAILURE:") ||
+                it.contains("Exception") ||
+                it.contains("error:", ignoreCase = true)
+        } ?: lines.take(2).joinToString(" ").takeIf { it.isNotEmpty() }
+    }
+
     private fun findGradleWrapper(rootDir: File): File? {
         val isWin = System.getProperty("os.name").lowercase(Locale.US).contains("win")
-        val wrapper = File(rootDir, if (isWin) "gradlew.bat" else "gradlew")
-        return wrapper.takeIf { it.isFile }
+        val wrapperName = if (isWin) "gradlew.bat" else "gradlew"
+        File(rootDir, wrapperName).takeIf { it.isFile }?.let { return it }
+        // In umbrella composite builds where root only has settings.gradle(.kts), check included builds for gradlew
+        return parseIncludedBuilds(rootDir).firstNotNullOfOrNull { (_, ibDir) ->
+            File(ibDir, wrapperName).takeIf { it.isFile }
+        }
     }
 
     private fun queryModulesFromGradle(
         rootDir: File,
         gradleBin: String,
-        commandRunner: CommandRunner
-    ): List<GradleModule>? {
+        commandRunner: CommandRunner,
+        gradleConfig: GradleExecutionConfig
+    ): Result<List<GradleModule>> {
         val initScript = runCatching {
             Files.createTempFile("debroid_scan_", ".init.gradle").toFile()
-        }.getOrNull() ?: return null
+        }.getOrElse { return Result.failure(it) }
 
         try {
             initScript.writeText(buildGradleInitScript())
-            val cmd = listOf(
-                gradleBin,
-                "help",
-                "-I",
-                initScript.absolutePath,
-                "-q",
-                "--console=plain",
-                "--no-configuration-cache",
-                "-p",
-                rootDir.absolutePath
-            )
-            val output = commandRunner.runCommand(cmd, GRADLE_QUERY_TIMEOUT_SECONDS).getOrNull() ?: return null
-            return parseGradleQueryOutput(rootDir, output)
+            val cmd = buildList {
+                add(gradleBin)
+                add("help")
+                add("-I")
+                add(initScript.absolutePath)
+                add("-q")
+                add("--console=plain")
+                add("--no-configuration-cache")
+                add("-p")
+                add(rootDir.absolutePath)
+                addAll(gradleConfig.buildJvmAndExtraFlags())
+            }
+            val env = gradleConfig.buildEnvironment()
+            val runRes = if (env.isEmpty()) {
+                commandRunner.runCommand(cmd, GRADLE_QUERY_TIMEOUT_SECONDS)
+            } else {
+                commandRunner.runCommand(cmd, GRADLE_QUERY_TIMEOUT_SECONDS, env)
+            }
+            return runRes.mapCatching { output ->
+                parseGradleQueryOutput(rootDir, output)
+                    ?: error("Gradle query produced no discoverable modules")
+            }
         } finally {
             initScript.delete()
         }
@@ -362,60 +452,70 @@ object GradleProjectScanner {
 
     private fun buildGradleInitScript(): String = """
         gradle.projectsEvaluated { g ->
-            if (g.parent == null) {
-                g.rootProject.allprojects { p ->
-                    def isPluginBuild = p.plugins.hasPlugin("org.gradle.kotlin.kotlin-dsl") ||
-                        p.plugins.hasPlugin("java-gradle-plugin") ||
-                        p.plugins.hasPlugin("com.android.test")
-                    if (!isPluginBuild && p.name != "buildSrc" && p.name != "build-logic") {
-                        def isRoot = (p == g.rootProject)
-                        def hasSubprojects = !g.rootProject.subprojects.isEmpty()
-                        if (!isRoot || !hasSubprojects || p.file("src").isDirectory()) {
-                            def type = "UNKNOWN"
-                            if (p.plugins.hasPlugin("com.android.application")) {
-                                type = "ANDROID_APP"
-                            } else if (p.plugins.hasPlugin("com.android.library") ||
-                                       p.plugins.hasPlugin("com.android.kotlin.multiplatform.library") ||
-                                       p.plugins.hasPlugin("com.android.dynamic-feature")) {
-                                type = "ANDROID_LIBRARY"
-                            } else if (p.plugins.hasPlugin("org.jetbrains.kotlin.jvm") ||
-                                       p.plugins.hasPlugin("org.jetbrains.kotlin.multiplatform") ||
-                                       p.plugins.hasPlugin("java-library") ||
-                                       p.plugins.hasPlugin("java")) {
-                                type = "KOTLIN_JVM"
-                            }
-                            def deps = new LinkedHashSet<String>()
-                            p.configurations.each { conf ->
-                                try {
-                                    conf.dependencies.each { dep ->
-                                        if (dep.hasProperty("dependencyProject") && dep.dependencyProject != null) {
-                                            deps.add(dep.dependencyProject.path.toString())
-                                        } else if (dep.hasProperty("path") && dep.path != null && dep.path.toString().startsWith(":")) {
-                                            deps.add(dep.path.toString())
-                                        } else if (dep.name != null) {
-                                            deps.add("ARTIFACT:" + dep.name.toString())
-                                        }
-                                    }
-                                } catch (Throwable ignored) {}
-                            }
-                            def pathStr = p.hasProperty("buildTreePath") ? p.buildTreePath.toString() : p.path.toString()
-                            println("$MODULE_LINE_PREFIX" + pathStr + "|" + p.projectDir.canonicalPath + "|" + type + "|" + deps.join(","))
+            def isIncluded = (g.parent != null)
+            def buildRootPath = isIncluded ? g.rootProject.projectDir.canonicalPath : ""
+            g.rootProject.allprojects { p ->
+                def isPluginBuild = p.plugins.hasPlugin("org.gradle.kotlin.kotlin-dsl") ||
+                    p.plugins.hasPlugin("java-gradle-plugin") ||
+                    p.plugins.hasPlugin("com.android.test")
+                if (!isPluginBuild && p.name != "buildSrc" && p.name != "build-logic") {
+                    def isRoot = (p == g.rootProject)
+                    def hasChildren = !g.rootProject.subprojects.isEmpty() || !g.includedBuilds.isEmpty()
+                    if (!isRoot || !hasChildren || p.file("src").isDirectory()) {
+                        def type = "UNKNOWN"
+                        if (p.plugins.hasPlugin("com.android.application")) {
+                            type = "ANDROID_APP"
+                        } else if (p.plugins.hasPlugin("com.android.library") ||
+                                   p.plugins.hasPlugin("com.android.kotlin.multiplatform.library") ||
+                                   p.plugins.hasPlugin("com.android.dynamic-feature")) {
+                            type = "ANDROID_LIBRARY"
+                        } else if (p.plugins.hasPlugin("org.jetbrains.kotlin.jvm") ||
+                                   p.plugins.hasPlugin("org.jetbrains.kotlin.multiplatform") ||
+                                   p.plugins.hasPlugin("java-library") ||
+                                   p.plugins.hasPlugin("java")) {
+                            type = "KOTLIN_JVM"
                         }
+                        def deps = new LinkedHashSet<String>()
+                        p.configurations.each { conf ->
+                            try {
+                                conf.dependencies.each { dep ->
+                                    if (dep.hasProperty("dependencyProject") && dep.dependencyProject != null) {
+                                        def dp = dep.dependencyProject
+                                        def dpPath = dp.hasProperty("buildTreePath") ? dp.buildTreePath.toString() : dp.path.toString()
+                                        deps.add(dpPath)
+                                    } else if (dep.hasProperty("path") && dep.path != null && dep.path.toString().startsWith(":")) {
+                                        deps.add(dep.path.toString())
+                                    } else if (dep.name != null) {
+                                        def grp = (dep.group != null) ? dep.group.toString() : ""
+                                        if (!grp.isEmpty()) {
+                                            deps.add("COORD:" + grp + ":" + dep.name.toString())
+                                        }
+                                        deps.add("ARTIFACT:" + dep.name.toString())
+                                    }
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                        def treePath = p.hasProperty("buildTreePath") ? p.buildTreePath.toString() : p.path.toString()
+                        def localPath = p.path.toString()
+                        def coord = ((p.group != null) ? p.group.toString() : "") + ":" + p.name.toString()
+                        println("$MODULE_LINE_PREFIX" + treePath + "|" + p.projectDir.canonicalPath + "|" + type + "|" + deps.join(",") + "|" + buildRootPath + "|" + localPath + "|" + coord)
                     }
                 }
-                g.includedBuilds.each { ib ->
-                    if (ib.name != "build-logic" && ib.name != "buildSrc") {
-                        println("$INCLUDED_BUILD_LINE_PREFIX" + ib.name + "|" + ib.projectDir.canonicalPath)
-                    }
+            }
+            g.includedBuilds.each { ib ->
+                if (ib.name != "build-logic" && ib.name != "buildSrc") {
+                    println("$INCLUDED_BUILD_LINE_PREFIX" + ib.name + "|" + ib.projectDir.canonicalPath)
                 }
             }
         }
     """.trimIndent()
 
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "MagicNumber")
     internal fun parseGradleQueryOutput(rootDir: File, output: String): List<GradleModule>? {
         val modulesByPath = LinkedHashMap<String, GradleModule>()
         val rawDepsByPath = mutableMapOf<String, Set<String>>()
-        val includedBuilds = mutableListOf<Pair<String, File>>()
+        val coordToPath = mutableMapOf<String, String>()
+        val directIncludedBuilds = mutableListOf<Pair<String, File>>()
 
         for (rawLine in output.lineSequence()) {
             val line = rawLine.trim()
@@ -438,7 +538,19 @@ object GradleProjectScanner {
                     } else {
                         emptySet()
                     }
-                    modulesByPath[gradlePath] = GradleModule(gradlePath, dir, type)
+                    val ibRoot = parts.getOrNull(4)?.trim()?.takeIf { it.isNotEmpty() }?.let { File(it).canonicalFile }
+                    val localPath = parts.getOrNull(5)?.trim()?.takeIf { it.isNotEmpty() } ?: gradlePath
+                    val coord = parts.getOrNull(6)?.trim().orEmpty()
+                    if (coord.isNotEmpty() && !coord.startsWith(":")) {
+                        coordToPath[coord] = gradlePath
+                    }
+                    modulesByPath[gradlePath] = GradleModule(
+                        gradlePath = gradlePath,
+                        moduleDir = dir,
+                        type = type,
+                        includedBuildRoot = ibRoot,
+                        localGradlePath = localPath
+                    )
                     rawDepsByPath[gradlePath] = deps
                 }
             } else if (line.startsWith(INCLUDED_BUILD_LINE_PREFIX)) {
@@ -446,23 +558,30 @@ object GradleProjectScanner {
                 if (parts.size >= 2) {
                     val ibName = parts[0].trim()
                     val ibDir = File(parts[1].trim()).canonicalFile
-                    if (ibName !in ignoredDirNames && ibDir.isDirectory) {
-                        includedBuilds.add(ibName to ibDir)
+                    if (ibName !in ignoredDirNames && ibDir.isDirectory &&
+                        directIncludedBuilds.none { it.second == ibDir }
+                    ) {
+                        directIncludedBuilds.add(ibName to ibDir)
                     }
                 }
             }
         }
 
-        // Also check settings.gradle(.kts) for any includeBuild declarations
         for ((ibName, ibDir) in parseIncludedBuilds(rootDir)) {
-            if (includedBuilds.none { it.second == ibDir }) {
-                includedBuilds.add(ibName to ibDir)
+            if (directIncludedBuilds.none { it.second == ibDir }) {
+                directIncludedBuilds.add(ibName to ibDir)
             }
         }
 
+        val allIncludedBuilds = collectAllIncludedBuildsRecursively(rootDir, directIncludedBuilds)
         val includedBuildPaths = mutableSetOf<String>()
-        for ((ibName, ibDir) in includedBuilds) {
-            val ibModules = scanIncludedBuildModules(ibName, ibDir)
+        for ((_, module) in modulesByPath) {
+            if (module.includedBuildRoot != null) {
+                includedBuildPaths.add(module.gradlePath)
+            }
+        }
+        for ((ibPrefix, ibDir) in allIncludedBuilds) {
+            val ibModules = scanIncludedBuildModules(ibPrefix, ibDir)
             for (ibMod in ibModules) {
                 if (modulesByPath.values.none { it.moduleDir == ibMod.moduleDir }) {
                     modulesByPath[ibMod.gradlePath] = ibMod
@@ -479,40 +598,96 @@ object GradleProjectScanner {
         return modulesByPath.values.map { mod ->
             val rawDeps = rawDepsByPath[mod.gradlePath].orEmpty()
             val resolvedDeps = rawDeps.mapNotNull { token ->
-                if (token.startsWith("ARTIFACT:")) {
-                    val artifactName = token.removePrefix("ARTIFACT:")
-                    artifactNameMap[artifactName]?.takeIf { it != mod.gradlePath }
-                } else if (token in modulesByPath && token != mod.gradlePath) {
-                    token
-                } else {
-                    null
+                when {
+                    token.startsWith("COORD:") -> {
+                        coordToPath[token.removePrefix("COORD:")]?.takeIf { it != mod.gradlePath }
+                    }
+                    token.startsWith("ARTIFACT:") -> {
+                        val artifactName = token.removePrefix("ARTIFACT:")
+                        artifactNameMap[artifactName]?.takeIf { it != mod.gradlePath }
+                    }
+                    token in modulesByPath && token != mod.gradlePath -> token
+                    else -> null
                 }
             }.toSet()
             mod.copy(dependencies = resolvedDeps)
         }
     }
 
+    private fun collectAllIncludedBuildsRecursively(
+        rootDir: File,
+        initial: List<Pair<String, File>>
+    ): List<Pair<String, File>> {
+        val visitedDirs = mutableSetOf(rootDir.canonicalFile)
+        val result = mutableListOf<Pair<String, File>>()
+        val queue = ArrayDeque<Pair<String, File>>()
+        for (pair in initial) {
+            if (visitedDirs.add(pair.second)) {
+                queue.addLast(pair)
+            }
+        }
+        while (queue.isNotEmpty()) {
+            val (prefixName, ibDir) = queue.removeFirst()
+            result.add(prefixName to ibDir)
+            for ((nestedName, nestedDir) in parseIncludedBuilds(ibDir)) {
+                if (visitedDirs.add(nestedDir)) {
+                    queue.addLast("$prefixName:$nestedName" to nestedDir)
+                }
+            }
+        }
+        return result
+    }
+
     private fun scanModulesStatically(rootDir: File): List<GradleModule> {
         val customPathByDir = parseCustomProjectDirs(rootDir)
         val discoveredModules = mutableListOf<GradleModule>()
+        val dynamicChildBuilds = mutableListOf<Pair<String, File>>()
+        val rootSettingsText = readSettingsText(rootDir)
+        val hasDynamicIncludeBuild = rootSettingsText.contains("includeBuild")
+
         scanDirectoryRecursively(
             rootDir = rootDir,
             currentDir = rootDir,
             pathPrefix = "",
+            includedBuildRoot = null,
             customPathByDir = customPathByDir,
-            outModules = discoveredModules
+            outModules = discoveredModules,
+            dynamicChildBuilds = if (hasDynamicIncludeBuild) dynamicChildBuilds else null
         )
 
         val seenDirs = discoveredModules.map { it.moduleDir }.toMutableSet()
+        val initialIncluded = buildList {
+            addAll(parseIncludedBuilds(rootDir))
+            for (dyn in dynamicChildBuilds) {
+                if (none { it.second == dyn.second }) {
+                    add(dyn)
+                }
+            }
+        }
+        val allIncluded = collectAllIncludedBuildsRecursively(rootDir, initialIncluded)
         val includedBuildDirs = mutableSetOf<File>()
-        for ((ibName, ibDir) in parseIncludedBuilds(rootDir)) {
-            for (ibMod in scanIncludedBuildModules(ibName, ibDir)) {
+        for ((ibPrefix, ibDir) in allIncluded) {
+            for (ibMod in scanIncludedBuildModules(ibPrefix, ibDir)) {
                 if (seenDirs.add(ibMod.moduleDir)) {
                     discoveredModules.add(ibMod)
                     includedBuildDirs.add(ibMod.moduleDir)
                 }
             }
         }
+
+        if (discoveredModules.isEmpty()) {
+            val rootBuildScript = findBuildScript(rootDir)
+            if (rootBuildScript != null && !isPluginBuildScript(rootBuildScript) && File(rootDir, "src").isDirectory) {
+                discoveredModules.add(
+                    GradleModule(
+                        gradlePath = ":",
+                        moduleDir = rootDir,
+                        type = classifyModuleType(rootBuildScript, rootDir)
+                    )
+                )
+            }
+        }
+
         return populateStaticIncludedBuildDeps(discoveredModules, includedBuildDirs)
     }
 
@@ -527,8 +702,10 @@ object GradleProjectScanner {
         return modules.map { mod ->
             val scriptText = findBuildScript(mod.moduleDir)?.readText().orEmpty()
             val extraDeps = artifactToPath.entries.mapNotNull { (artifactName, targetPath) ->
+                val normKey = normalizeProjectKey(artifactName)
                 val referencesArtifact = scriptText.contains(":$artifactName\"") ||
-                    scriptText.contains(":$artifactName'")
+                    scriptText.contains(":$artifactName'") ||
+                    scriptText.contains(".$normKey")
                 targetPath.takeIf { targetPath != mod.gradlePath && referencesArtifact }
             }
             if (extraDeps.isEmpty()) mod else mod.copy(dependencies = mod.dependencies + extraDeps)
@@ -536,15 +713,20 @@ object GradleProjectScanner {
     }
 
     private fun scanIncludedBuildModules(ibName: String, ibDir: File): List<GradleModule> {
-        if (!ibDir.isDirectory || ibName in ignoredDirNames) return emptyList()
+        val cleanName = ibName.trimStart(':')
+        if (!ibDir.isDirectory || cleanName in ignoredDirNames || ibDir.name in ignoredDirNames) {
+            return emptyList()
+        }
         val customPathByDir = parseCustomProjectDirs(ibDir)
         val subModules = mutableListOf<GradleModule>()
         scanDirectoryRecursively(
             rootDir = ibDir,
             currentDir = ibDir,
-            pathPrefix = ":$ibName",
+            pathPrefix = ":$cleanName",
+            includedBuildRoot = ibDir,
             customPathByDir = customPathByDir,
-            outModules = subModules
+            outModules = subModules,
+            dynamicChildBuilds = null
         )
         if (subModules.isNotEmpty()) {
             return subModules
@@ -555,9 +737,11 @@ object GradleProjectScanner {
             val type = classifyModuleType(rootBuildScript, ibDir)
             return listOf(
                 GradleModule(
-                    gradlePath = ":$ibName",
+                    gradlePath = ":$cleanName",
                     moduleDir = ibDir,
-                    type = type
+                    type = type,
+                    includedBuildRoot = ibDir,
+                    localGradlePath = ":"
                 )
             )
         }
@@ -574,18 +758,33 @@ object GradleProjectScanner {
         return modules.map { mod ->
             val scriptText = findBuildScript(mod.moduleDir)?.readText().orEmpty()
             val parsedDeps = LinkedHashSet<String>(mod.dependencies)
+            val buildPrefix = if (mod.includedBuildRoot != null && mod.localGradlePath != mod.gradlePath) {
+                mod.gradlePath.removeSuffix(mod.localGradlePath.takeIf { it != ":" }.orEmpty())
+            } else {
+                ""
+            }
 
             for (match in projectDepRegex.findAll(scriptText)) {
                 val raw = match.groupValues[1].let { if (it.startsWith(":")) it else ":$it" }
-                if (raw in pathSet && raw != mod.gradlePath) {
-                    parsedDeps.add(raw)
+                val candidate = if (buildPrefix.isNotEmpty() && "$buildPrefix$raw" in pathSet) {
+                    "$buildPrefix$raw"
+                } else {
+                    raw
+                }
+                if (candidate in pathSet && candidate != mod.gradlePath) {
+                    parsedDeps.add(candidate)
                 }
             }
 
             for (match in typesafeProjectDepRegex.findAll(scriptText)) {
                 val rawAccessor = match.groupValues[1]
+                val prefixedKey = if (buildPrefix.isNotEmpty()) {
+                    normalizeProjectKey("$buildPrefix:$rawAccessor")
+                } else {
+                    ""
+                }
                 val normKey = normalizeProjectKey(rawAccessor)
-                val targetPath = normalizedKeyToPath[normKey]
+                val targetPath = normalizedKeyToPath[prefixedKey] ?: normalizedKeyToPath[normKey]
                 if (targetPath != null && targetPath != mod.gradlePath) {
                     parsedDeps.add(targetPath)
                 }
@@ -608,14 +807,38 @@ object GradleProjectScanner {
 
     private fun findGradleRoot(startDir: File): File? {
         var current: File? = if (startDir.isDirectory) startDir else startDir.parentFile
-        var outermostRoot: File? = null
-        while (current != null) {
+        var nearestRoot: File? = null
+        while (current != null && nearestRoot == null) {
             if (hasSettingsScript(current)) {
-                outermostRoot = current
+                nearestRoot = current
+            } else {
+                current = current.parentFile
             }
-            current = current.parentFile
         }
-        return outermostRoot
+        var activeRoot = nearestRoot ?: return null
+        var ancestor = activeRoot.parentFile
+        while (ancestor != null) {
+            if (hasSettingsScript(ancestor) && parentReferencesChildBuild(ancestor, activeRoot)) {
+                activeRoot = ancestor
+            }
+            ancestor = ancestor.parentFile
+        }
+        return activeRoot
+    }
+
+    private fun parentReferencesChildBuild(parentDir: File, childDir: File): Boolean {
+        val included = parseIncludedBuilds(parentDir)
+        if (included.any { it.second == childDir }) return true
+        val settingsText = readSettingsText(parentDir)
+        val relPath = runCatching { childDir.relativeTo(parentDir).invariantSeparatorsPath }.getOrNull() ?: return false
+        return settingsText.contains(relPath) || settingsText.contains(childDir.name)
+    }
+
+    private fun readSettingsText(dir: File): String {
+        val settingsFile = File(dir, "settings.gradle.kts").takeIf { it.isFile }
+            ?: File(dir, "settings.gradle").takeIf { it.isFile }
+            ?: return ""
+        return runCatching { settingsFile.readText() }.getOrDefault("")
     }
 
     private fun hasSettingsScript(dir: File): Boolean {
@@ -638,11 +861,8 @@ object GradleProjectScanner {
     }
 
     private fun parseCustomProjectDirs(rootDir: File): Map<File, String> {
-        val settingsFile = File(rootDir, "settings.gradle.kts").takeIf { it.exists() }
-            ?: File(rootDir, "settings.gradle").takeIf { it.exists() }
-            ?: return emptyMap()
-
-        val text = settingsFile.readText()
+        val text = readSettingsText(rootDir)
+        if (text.isEmpty()) return emptyMap()
         val result = mutableMapOf<File, String>()
         for (match in customProjectDirRegex.findAll(text)) {
             val gradlePath = match.groupValues[1].let { if (it.startsWith(":")) it else ":$it" }
@@ -654,18 +874,18 @@ object GradleProjectScanner {
     }
 
     private fun parseIncludedBuilds(rootDir: File): List<Pair<String, File>> {
-        val settingsFile = File(rootDir, "settings.gradle.kts").takeIf { it.exists() }
-            ?: File(rootDir, "settings.gradle").takeIf { it.exists() }
-            ?: return emptyList()
-
-        val rawText = settingsFile.readText()
+        val rawText = readSettingsText(rootDir)
+        if (rawText.isEmpty()) return emptyList()
         val strippedText = stripNamedBlock(rawText, "pluginManagement")
         val result = mutableListOf<Pair<String, File>>()
         for (match in includeBuildRegex.findAll(strippedText)) {
             val relPath = match.groupValues[1].trim()
+            val blockBody = match.groupValues.getOrNull(2).orEmpty()
+            val explicitName = includeBuildNameBlockRegex.find(blockBody)?.groupValues?.get(1)?.trim()
             val targetDir = File(rootDir, relPath).canonicalFile
-            val buildName = targetDir.name
-            if (buildName !in ignoredDirNames && targetDir.isDirectory) {
+            val buildName = explicitName?.takeIf { it.isNotEmpty() } ?: targetDir.name
+            val allowedNames = buildName !in ignoredDirNames && targetDir.name !in ignoredDirNames
+            if (allowedNames && targetDir.isDirectory && result.none { it.second == targetDir }) {
                 result.add(buildName to targetDir)
             }
         }
@@ -697,18 +917,21 @@ object GradleProjectScanner {
         return sb.toString()
     }
 
+    @Suppress("LongParameterList")
     private fun scanDirectoryRecursively(
         rootDir: File,
         currentDir: File,
         pathPrefix: String,
+        includedBuildRoot: File?,
         customPathByDir: Map<File, String>,
-        outModules: MutableList<GradleModule>
+        outModules: MutableList<GradleModule>,
+        dynamicChildBuilds: MutableList<Pair<String, File>>?
     ) {
         if (currentDir != rootDir) {
             val canonicalDir = currentDir.canonicalFile
-            if (currentDir.name in ignoredDirNames ||
-                (hasSettingsScript(currentDir) && canonicalDir !in customPathByDir)
-            ) {
+            if (currentDir.name in ignoredDirNames) return
+            if (hasSettingsScript(currentDir) && canonicalDir !in customPathByDir) {
+                dynamicChildBuilds?.add(currentDir.name to canonicalDir)
                 return
             }
 
@@ -721,7 +944,9 @@ object GradleProjectScanner {
                     GradleModule(
                         gradlePath = gradlePath,
                         moduleDir = canonicalDir,
-                        type = moduleType
+                        type = moduleType,
+                        includedBuildRoot = includedBuildRoot,
+                        localGradlePath = basePath
                     )
                 )
             }
@@ -730,7 +955,15 @@ object GradleProjectScanner {
         val children = currentDir.listFiles() ?: return
         for (child in children) {
             if (child.isDirectory && child.name !in ignoredDirNames) {
-                scanDirectoryRecursively(rootDir, child, pathPrefix, customPathByDir, outModules)
+                scanDirectoryRecursively(
+                    rootDir = rootDir,
+                    currentDir = child,
+                    pathPrefix = pathPrefix,
+                    includedBuildRoot = includedBuildRoot,
+                    customPathByDir = customPathByDir,
+                    outModules = outModules,
+                    dynamicChildBuilds = dynamicChildBuilds
+                )
             }
         }
     }
@@ -764,13 +997,13 @@ object GradleProjectScanner {
 }
 
 private object GradleLayoutDiskCache {
-    private const val CACHE_VERSION = "v1"
+    private const val CACHE_VERSION = "v2"
     private const val HASH_BYTES = 8
     private const val MODULE_PREFIX = "MODULE|"
-    private const val EXPECTED_MODULE_PARTS = 4
+    private const val EXPECTED_MODULE_PARTS = 6
 
-    fun tryLoad(rootDir: File): GradleProjectLayout? = runCatching {
-        val cacheFile = cacheFileFor(rootDir)
+    fun tryLoad(rootDir: File, gradleConfig: GradleExecutionConfig): GradleProjectLayout? = runCatching {
+        val cacheFile = cacheFileFor(rootDir, gradleConfig)
         if (!cacheFile.isFile) return null
         val lines = cacheFile.readLines(StandardCharsets.UTF_8)
         val header = lines.firstOrNull().orEmpty()
@@ -787,20 +1020,26 @@ private object GradleLayoutDiskCache {
             if (!dir.isDirectory) return null
             val type = ModuleType.valueOf(parts[2])
             val deps = if (parts[3].isBlank()) emptySet() else parts[3].split(',').toSet()
-            modules.add(GradleModule(path, dir, type, deps))
+            val ibRoot = parts[4].takeIf { it.isNotEmpty() }?.let(::File)
+            val localPath = parts[5].ifEmpty { path }
+            modules.add(GradleModule(path, dir, type, deps, ibRoot, localPath))
         }
         if (modules.isEmpty()) return null
 
-        val actualFp = computeBuildScriptsFingerprint(rootDir, modules)
+        val actualFp = computeBuildScriptsFingerprint(rootDir, modules, gradleConfig)
         if (actualFp != expectedFp) return null
-        GradleProjectLayout(rootDir, modules)
+        GradleProjectLayout(
+            rootDir = rootDir,
+            modules = modules,
+            resolvedGradleConfig = gradleConfig
+        )
     }.getOrNull()
 
     fun save(layout: GradleProjectLayout) {
         runCatching {
-            val cacheFile = cacheFileFor(layout.rootDir)
+            val cacheFile = cacheFileFor(layout.rootDir, layout.resolvedGradleConfig)
             cacheFile.parentFile?.mkdirs()
-            val fp = computeBuildScriptsFingerprint(layout.rootDir, layout.modules)
+            val fp = computeBuildScriptsFingerprint(layout.rootDir, layout.modules, layout.resolvedGradleConfig)
             val sb = StringBuilder()
             sb.append("fingerprint=").append(fp).append('\n')
             for (mod in layout.modules) {
@@ -808,15 +1047,17 @@ private object GradleLayoutDiskCache {
                     .append(mod.gradlePath).append('|')
                     .append(mod.moduleDir.canonicalPath).append('|')
                     .append(mod.type.name).append('|')
-                    .append(mod.dependencies.sorted().joinToString(","))
+                    .append(mod.dependencies.sorted().joinToString(",")).append('|')
+                    .append(mod.includedBuildRoot?.canonicalPath.orEmpty()).append('|')
+                    .append(mod.localGradlePath)
                     .append('\n')
             }
             cacheFile.writeText(sb.toString(), StandardCharsets.UTF_8)
         }
     }
 
-    private fun cacheFileFor(rootDir: File): File {
-        val key = rootDir.canonicalPath
+    private fun cacheFileFor(rootDir: File, gradleConfig: GradleExecutionConfig): File {
+        val key = "${rootDir.canonicalPath}|${gradleConfig.cacheKeySuffix()}"
         val hash = MessageDigest.getInstance("SHA-256")
             .digest(key.toByteArray(StandardCharsets.UTF_8))
             .take(HASH_BYTES)
@@ -824,7 +1065,12 @@ private object GradleLayoutDiskCache {
         return File(HotReloadSyncCoordinator.defaultRegistryDir(), "layout-${rootDir.name}-$hash.cache")
     }
 
-    private fun computeBuildScriptsFingerprint(rootDir: File, modules: List<GradleModule>): String {
+    private fun computeBuildScriptsFingerprint(
+        rootDir: File,
+        modules: List<GradleModule>,
+        gradleConfig: GradleExecutionConfig
+    ): String {
+        val includedRoots = modules.mapNotNull { it.includedBuildRoot }.distinct()
         val trackedFiles = buildList {
             add(File(rootDir, "settings.gradle.kts"))
             add(File(rootDir, "settings.gradle"))
@@ -832,13 +1078,18 @@ private object GradleLayoutDiskCache {
             add(File(rootDir, "build.gradle.kts"))
             add(File(rootDir, "build.gradle"))
             add(File(rootDir, "gradle/libs.versions.toml"))
+            for (ibRoot in includedRoots) {
+                add(File(ibRoot, "settings.gradle.kts"))
+                add(File(ibRoot, "settings.gradle"))
+                add(File(ibRoot, "gradle.properties"))
+            }
             for (mod in modules) {
                 add(File(mod.moduleDir, "build.gradle.kts"))
                 add(File(mod.moduleDir, "build.gradle"))
             }
         }
         val sb = StringBuilder()
-        sb.append(CACHE_VERSION).append('|')
+        sb.append(CACHE_VERSION).append('|').append(gradleConfig.cacheKeySuffix()).append('|')
         for (file in trackedFiles) {
             if (file.isFile) {
                 sb.append(file.path).append(':')

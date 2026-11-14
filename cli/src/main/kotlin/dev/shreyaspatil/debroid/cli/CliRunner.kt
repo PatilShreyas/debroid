@@ -38,7 +38,9 @@ import dev.shreyaspatil.debroid.cli.models.DaemonIpcRequest
 import dev.shreyaspatil.debroid.cli.models.DaemonRequest
 import dev.shreyaspatil.debroid.cli.models.JsonSchemaGenerator
 import dev.shreyaspatil.debroid.cli.update.AutoUpdateManager
+import dev.shreyaspatil.debroid.hotreload.GradleJvmResolver
 import dev.shreyaspatil.debroid.hotreload.HotReloadConfig
+import dev.shreyaspatil.debroid.hotreload.HotReloadEvent
 import dev.shreyaspatil.debroid.hotreload.HotReloadSession
 import dev.shreyaspatil.debroid.hotreload.HotReloadSyncCoordinator
 import dev.shreyaspatil.debroid.models.StepAction
@@ -59,6 +61,7 @@ import java.io.PrintWriter
 import java.io.RandomAccessFile
 import java.net.Socket
 import kotlin.system.exitProcess
+import com.github.ajalt.clikt.parameters.options.multiple as multipleOption
 
 @OptIn(ExperimentalSerializationApi::class)
 object CliRunner {
@@ -712,15 +715,41 @@ object CliRunner {
             "--no-fallback",
             help = "Disable automatic fallback to full installDebug on resource or incompatible structural changes."
         ).flag(default = false)
+        private val javaHome by option(
+            "--java-home",
+            envvar = "DEBROID_JAVA_HOME",
+            help = "JDK home directory for Gradle commands (auto-detected from gradle.properties, " +
+                ".java-version, .sdkmanrc, or Gradle wrapper compatibility when omitted)."
+        )
+        private val gradleArgs by option(
+            "--gradle-args",
+            help = "Extra arguments forwarded to all Gradle invocations " +
+                "(e.g., --gradle-args=\"-Pfoo=bar --offline\"). May be specified multiple times."
+        ).multipleOption()
 
         override fun run() {
+            val explicitJavaHome = javaHome?.trim()?.takeIf { it.isNotEmpty() }?.let(::File)
+            if (explicitJavaHome != null && GradleJvmResolver.normalizeJdkHome(explicitJavaHome) == null) {
+                println(
+                    HotReloadEvent.Error(
+                        code = "INVALID_JAVA_HOME",
+                        message = "Invalid --java-home directory: ${explicitJavaHome.path} " +
+                            "(no bin/java executable found)"
+                    ).formatPlainText()
+                )
+                System.out.flush()
+                return
+            }
+            val parsedGradleArgs = GradleJvmResolver.parseGradleArgs(gradleArgs)
             val config = HotReloadConfig(
                 appId = appId,
                 projectDir = File(projectDir),
                 variant = variant,
                 intervalMs = intervalMs.toLong(),
                 once = once,
-                allowFallback = !noFallback
+                allowFallback = !noFallback,
+                javaHome = explicitJavaHome,
+                gradleArgs = parsedGradleArgs
             )
             if (once && sessionFactory == null) {
                 val synced = HotReloadSyncCoordinator.trySyncWithRunningWatcher(config) { line ->

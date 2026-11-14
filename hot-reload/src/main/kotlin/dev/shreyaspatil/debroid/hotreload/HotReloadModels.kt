@@ -12,7 +12,9 @@ data class GradleModule(
     val gradlePath: String,
     val moduleDir: File,
     val type: ModuleType,
-    val dependencies: Set<String> = emptySet()
+    val dependencies: Set<String> = emptySet(),
+    val includedBuildRoot: File? = null,
+    val localGradlePath: String = gradlePath
 )
 
 data class DetectedChanges(
