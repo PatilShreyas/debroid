@@ -15,6 +15,7 @@ class JvmtiAgentInstaller(
         private const val RESULT_POLL_SLEEP_MS = 15L
         private const val AGENT_FILENAME = "libdebroid_hotreload.so"
         private const val SYNTHETIC_MARKER_PREFIX = "\$\$ExternalSynthetic"
+        private const val DESUGAR_LIB_PREFIX = "j\$."
     }
 
     fun invalidateInstalledAgent(appId: String) {
@@ -123,7 +124,9 @@ class JvmtiAgentInstaller(
 
         var redefineFileIdx = 0
         for (payload in classPayloads) {
-            if (hasCombinedDex && payload.className.contains(SYNTHETIC_MARKER_PREFIX)) {
+            val isNewSyntheticOrDesugarWrapper = payload.className.contains(SYNTHETIC_MARKER_PREFIX) ||
+                payload.className.startsWith(DESUGAR_LIB_PREFIX)
+            if (hasCombinedDex && isNewSyntheticOrDesugarWrapper) {
                 // Brand-new per-reload synthetic lambda classes are never already loaded in ART;
                 // they are loaded via BaseDexClassLoader.addDexPath(combined_dex).
                 manifestLines.add("class=${payload.className}|")

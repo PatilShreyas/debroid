@@ -5,6 +5,7 @@ import dev.shreyaspatil.debroid.adb.DefaultCommandRunner
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.File
+import java.io.PrintStream
 import java.lang.reflect.InvocationTargetException
 import java.net.URLClassLoader
 import java.nio.ByteBuffer
@@ -44,6 +45,7 @@ class IncrementalDexCompiler(
     private val activeClassRenamesByModule =
         mutableMapOf<String, MutableMap<String, String>>()
     private val kspChangeDetector = KspChangeDetector()
+    private var desugarD8Config: CoreLibraryDesugarResolver.DesugarD8Config? = null
     private var appMergedDexIndexed = false
     private var reloadGeneration = 0
     private var classRenameCounter = 0
@@ -51,6 +53,7 @@ class IncrementalDexCompiler(
     companion object {
         private const val COMPILE_TIMEOUT_SECONDS = 120L
         private const val D8_TIMEOUT_SECONDS = 30L
+        private const val DEFAULT_MIN_API = 26
         private const val MIN_VERBOSE_SYNTHETIC_D8_MAJOR = 37
         private const val DEX_HEADER_MIN_BYTES = 32
         private const val DEX_CHECKSUM_OFFSET = 8
@@ -61,6 +64,7 @@ class IncrementalDexCompiler(
         private const val BASE36_RADIX = 36
         private const val MARKER_TOKEN_LENGTH = 5
         private const val DEFAULT_SYNTHETIC_MARKER = "\$\$ExternalSyntheticLambda"
+        private const val DEFAULT_BACKPORT_MARKER = "\$\$ExternalSyntheticBackport"
         private const val R8_SYNTHESIZED_ANNOTATION = "Lcom/android/tools/r8/annotations/SynthesizedClass"
         private const val R8_SYNTHESIZED_NEUTRALIZED = "Lcom/android/tools/r8/annotations/SynthesizedClast"
         private val kotlincErrorRegex = Regex("""^\s*e:\s*(?:file://)?([^\s:]+):(\d+):(\d+)\s*(.+)""")
@@ -116,6 +120,7 @@ class IncrementalDexCompiler(
             knownModulesByPath[module.gradlePath] = module
             moduleDirsByPath[module.gradlePath] = module.moduleDir
         }
+        desugarD8Config = CoreLibraryDesugarResolver.resolve(projectRoot, modules, ::resolveModuleVariant)
         kspChangeDetector.snapshotModules(modules, ::resolveModuleVariant)
 
         val d8Path = d8PathProvider()
@@ -487,7 +492,8 @@ class IncrementalDexCompiler(
         val stagingDir: File,
         val mergedInputsDir: File,
         val perClassOutDir: File,
-        val syntheticMarker: String
+        val syntheticMarker: String,
+        val backportMarker: String
     )
 
     private sealed class ClassCollectionResult {
@@ -926,6 +932,7 @@ class IncrementalDexCompiler(
         val base36 = token.toString(BASE36_RADIX).uppercase(Locale.US).padStart(MARKER_TOKEN_LENGTH, '0')
             .takeLast(MARKER_TOKEN_LENGTH)
         val syntheticMarker = "\$\$ExternalSynthetic${base36}_"
+        val backportMarker = "\$\$ExternalSyntheticBp${base36}_"
         val payloads = mutableListOf<ClassDexPayload>()
         val mergedInputsDir = File(stagingDir, "merged_inputs").apply { mkdirs() }
         val perClassOutDir = File(stagingDir, "per_class_out").apply { mkdirs() }
@@ -935,7 +942,8 @@ class IncrementalDexCompiler(
             stagingDir = stagingDir,
             mergedInputsDir = mergedInputsDir,
             perClassOutDir = perClassOutDir,
-            syntheticMarker = syntheticMarker
+            syntheticMarker = syntheticMarker,
+            backportMarker = backportMarker
         )
 
         val initialInputFiles = modifiedClasses.mapIndexed { index, entry ->
@@ -977,9 +985,13 @@ class IncrementalDexCompiler(
                     dexBytesByModule.getOrPut(matchingEntry.modulePath) { mutableMapOf() }[rawDexClassName] = rawBytes
                     persistRedefinedDex(matchingEntry.modulePath, rawDexClassName, rawBytes)
                 }
-                val dexClassName = rawDexClassName.replace(DEFAULT_SYNTHETIC_MARKER, syntheticMarker)
+                val dexClassName = rawDexClassName
+                    .replace(DEFAULT_SYNTHETIC_MARKER, syntheticMarker)
+                    .replace(DEFAULT_BACKPORT_MARKER, backportMarker)
                 val targetDex = File(stagingDir, "redefine_${payloads.size}.dex")
-                targetDex.writeBytes(transformDexBytesWithSyntheticMarker(rawBytes, syntheticMarker))
+                targetDex.writeBytes(
+                    transformDexBytesWithSyntheticMarker(rawBytes, syntheticMarker, backportMarker)
+                )
                 payloads.add(
                     ClassDexPayload(
                         className = dexClassName,
@@ -996,7 +1008,11 @@ class IncrementalDexCompiler(
         } else {
             val fallbackDex = File(perClassOutDir, "classes.dex")
             if (fallbackDex.exists()) {
-                val rewrittenFallback = transformDexBytesWithSyntheticMarker(fallbackDex.readBytes(), syntheticMarker)
+                val rewrittenFallback = transformDexBytesWithSyntheticMarker(
+                    fallbackDex.readBytes(),
+                    syntheticMarker,
+                    backportMarker
+                )
                 for (entry in modifiedClasses) {
                     val targetDex = File(stagingDir, "redefine_${payloads.size}.dex")
                     targetDex.writeBytes(rewrittenFallback)
@@ -1051,7 +1067,8 @@ class IncrementalDexCompiler(
         val combinedOutDir = File(ctx.stagingDir, "combined").apply { mkdirs() }
         val combinedFile = File(combinedOutDir, "classes.dex")
         if (hasPerClassDexFiles && payloads.isNotEmpty()) {
-            val dexMergeArgs = listOf("--min-api", "26", "--output", combinedOutDir.absolutePath) +
+            val minApi = (desugarD8Config?.minApi ?: DEFAULT_MIN_API).toString()
+            val dexMergeArgs = listOf("--min-api", minApi, "--output", combinedOutDir.absolutePath) +
                 payloads.map { it.dexFile.absolutePath }
             if (executeD8(ctx.d8Path, dexMergeArgs).isSuccess && combinedFile.exists()) {
                 val target = File(ctx.stagingDir, "new_classes.dex")
@@ -1068,7 +1085,7 @@ class IncrementalDexCompiler(
         if (!combinedFile.exists()) return null
         val target = File(ctx.stagingDir, "new_classes.dex")
         combinedFile.copyTo(target, overwrite = true)
-        rewriteSyntheticLambdaMarker(target, ctx.syntheticMarker)
+        rewriteSyntheticLambdaMarker(target, ctx.syntheticMarker, ctx.backportMarker)
         return target
     }
 
@@ -1239,33 +1256,52 @@ class IncrementalDexCompiler(
         val majorVersion = File(d8Path).parentFile?.name
             ?.substringBefore('.')
             ?.toIntOrNull() ?: 0
-        return if (majorVersion >= MIN_VERBOSE_SYNTHETIC_D8_MAJOR) {
-            listOf("--min-api", "26", "--verbose-synthetic-names")
-        } else {
-            listOf("--min-api", "26")
+        val desugar = desugarD8Config
+        val minApi = (desugar?.minApi ?: DEFAULT_MIN_API).toString()
+        val flags = mutableListOf("--min-api", minApi)
+        if (majorVersion >= MIN_VERBOSE_SYNTHETIC_D8_MAJOR) {
+            flags.add("--verbose-synthetic-names")
         }
+        if (desugar != null) {
+            flags.addAll(
+                listOf(
+                    "--lib",
+                    desugar.androidJar.absolutePath,
+                    "--desugared-lib",
+                    desugar.desugarConfigJson.absolutePath
+                )
+            )
+        }
+        return flags
     }
 
-    private fun rewriteSyntheticLambdaMarker(dexFile: File, newMarker: String) {
+    private fun rewriteSyntheticLambdaMarker(dexFile: File, newMarker: String, backportMarker: String) {
         val raw = dexFile.readBytes()
-        val transformed = transformDexBytesWithSyntheticMarker(raw, newMarker)
+        val transformed = transformDexBytesWithSyntheticMarker(raw, newMarker, backportMarker)
         if (transformed !== raw) {
             dexFile.writeBytes(transformed)
         }
     }
 
-    private fun transformDexBytesWithSyntheticMarker(rawBytes: ByteArray, newMarker: String): ByteArray {
+    private fun transformDexBytesWithSyntheticMarker(
+        rawBytes: ByteArray,
+        newMarker: String,
+        backportMarker: String
+    ): ByteArray {
         if (!isValidDexHeader(rawBytes)) return rawBytes
         val bytes = rawBytes.clone()
         val oldBytes = DEFAULT_SYNTHETIC_MARKER.toByteArray(Charsets.US_ASCII)
         val newBytes = newMarker.toByteArray(Charsets.US_ASCII)
         val replacedMarker = oldBytes.size == newBytes.size && replaceAsciiBytesInPlace(bytes, oldBytes, newBytes)
+        val oldBpBytes = DEFAULT_BACKPORT_MARKER.toByteArray(Charsets.US_ASCII)
+        val newBpBytes = backportMarker.toByteArray(Charsets.US_ASCII)
+        val replacedBp = oldBpBytes.size == newBpBytes.size && replaceAsciiBytesInPlace(bytes, oldBpBytes, newBpBytes)
         val replacedSynthAnn = replaceAsciiBytesInPlace(
             bytes,
             R8_SYNTHESIZED_ANNOTATION.toByteArray(Charsets.US_ASCII),
             R8_SYNTHESIZED_NEUTRALIZED.toByteArray(Charsets.US_ASCII)
         )
-        if (!replacedMarker && !replacedSynthAnn) return rawBytes
+        if (!replacedMarker && !replacedBp && !replacedSynthAnn) return rawBytes
 
         val sha1 = MessageDigest.getInstance("SHA-1")
         sha1.update(bytes, DEX_HEADER_MIN_BYTES, bytes.size - DEX_HEADER_MIN_BYTES)
@@ -1446,26 +1482,36 @@ private object InProcessD8Runner {
 
     fun tryRunInProcess(d8Path: String, args: List<String>): Result<String>? {
         val jarFile = resolveD8Jar(d8Path) ?: return null
-        return try {
-            val loader = classLoaders.computeIfAbsent(jarFile.canonicalPath) {
-                URLClassLoader(arrayOf(jarFile.toURI().toURL()), ClassLoader.getPlatformClassLoader())
+        val errBytes = ByteArrayOutputStream()
+        return synchronized(this) {
+            val prevErr = System.err
+            System.setErr(PrintStream(errBytes, true, Charsets.UTF_8))
+            try {
+                val loader = classLoaders.computeIfAbsent(jarFile.canonicalPath) {
+                    URLClassLoader(arrayOf(jarFile.toURI().toURL()), ClassLoader.getPlatformClassLoader())
+                }
+                val originCls = loader.loadClass("com.android.tools.r8.origin.Origin")
+                val rootOrigin = originCls.getMethod("root").invoke(null)
+                val d8CommandCls = loader.loadClass("com.android.tools.r8.D8Command")
+                val parseMethod = d8CommandCls.getMethod("parse", Array<String>::class.java, originCls)
+                val builder = parseMethod.invoke(null, args.toTypedArray(), rootOrigin)
+                val buildMethod = builder.javaClass.getMethod("build")
+                val command = buildMethod.invoke(builder)
+                val d8Cls = loader.loadClass("com.android.tools.r8.D8")
+                val runMethod = d8Cls.getMethod("run", d8CommandCls)
+                runMethod.invoke(null, command)
+                Result.success("")
+            } catch (e: InvocationTargetException) {
+                val cause = e.targetException ?: e
+                val detail = errBytes.toString(Charsets.UTF_8).trim().ifEmpty {
+                    cause.message ?: "In-process D8 failed"
+                }
+                Result.failure(RuntimeException(detail, cause))
+            } catch (e: Exception) {
+                Result.failure(e)
+            } finally {
+                System.setErr(prevErr)
             }
-            val originCls = loader.loadClass("com.android.tools.r8.origin.Origin")
-            val rootOrigin = originCls.getMethod("root").invoke(null)
-            val d8CommandCls = loader.loadClass("com.android.tools.r8.D8Command")
-            val parseMethod = d8CommandCls.getMethod("parse", Array<String>::class.java, originCls)
-            val builder = parseMethod.invoke(null, args.toTypedArray(), rootOrigin)
-            val buildMethod = builder.javaClass.getMethod("build")
-            val command = buildMethod.invoke(builder)
-            val d8Cls = loader.loadClass("com.android.tools.r8.D8")
-            val runMethod = d8Cls.getMethod("run", d8CommandCls)
-            runMethod.invoke(null, command)
-            Result.success("")
-        } catch (e: InvocationTargetException) {
-            val cause = e.targetException ?: e
-            Result.failure(RuntimeException(cause.message ?: "In-process D8 failed", cause))
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
 

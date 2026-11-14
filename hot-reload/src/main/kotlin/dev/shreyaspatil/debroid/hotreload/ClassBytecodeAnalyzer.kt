@@ -407,17 +407,30 @@ internal object ClassBytecodeAnalyzer {
             if ((baselineDexMembers.accessFlags and kindMask) != (curr.accessFlags and kindMask)) {
                 return "CLASS_MODIFIERS_CHANGED:$simpleName"
             }
-            val dexSuper = baselineDexMembers.superClassName?.replace('.', '/').orEmpty()
+            val dexSuper = baselineDexMembers.superClassName
+                ?.replace('.', '/')
+                ?.let(::normalizeDesugaredInternalName)
+                .orEmpty()
             if (dexSuper.isNotEmpty() && dexSuper != curr.superInternalName) {
                 return "SUPERCLASS_CHANGED:$simpleName"
             }
-            val dexIfaces = baselineDexMembers.interfaces.filterNot { it.contains("\$\$") }
+            val dexIfaces = baselineDexMembers.interfaces
+                .filterNot { it.contains("\$\$") }
+                .map(::normalizeDesugaredInternalName)
             val currIfaces = curr.interfaces.filterNot { it.contains("\$\$") }
             if (dexIfaces != currIfaces) {
                 return "INTERFACE_HIERARCHY_CHANGED:$simpleName"
             }
         }
         return null
+    }
+
+    private fun normalizeDesugaredInternalName(internalName: String): String {
+        return if (internalName.startsWith("j\$/")) {
+            "java/" + internalName.removePrefix("j\$/")
+        } else {
+            internalName
+        }
     }
 
     fun remapSingleInternalClassName(internalName: String, renameMap: Map<String, String>): String {
