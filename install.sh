@@ -137,6 +137,7 @@ mv "$BINARY_NAME" "${INSTALL_DIR}/${BINARY_NAME}"
 # ==============================================================================
 
 echo "🚀 Initializing Debroid state and extracting AI skills..."
+rm -f "${HOME}/.debroid/hotreload"/layout-*.cache 2>/dev/null || true
 "${INSTALL_DIR}/${BINARY_NAME}" --help >/dev/null 2>&1 || true
 
 # ==============================================================================

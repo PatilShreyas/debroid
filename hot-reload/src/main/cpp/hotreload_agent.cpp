@@ -2212,23 +2212,31 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
         } else {
             LOGI("Standard RedefineClasses for %s returned error: %d, attempting structural redefine",
                  item.binary_name.c_str(), redefErr);
-            bool structuralApplied = false;
-            if (structural_redefine_fn) {
-                jvmtiError sErr = structural_redefine_fn(jvmti, 1, &def);
-                if (sErr == JVMTI_ERROR_NONE) {
-                    structuralApplied = true;
-                    used_structural = true;
-                    redefined_count++;
-                    LOGI("Structural redefinition succeeded for %s!", item.binary_name.c_str());
-                } else {
-                    LOGE("Structural redefinition for %s failed with error: %d", item.binary_name.c_str(), sErr);
-                }
+        bool structuralApplied = false;
+        jvmtiError finalErr = redefErr;
+        if (structural_redefine_fn) {
+            jvmtiError sErr = structural_redefine_fn(jvmti, 1, &def);
+            if (sErr == JVMTI_ERROR_NONE) {
+                structuralApplied = true;
+                used_structural = true;
+                redefined_count++;
+                LOGI("Structural redefinition succeeded for %s!", item.binary_name.c_str());
+            } else {
+                finalErr = sErr;
+                LOGE("Structural redefinition for %s failed with error: %d", item.binary_name.c_str(), sErr);
             }
+        }
 
-            if (!structuralApplied) {
-                char buffer[128];
-                snprintf(buffer, sizeof(buffer), "status=STRUCTURAL_INCOMPATIBLE reason=JVMTI_ERROR_%d\n", redefErr);
-                write_result(result_path, buffer);
+        if (!structuralApplied) {
+            size_t last_dot = item.binary_name.rfind('.');
+            std::string short_cls = (last_dot != std::string::npos)
+                ? item.binary_name.substr(last_dot + 1)
+                : item.binary_name;
+            char buffer[256];
+            snprintf(buffer, sizeof(buffer),
+                     "status=STRUCTURAL_INCOMPATIBLE reason=JVMTI_ERROR_%d:%s\n",
+                     finalErr, short_cls.c_str());
+            write_result(result_path, buffer);
                 for (auto& entry : loaded_classes) {
                     env->DeleteLocalRef(entry.klass);
                 }
@@ -2266,8 +2274,7 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
             std::string outer_prefix = item.binary_name.substr(0, cs_pos) +
                                        item.binary_name.substr(cs_pos + strlen("ComposableSingletons$"));
             redefined_prefixes.push_back(outer_prefix);
-            if (contains_str(invalidate_all_scope_classes, item.binary_name) &&
-                !contains_str(invalidate_all_scope_classes, outer_prefix)) {
+            if (!contains_str(invalidate_all_scope_classes, outer_prefix)) {
                 invalidate_all_scope_classes.push_back(outer_prefix);
             }
         } else if (should_reinit) {

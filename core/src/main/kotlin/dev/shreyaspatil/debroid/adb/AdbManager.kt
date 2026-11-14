@@ -192,6 +192,8 @@ class AdbManager(
 
     fun pushFile(localPath: String, remotePath: String): Result<String> = runAdb("push", localPath, remotePath)
 
+    fun pullFile(remotePath: String, localPath: String): Result<String> = runAdb("pull", remotePath, localPath)
+
     fun runShell(vararg args: String): Result<String> = runAdb("shell", *args)
 
     fun runAs(appId: String, vararg args: String): Result<String> = runAdb("shell", "run-as", appId, *args)

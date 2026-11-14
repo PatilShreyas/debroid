@@ -35,6 +35,29 @@ class SkillExtractor(
         }
     }
 
+    /**
+     * Ensures all embedded skill files on disk match the running binary's bundled resources,
+     * updating any missing or modified files in-place (even across local reinstalls of the same version).
+     */
+    fun ensureSkillsUpToDate() {
+        try {
+            for (relativePath in skillResources) {
+                val stream = SkillExtractor::class.java.getResourceAsStream("/$relativePath") ?: continue
+                val embeddedBytes = stream.use { it.readBytes() }
+                val targetFile = File(masterSkillDir, relativePath)
+                val needsWrite = !targetFile.isFile ||
+                    targetFile.length() != embeddedBytes.size.toLong() ||
+                    !targetFile.readBytes().contentEquals(embeddedBytes)
+                if (needsWrite) {
+                    targetFile.parentFile?.mkdirs()
+                    targetFile.writeBytes(embeddedBytes)
+                }
+            }
+        } catch (_: Exception) {
+            // Silently ignore filesystem errors during background skill sync
+        }
+    }
+
     private fun extractResource(resourcePath: String, targetFile: File) {
         val inputStream: InputStream? = SkillExtractor::class.java.getResourceAsStream(resourcePath)
         if (inputStream != null) {

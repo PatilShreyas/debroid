@@ -72,4 +72,31 @@ class SkillExtractorTest {
             invalidDir.delete()
         }
     }
+
+    @Test
+    fun `ensureSkillsUpToDate refreshes stale hot-reload reference on same-version reinstall`(@TempDir tempDir: File) {
+        val targetDir = File(tempDir, "skills/debroid-cli")
+        val hotReloadRefFile = File(targetDir, "references/hot-reload.md").apply {
+            parentFile.mkdirs()
+            writeText("stale old reference content")
+        }
+        val cacheFile = File(tempDir, "update-cache.json")
+        val updateCache = UpdateCache(cacheFile).apply {
+            recordLastRunVersion(dev.shreyaspatil.debroid.cli.VERSION)
+        }
+        val extractor = SkillExtractor(targetDir)
+        val manager = AutoUpdateManager(
+            releaseClient = io.mockk.mockk(relaxed = true),
+            binaryUpdater = io.mockk.mockk(relaxed = true),
+            updateCache = updateCache,
+            skillExtractor = extractor
+        )
+
+        val versionChanged = manager.syncSkillsIfUpdated()
+        org.junit.jupiter.api.Assertions.assertFalse(versionChanged)
+        if (SkillExtractor::class.java.getResourceAsStream("/references/hot-reload.md") != null) {
+            org.junit.jupiter.api.Assertions.assertNotEquals("stale old reference content", hotReloadRefFile.readText())
+            assertTrue(hotReloadRefFile.readText().contains("--gradle-args"))
+        }
+    }
 }

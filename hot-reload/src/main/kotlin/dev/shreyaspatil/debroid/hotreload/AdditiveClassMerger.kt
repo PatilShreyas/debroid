@@ -3,6 +3,8 @@ package dev.shreyaspatil.debroid.hotreload
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
+import java.util.zip.Adler32
 
 /**
  * Merges removed fields and methods from a previous version of a class/DEX into the newly
@@ -38,6 +40,14 @@ object AdditiveClassMerger {
     private const val ACC_STATIC = 0x0008
     private const val ACC_SYNTHETIC = 0x1000
     private const val ACC_ABSTRACT_OR_NATIVE = 0x0500
+
+    // ACC_PUBLIC(0x01) | ACC_PRIVATE(0x02) | ACC_PROTECTED(0x04) | ACC_FINAL(0x10) | ACC_BRIDGE(0x40) |
+    // ACC_VARARGS(0x80) | ACC_SYNTHETIC(0x1000)
+    private const val METHOD_MODIFIER_SYNC_MASK = 0x10D7
+
+    // ACC_PUBLIC(0x01) | ACC_PRIVATE(0x02) | ACC_PROTECTED(0x04) | ACC_FINAL(0x10) | ACC_VOLATILE(0x40) |
+    // ACC_TRANSIENT(0x80) | ACC_SYNTHETIC(0x1000)
+    private const val FIELD_MODIFIER_SYNC_MASK = 0x10D7
 
     private const val OP_ACONST_NULL: Byte = 0x01
     private const val OP_ICONST_0: Byte = 0x03
@@ -169,16 +179,33 @@ object AdditiveClassMerger {
         currentClassBytes: ByteArray
     ): ByteArray {
         val currClass = runCatching { parseClass(currentClassBytes) }.getOrNull() ?: return currentClassBytes
+        val prevFieldsByKey = prevDex.fields.associateBy { it.name to it.descriptor }
         val prevMethodsByKey = prevDex.methods.associateBy { it.name to it.descriptor }
         var cloned: ByteArray? = null
-        for (method in currClass.methods.members) {
-            if (method.accessFlagsOffset < 0) continue
-            val prevMethod = prevMethodsByKey[method.name to method.descriptor] ?: continue
-            val currIsPrivate = (method.accessFlags and ACC_PRIVATE) != 0
-            val prevIsNotPrivate = (prevMethod.accessFlags and ACC_PRIVATE) == 0
-            if (currIsPrivate && prevIsNotPrivate) {
+
+        for (field in currClass.fields.members) {
+            if (field.accessFlagsOffset < 0) continue
+            val prevField = prevFieldsByKey[field.name to field.descriptor] ?: continue
+            if (((field.accessFlags xor prevField.accessFlags) and ACC_STATIC) != 0) continue
+            val updatedFlags = (field.accessFlags and FIELD_MODIFIER_SYNC_MASK.inv()) or
+                (prevField.accessFlags and FIELD_MODIFIER_SYNC_MASK)
+            if (updatedFlags != field.accessFlags) {
                 val targetBytes = cloned ?: currentClassBytes.clone().also { cloned = it }
-                val updatedFlags = method.accessFlags and ACC_PRIVATE.inv()
+                targetBytes[field.accessFlagsOffset] = ((updatedFlags ushr 8) and 0xFF).toByte()
+                targetBytes[field.accessFlagsOffset + 1] = (updatedFlags and 0xFF).toByte()
+            }
+        }
+
+        for (method in currClass.methods.members) {
+            if (method.accessFlagsOffset < 0 || method.name == "<clinit>") continue
+            val prevMethod = prevMethodsByKey[method.name to method.descriptor] ?: continue
+            if (((method.accessFlags xor prevMethod.accessFlags) and (ACC_STATIC or ACC_ABSTRACT_OR_NATIVE)) != 0) {
+                continue
+            }
+            val updatedFlags = (method.accessFlags and METHOD_MODIFIER_SYNC_MASK.inv()) or
+                (prevMethod.accessFlags and METHOD_MODIFIER_SYNC_MASK)
+            if (updatedFlags != method.accessFlags) {
+                val targetBytes = cloned ?: currentClassBytes.clone().also { cloned = it }
                 targetBytes[method.accessFlagsOffset] = ((updatedFlags ushr 8) and 0xFF).toByte()
                 targetBytes[method.accessFlagsOffset + 1] = (updatedFlags and 0xFF).toByte()
             }
@@ -218,6 +245,17 @@ object AdditiveClassMerger {
         dexBytes: ByteArray,
         targetClassName: String? = null
     ): DexClassMembers? = DexMemberParser.parse(dexBytes, targetClassName)
+
+    internal fun parseSingleDexClass(
+        dexBytes: ByteArray,
+        targetClassName: String
+    ): DexClassMembers? = DexMemberParser.parseSingleClass(dexBytes, targetClassName)
+
+    internal fun alignDexMethodAccessFlags(
+        dexBytes: ByteArray,
+        targetClassName: String,
+        prevDex: DexClassMembers
+    ): ByteArray = DexMemberParser.alignMethodAccessFlagsInDex(dexBytes, targetClassName, prevDex)
 
     internal fun parseAllDexClasses(dexBytes: ByteArray): Map<String, DexClassMembers> =
         DexMemberParser.parseAllClasses(dexBytes)
@@ -502,9 +540,20 @@ object AdditiveClassMerger {
     }
 }
 
-@Suppress("MagicNumber")
+@Suppress(
+    "MagicNumber",
+    "CyclomaticComplexMethod",
+    "LongMethod",
+    "TooManyFunctions",
+    "ReturnCount",
+    "ComplexCondition"
+)
 private object DexMemberParser {
     private const val MIN_DEX_BYTES = 112
+    private const val DEX_CHECKSUM_OFFSET = 8
+    private const val DEX_SIGNATURE_OFFSET = 12
+    private const val DEX_SIGNATURE_LENGTH = 20
+    private const val DEX_HEADER_MIN_BYTES = 32
     private const val DEX_STRING_IDS_OFFSET = 56
     private const val DEX_TYPE_IDS_OFFSET = 64
     private const val DEX_PROTO_IDS_OFFSET = 72
@@ -516,17 +565,26 @@ private object DexMemberParser {
     private const val DEX_CLASS_DEF_ITEM_SIZE = 32
     private const val DEX_CLASS_DATA_FIELD_OFFSET = 24
     private const val U16_MASK = 0xFFFF
+    private const val ACC_PRIVATE = 0x0002
+    private const val ACC_STATIC = 0x0008
+    private const val ACC_CONSTRUCTOR = 0x10000
+    private const val ACC_ABSTRACT_OR_NATIVE = 0x0500
+    private const val DEX_MODIFIER_SYNC_MASK = 0x1057
 
     fun parse(dexBytes: ByteArray, targetClassName: String? = null): AdditiveClassMerger.DexClassMembers? {
+        if (targetClassName != null) {
+            parseSingleClass(dexBytes, targetClassName)?.let { return it }
+        }
         val allClasses = parseAllClasses(dexBytes)
         if (allClasses.isEmpty()) return null
-        if (targetClassName != null) {
-            allClasses[targetClassName]?.let { return it }
-        }
         return allClasses.entries
             .firstOrNull { !it.key.contains("\$\$ExternalSynthetic") }
             ?.value
             ?: allClasses.values.first()
+    }
+
+    fun parseSingleClass(dexBytes: ByteArray, targetClassName: String): AdditiveClassMerger.DexClassMembers? {
+        return parseAllClasses(dexBytes, onlyClassName = targetClassName)[targetClassName]
     }
 
     private fun readDexInterfaces(
@@ -549,7 +607,10 @@ private object DexMemberParser {
         return list
     }
 
-    fun parseAllClasses(dexBytes: ByteArray): Map<String, AdditiveClassMerger.DexClassMembers> {
+    fun parseAllClasses(
+        dexBytes: ByteArray,
+        onlyClassName: String? = null
+    ): Map<String, AdditiveClassMerger.DexClassMembers> {
         if (dexBytes.size < MIN_DEX_BYTES) return emptyMap()
         if (dexBytes[0] != 'd'.code.toByte() || dexBytes[1] != 'e'.code.toByte() || dexBytes[2] != 'x'.code.toByte()) {
             return emptyMap()
@@ -638,13 +699,16 @@ private object DexMemberParser {
             }
         }
 
-        val result = LinkedHashMap<String, AdditiveClassMerger.DexClassMembers>(classDefsSize)
+        val result = LinkedHashMap<String, AdditiveClassMerger.DexClassMembers>(
+            if (onlyClassName != null) 1 else classDefsSize
+        )
         for (i in 0..<classDefsSize) {
             val itemOff = classDefsOff + i * DEX_CLASS_DEF_ITEM_SIZE
             val classTypeIdx = buf.getInt(itemOff)
-            val classAccessFlags = buf.getInt(itemOff + 4) and U16_MASK
             val classDescriptor = readDexType(classTypeIdx)
             val className = classDescriptor.removeSurrounding("L", ";").replace('/', '.')
+            if (onlyClassName != null && className != onlyClassName) continue
+            val classAccessFlags = buf.getInt(itemOff + 4) and U16_MASK
             val superTypeIdx = buf.getInt(itemOff + 8)
             val superClassName = if (superTypeIdx in 0..<typeIdsSize) {
                 readDexType(superTypeIdx).removeSurrounding("L", ";").takeIf { it.isNotEmpty() }
@@ -682,9 +746,165 @@ private object DexMemberParser {
                 interfaces = interfaces,
                 accessFlags = classAccessFlags
             )
+            if (onlyClassName != null) break
         }
 
         return result
+    }
+
+    fun alignMethodAccessFlagsInDex(
+        dexBytes: ByteArray,
+        targetClassName: String,
+        prevDex: AdditiveClassMerger.DexClassMembers
+    ): ByteArray {
+        if (dexBytes.size < MIN_DEX_BYTES || prevDex.methods.isEmpty()) return dexBytes
+        if (dexBytes[0] != 'd'.code.toByte() || dexBytes[1] != 'e'.code.toByte() || dexBytes[2] != 'x'.code.toByte()) {
+            return dexBytes
+        }
+        val prevMethodsByKey = prevDex.methods.associateBy { it.name to it.descriptor }
+        val buf = ByteBuffer.wrap(dexBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val stringIdsSize = buf.getInt(DEX_STRING_IDS_OFFSET)
+        val stringIdsOff = buf.getInt(DEX_STRING_IDS_OFFSET + 4)
+        val typeIdsSize = buf.getInt(DEX_TYPE_IDS_OFFSET)
+        val typeIdsOff = buf.getInt(DEX_TYPE_IDS_OFFSET + 4)
+        val protoIdsSize = buf.getInt(DEX_PROTO_IDS_OFFSET)
+        val protoIdsOff = buf.getInt(DEX_PROTO_IDS_OFFSET + 4)
+        val methodIdsSize = buf.getInt(DEX_METHOD_IDS_OFFSET)
+        val methodIdsOff = buf.getInt(DEX_METHOD_IDS_OFFSET + 4)
+        val classDefsSize = buf.getInt(DEX_CLASS_DEFS_OFFSET)
+        val classDefsOff = buf.getInt(DEX_CLASS_DEFS_OFFSET + 4)
+        if (classDefsSize <= 0) return dexBytes
+
+        fun readDexString(idx: Int): String {
+            if (idx !in 0..<stringIdsSize) return ""
+            val strDataOff = buf.getInt(stringIdsOff + idx * 4)
+            val saved = buf.position()
+            buf.position(strDataOff)
+            readUleb128(buf)
+            val start = buf.position()
+            var end = start
+            while (end < dexBytes.size && dexBytes[end] != 0.toByte()) end++
+            buf.position(saved)
+            return String(dexBytes, start, end - start, Charsets.UTF_8)
+        }
+
+        fun readDexType(typeIdx: Int): String {
+            if (typeIdx !in 0..<typeIdsSize) return ""
+            return readDexString(buf.getInt(typeIdsOff + typeIdx * 4))
+        }
+
+        fun readDexProto(protoIdx: Int): String {
+            if (protoIdx !in 0..<protoIdsSize) return "()V"
+            val base = protoIdsOff + protoIdx * DEX_PROTO_ITEM_SIZE
+            val returnTypeIdx = buf.getInt(base + 4)
+            val paramsOff = buf.getInt(base + 8)
+            val sb = StringBuilder("(")
+            if (paramsOff != 0) {
+                val count = buf.getInt(paramsOff)
+                for (i in 0..<count) {
+                    val tIdx = buf.getShort(paramsOff + 4 + i * 2).toInt() and U16_MASK
+                    sb.append(readDexType(tIdx))
+                }
+            }
+            sb.append(")").append(readDexType(returnTypeIdx))
+            return sb.toString()
+        }
+
+        var targetClassDataOff = 0
+        for (i in 0..<classDefsSize) {
+            val itemOff = classDefsOff + i * DEX_CLASS_DEF_ITEM_SIZE
+            val className = readDexType(buf.getInt(itemOff)).removeSurrounding("L", ";").replace('/', '.')
+            if (className == targetClassName) {
+                targetClassDataOff = buf.getInt(itemOff + DEX_CLASS_DATA_FIELD_OFFSET)
+                break
+            }
+        }
+        if (targetClassDataOff <= 0) return dexBytes
+
+        buf.position(targetClassDataOff)
+        val staticFieldsSize = readUleb128(buf)
+        val instanceFieldsSize = readUleb128(buf)
+        val directMethodsSize = readUleb128(buf)
+        val virtualMethodsSize = readUleb128(buf)
+
+        repeat(staticFieldsSize + instanceFieldsSize) {
+            readUleb128(buf)
+            readUleb128(buf)
+        }
+
+        var cloned: ByteArray? = null
+        fun scanAndPatchMethodTable(count: Int) {
+            var methodIdx = 0
+            repeat(count) {
+                methodIdx += readUleb128(buf)
+                val flagsStart = buf.position()
+                val rawDexFlags = readUleb128(buf)
+                val flagsLen = buf.position() - flagsStart
+                readUleb128(buf) // code_off
+                if (methodIdx in 0..<methodIdsSize) {
+                    val itemBase = methodIdsOff + methodIdx * DEX_MEMBER_ID_ITEM_SIZE
+                    val protoIdx = buf.getShort(itemBase + 2).toInt() and U16_MASK
+                    val nameIdx = buf.getInt(itemBase + 4)
+                    val mName = readDexString(nameIdx)
+                    val mProto = readDexProto(protoIdx)
+                    val prevMethod = prevMethodsByKey[mName to mProto]
+                    if (prevMethod != null && mName != "<clinit>") {
+                        val sameStaticNative =
+                            ((rawDexFlags xor prevMethod.accessFlags) and (ACC_STATIC or ACC_ABSTRACT_OR_NATIVE)) == 0
+                        val desiredFlags = (rawDexFlags and DEX_MODIFIER_SYNC_MASK.inv()) or
+                            (prevMethod.accessFlags and DEX_MODIFIER_SYNC_MASK)
+                        val keepsSameMethodTable = (rawDexFlags and (ACC_STATIC or ACC_CONSTRUCTOR)) != 0 ||
+                            ((rawDexFlags and ACC_PRIVATE) == (desiredFlags and ACC_PRIVATE))
+                        if (sameStaticNative && keepsSameMethodTable &&
+                            desiredFlags != rawDexFlags && uleb128Size(desiredFlags) == flagsLen
+                        ) {
+                            val target = cloned ?: dexBytes.clone().also { cloned = it }
+                            writeUleb128At(target, flagsStart, desiredFlags)
+                        }
+                    }
+                }
+            }
+        }
+
+        scanAndPatchMethodTable(directMethodsSize)
+        scanAndPatchMethodTable(virtualMethodsSize)
+
+        val patched = cloned ?: return dexBytes
+        val sha1 = MessageDigest.getInstance("SHA-1")
+        sha1.update(patched, DEX_HEADER_MIN_BYTES, patched.size - DEX_HEADER_MIN_BYTES)
+        System.arraycopy(sha1.digest(), 0, patched, DEX_SIGNATURE_OFFSET, DEX_SIGNATURE_LENGTH)
+
+        val adler = Adler32()
+        adler.update(patched, DEX_SIGNATURE_OFFSET, patched.size - DEX_SIGNATURE_OFFSET)
+        ByteBuffer.wrap(patched, DEX_CHECKSUM_OFFSET, Int.SIZE_BYTES)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(adler.value.toInt())
+        return patched
+    }
+
+    private fun uleb128Size(value: Int): Int {
+        var u = value ushr 7
+        var size = 1
+        while (u != 0) {
+            u = u ushr 7
+            size++
+        }
+        return size
+    }
+
+    private fun writeUleb128At(target: ByteArray, offset: Int, value: Int) {
+        var v = value
+        var pos = offset
+        while (true) {
+            val byteVal = v and 0x7F
+            v = v ushr 7
+            if (v == 0) {
+                target[pos] = byteVal.toByte()
+                break
+            } else {
+                target[pos++] = (byteVal or 0x80).toByte()
+            }
+        }
     }
 
     private fun readUleb128(buf: ByteBuffer): Int {

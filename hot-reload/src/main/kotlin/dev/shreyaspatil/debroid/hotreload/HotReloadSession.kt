@@ -38,7 +38,8 @@ class HotReloadSession(
         projectRoot = layout.rootDir,
         variant = layout.resolveVariant(config.appId, config.variant),
         commandRunner = commandRunner,
-        gradleConfig = layout.resolvedGradleConfig
+        gradleConfig = layout.resolvedGradleConfig,
+        deviceApkFallbackProvider = { pullInstalledBaseApkFromDevice(adbManager, config.appId) }
     ).apply { snapshotModuleClasses(layout.modules) },
     private val agentInstaller: JvmtiAgentInstaller = JvmtiAgentInstaller(adbManager),
     private val fallbackInstaller: (GradleModule) -> Result<Unit> = { appModule ->
@@ -98,6 +99,29 @@ class HotReloadSession(
                 }
             }
             return false
+        }
+
+        private fun pullInstalledBaseApkFromDevice(adbManager: AdbManager, appId: String): File? {
+            val pmOutput = adbManager.runShell("pm", "path", appId).getOrNull().orEmpty()
+            val apkPaths = pmOutput.lineSequence()
+                .map { it.trim() }
+                .filter { it.startsWith("package:") }
+                .map { it.removePrefix("package:").trim() }
+                .toList()
+            val remoteApk = apkPaths.firstOrNull { it.endsWith("/base.apk") }
+                ?: apkPaths.firstOrNull()
+                ?: return null
+
+            val tempApk = runCatching {
+                Files.createTempFile("debroid_base_apk_", ".apk").toFile().apply { deleteOnExit() }
+            }.getOrNull() ?: return null
+
+            val pullRes = adbManager.pullFile(remoteApk, tempApk.absolutePath)
+            if (pullRes.isFailure || !tempApk.isFile || tempApk.length() == 0L) {
+                tempApk.delete()
+                return null
+            }
+            return tempApk
         }
 
         private fun runFallbackGradleInstall(

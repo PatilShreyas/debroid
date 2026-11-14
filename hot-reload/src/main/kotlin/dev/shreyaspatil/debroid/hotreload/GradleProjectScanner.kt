@@ -1089,7 +1089,9 @@ private object GradleLayoutDiskCache {
             }
         }
         val sb = StringBuilder()
-        sb.append(CACHE_VERSION).append('|').append(gradleConfig.cacheKeySuffix()).append('|')
+        sb.append(CACHE_VERSION).append('|')
+            .append(resolveBinaryCodeSourceStamp()).append('|')
+            .append(gradleConfig.cacheKeySuffix()).append('|')
         for (file in trackedFiles) {
             if (file.isFile) {
                 sb.append(file.path).append(':')
@@ -1101,4 +1103,10 @@ private object GradleLayoutDiskCache {
             .digest(sb.toString().toByteArray(StandardCharsets.UTF_8))
             .joinToString("") { "%02x".format(Locale.US, it) }
     }
+
+    private fun resolveBinaryCodeSourceStamp(): String = runCatching {
+        val url = GradleProjectScanner::class.java.protectionDomain?.codeSource?.location ?: return@runCatching ""
+        val file = File(url.toURI())
+        if (file.exists()) "${file.canonicalPath}:${file.lastModified()}:${file.length()}" else ""
+    }.getOrDefault("")
 }

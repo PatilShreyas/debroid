@@ -259,6 +259,67 @@ class AdditiveClassMergerTest {
         assertTrue(unmergedCustom.contentEquals(customSubCurr))
     }
 
+    @Test
+    fun `aligns method modifiers bidirectionally in class and post-D8 dex to prevent JVMTI_ERROR_71`() {
+        // Case 1: Baseline DEX has PRIVATE STATIC FINAL (0x001a) while incremental class has STATIC FINAL (0x0018)
+        val prevDexPrivate = AdditiveClassMerger.DexClassMembers(
+            fields = emptyList(),
+            methods = listOf(
+                AdditiveClassMerger.MemberSignature(0x001A, "lambda_1966\$lambda\$0", "()I"),
+                AdditiveClassMerger.MemberSignature(0x0001, "nonFinalHelper", "()I")
+            )
+        )
+        val currDexRelaxed = AdditiveClassMerger.DexClassMembers(
+            fields = emptyList(),
+            methods = listOf(
+                AdditiveClassMerger.MemberSignature(0x0018, "lambda_1966\$lambda\$0", "()I"),
+                AdditiveClassMerger.MemberSignature(0x0011, "nonFinalHelper", "()I")
+            )
+        )
+        val currClassBytes = buildSyntheticClassFile(
+            internalName = "com/example/ComposableSingletons\$FeedKt",
+            fields = emptyList(),
+            methods = listOf(
+                AdditiveClassMerger.MemberSignature(0x0018, "lambda_1966\$lambda\$0", "()I"),
+                AdditiveClassMerger.MemberSignature(0x0011, "nonFinalHelper", "()I")
+            )
+        )
+
+        val mergedClassBytes = AdditiveClassMerger.mergeWithPreviousDexMembers(
+            prevDex = prevDexPrivate,
+            currDex = currDexRelaxed,
+            currentClassBytes = currClassBytes
+        )
+        val loaded = ByteArrayClassLoader().define("com.example.ComposableSingletons\$FeedKt", mergedClassBytes)
+        val lambdaMethod = loaded.getDeclaredMethod("lambda_1966\$lambda\$0")
+        val helperMethod = loaded.getDeclaredMethod("nonFinalHelper")
+        assertEquals(0x001A, lambdaMethod.modifiers and 0x1FFF)
+        assertEquals(0x0001, helperMethod.modifiers and 0x1FFF)
+
+        // Case 2: Post-D8 DEX modifier alignment patches relaxed 0x0018 back to baseline 0x001A in DEX bytes
+        val d8RelaxedDex = buildMinimalDexWithMethod(
+            classDescriptor = "Lcom/example/ComposableSingletons\$FeedKt;",
+            methodName = "lambda_1966\$lambda\$0",
+            returnType = "V",
+            accessFlags = 0x0018
+        )
+        val baselineDexMembers = AdditiveClassMerger.DexClassMembers(
+            fields = emptyList(),
+            methods = listOf(AdditiveClassMerger.MemberSignature(0x001A, "lambda_1966\$lambda\$0", "()V"))
+        )
+        val alignedDex = AdditiveClassMerger.alignDexMethodAccessFlags(
+            dexBytes = d8RelaxedDex,
+            targetClassName = "com.example.ComposableSingletons\$FeedKt",
+            prevDex = baselineDexMembers
+        )
+        val parsedAligned = AdditiveClassMerger.parseSingleDexClass(
+            alignedDex,
+            "com.example.ComposableSingletons\$FeedKt"
+        )
+        assertNotNull(parsedAligned)
+        assertEquals(0x001A, parsedAligned!!.methods.single().accessFlags)
+    }
+
     private class ByteArrayClassLoader : ClassLoader(AdditiveClassMergerTest::class.java.classLoader) {
         fun define(name: String, bytes: ByteArray): Class<*> = defineClass(name, bytes, 0, bytes.size)
     }

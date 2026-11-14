@@ -134,16 +134,30 @@ class AutoUpdateManager(
 
             if (lastRunVersion != null && lastRunVersion != VERSION) {
                 skillExtractor.extractSkillsToMaster()
+                clearHotReloadLayoutCaches()
                 updateCache.recordLastRunVersion(VERSION)
                 return true
             } else if (lastRunVersion == null) {
                 skillExtractor.extractSkillsToMaster()
+                clearHotReloadLayoutCaches()
                 updateCache.recordLastRunVersion(VERSION)
+            } else {
+                skillExtractor.ensureSkillsUpToDate()
             }
         } catch (_: Throwable) {
             // Ignore filesystem errors during skill extraction
         }
         return false
+    }
+
+    private fun clearHotReloadLayoutCaches() {
+        runCatching {
+            val homeDir = System.getenv("HOME") ?: System.getProperty("user.home")
+            val hrDir = java.io.File(homeDir, ".debroid/hotreload")
+            hrDir.listFiles()
+                ?.filter { it.isFile && it.name.startsWith("layout-") && it.name.endsWith(".cache") }
+                ?.forEach { it.delete() }
+        }
     }
 
     companion object {

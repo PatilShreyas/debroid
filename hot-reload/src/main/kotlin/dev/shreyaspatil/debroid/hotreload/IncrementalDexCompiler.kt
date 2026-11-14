@@ -15,14 +15,16 @@ import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.Adler32
+import java.util.zip.ZipFile
 
-@Suppress("TooManyFunctions")
+@Suppress("TooManyFunctions", "LongParameterList", "LargeClass")
 class IncrementalDexCompiler(
     private val projectRoot: File,
     private val variant: String = "debug",
     private val commandRunner: CommandRunner = DefaultCommandRunner(),
     private val d8PathProvider: () -> String = { findD8Executable() },
-    gradleConfig: GradleExecutionConfig = GradleExecutionConfig()
+    gradleConfig: GradleExecutionConfig = GradleExecutionConfig(),
+    private val deviceApkFallbackProvider: (() -> File?)? = null
 ) {
     private var activeGradleConfig: GradleExecutionConfig = gradleConfig
     private data class ClassFileMeta(
@@ -38,6 +40,10 @@ class IncrementalDexCompiler(
     private val dexBytesByModule = mutableMapOf<String, MutableMap<String, ByteArray>>()
     private val baselineDexFilesByModule = mutableMapOf<String, Map<String, File>>()
     private val baselineDexMembersByClassName = mutableMapOf<String, AdditiveClassMerger.DexClassMembers>()
+    private val appExtDexFiles = mutableListOf<File>()
+    private val localApkFiles = mutableListOf<File>()
+    private val negativeBaselineLookups = mutableSetOf<String>()
+    private var deviceBaseApkIndexed = false
     private val moduleDirsByPath = mutableMapOf<String, File>()
     private val knownModulesByPath = LinkedHashMap<String, GradleModule>()
     private val cumulativeStubsByModule =
@@ -112,6 +118,10 @@ class IncrementalDexCompiler(
         dexBytesByModule.clear()
         baselineDexFilesByModule.clear()
         baselineDexMembersByClassName.clear()
+        appExtDexFiles.clear()
+        localApkFiles.clear()
+        negativeBaselineLookups.clear()
+        deviceBaseApkIndexed = false
         cumulativeStubsByModule.clear()
         knownModulesByPath.clear()
         redirectedInterfacesByModule.clear()
@@ -252,27 +262,109 @@ class IncrementalDexCompiler(
     }
 
     private fun indexAppMergedDexFiles(appModule: GradleModule, modVariant: String) {
+        val apkRoots = listOf(
+            File(appModule.moduleDir, "build/outputs/apk"),
+            File(appModule.moduleDir, "build/intermediates/apk")
+        )
+        for (apkRoot in apkRoots) {
+            if (!apkRoot.isDirectory) continue
+            apkRoot.walkTopDown()
+                .filter { it.isFile && it.extension == "apk" }
+                .sortedByDescending { it.lastModified() }
+                .forEach { localApkFiles.add(it) }
+        }
+
         val dexRoot = File(appModule.moduleDir, "build/intermediates/dex/$modVariant")
         if (!dexRoot.isDirectory) return
-        val mergeDirs = dexRoot.listFiles()
-            ?.filter { it.isDirectory && !it.name.startsWith("mergeExtDex") }
-            .orEmpty()
-        for (dir in mergeDirs) {
+        val allDirs = dexRoot.listFiles()?.filter { it.isDirectory }.orEmpty()
+        for (dir in allDirs) {
+            val isExtDex = dir.name.startsWith("mergeExtDex")
             dir.walkTopDown()
                 .filter { it.isFile && it.extension == "dex" }
                 .forEach { dexFile ->
-                    val parsedMap = runCatching {
-                        AdditiveClassMerger.parseAllDexClasses(dexFile.readBytes())
-                    }.getOrNull().orEmpty()
-                    for ((className, members) in parsedMap) {
-                        val existing = baselineDexMembersByClassName[className]
-                        baselineDexMembersByClassName[className] = if (existing == null) {
-                            members
-                        } else {
-                            mergeDexMembers(existing, members)
+                    if (isExtDex) {
+                        appExtDexFiles.add(dexFile)
+                    } else {
+                        val parsedMap = runCatching {
+                            AdditiveClassMerger.parseAllDexClasses(dexFile.readBytes())
+                        }.getOrNull().orEmpty()
+                        for ((className, members) in parsedMap) {
+                            val existing = baselineDexMembersByClassName[className]
+                            baselineDexMembersByClassName[className] = if (existing == null) {
+                                members
+                            } else {
+                                mergeDexMembers(existing, members)
+                            }
                         }
                     }
                 }
+        }
+    }
+
+    private fun lookupInstalledDexMembers(className: String): AdditiveClassMerger.DexClassMembers? {
+        ensureAppMergedDexIndexed()
+        baselineDexMembersByClassName[className]?.let { return it }
+        if (className in negativeBaselineLookups) return null
+
+        val found = appExtDexFiles.firstNotNullOfOrNull { extDex ->
+            runCatching { AdditiveClassMerger.parseSingleDexClass(extDex.readBytes(), className) }.getOrNull()
+        } ?: localApkFiles.firstNotNullOfOrNull { apkFile ->
+            searchSingleClassInApkZip(apkFile, className)
+        } ?: lookupFromDeviceBaseApkIfNeeded(className)
+
+        if (found != null) {
+            baselineDexMembersByClassName[className] = found
+        } else {
+            negativeBaselineLookups.add(className)
+        }
+        return found
+    }
+
+    private fun lookupFromDeviceBaseApkIfNeeded(className: String): AdditiveClassMerger.DexClassMembers? {
+        if (deviceBaseApkIndexed || deviceApkFallbackProvider == null) return null
+        deviceBaseApkIndexed = true
+        val pulledApk = runCatching { deviceApkFallbackProvider?.invoke() }.getOrNull()
+        if (pulledApk != null && pulledApk.isFile) {
+            indexAllDexClassesFromApkZip(pulledApk)
+        }
+        return baselineDexMembersByClassName[className]
+    }
+
+    private fun searchSingleClassInApkZip(apkFile: File, className: String): AdditiveClassMerger.DexClassMembers? =
+        runCatching {
+            ZipFile(apkFile).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (!entry.isDirectory && entry.name.startsWith("classes") && entry.name.endsWith(".dex")) {
+                        val dexBytes = zip.getInputStream(entry).use { it.readBytes() }
+                        AdditiveClassMerger.parseSingleDexClass(dexBytes, className)?.let { return@runCatching it }
+                    }
+                }
+                null
+            }
+        }.getOrNull()
+
+    private fun indexAllDexClassesFromApkZip(apkFile: File) {
+        runCatching {
+            ZipFile(apkFile).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (!entry.isDirectory && entry.name.startsWith("classes") && entry.name.endsWith(".dex")) {
+                        val dexBytes = zip.getInputStream(entry).use { it.readBytes() }
+                        val parsedMap = AdditiveClassMerger.parseAllDexClasses(dexBytes)
+                        for ((clsName, members) in parsedMap) {
+                            val existing = baselineDexMembersByClassName[clsName]
+                            baselineDexMembersByClassName[clsName] = if (existing == null) {
+                                members
+                            } else {
+                                mergeDexMembers(existing, members)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -645,8 +737,7 @@ class IncrementalDexCompiler(
             currentBytes: ByteArray
         ): Boolean {
             val isKnownInterface = if (ClassBytecodeAnalyzer.isInterfaceClass(currentBytes)) {
-                ensureAppMergedDexIndexed()
-                className in previousMeta || className in baselineDexMembersByClassName
+                className in previousMeta || lookupInstalledDexMembers(className) != null
             } else {
                 false
             }
@@ -931,8 +1022,7 @@ class IncrementalDexCompiler(
         modulePath: String,
         className: String
     ): AdditiveClassMerger.DexClassMembers? {
-        ensureAppMergedDexIndexed()
-        baselineDexMembersByClassName[className]?.let { return it }
+        lookupInstalledDexMembers(className)?.let { return it }
         return baselineDexFilesByModule[modulePath]?.get(className)
             ?.takeIf { it.exists() }
             ?.readBytes()
@@ -941,8 +1031,7 @@ class IncrementalDexCompiler(
 
     private fun resolveBaselineSuperClass(modulePath: String, className: String): String? {
         cumulativeStubsByModule[modulePath]?.get(className)?.superClassName?.let { return it }
-        ensureAppMergedDexIndexed()
-        baselineDexMembersByClassName[className]?.superClassName?.let { return it }
+        lookupInstalledDexMembers(className)?.superClassName?.let { return it }
         dexBytesByModule[modulePath]?.get(className)
             ?.let { AdditiveClassMerger.parseDexMembers(it, className)?.superClassName }
             ?.let { return it }
@@ -963,10 +1052,7 @@ class IncrementalDexCompiler(
         val hiltClassName = if (pkg.isEmpty()) hiltSimple else "$pkg.$hiltSimple"
         return hiltClassName in currentClasses ||
             hiltClassName in previousMeta ||
-            run {
-                ensureAppMergedDexIndexed()
-                hiltClassName in baselineDexMembersByClassName
-            }
+            lookupInstalledDexMembers(hiltClassName) != null
     }
 
     private fun isUnchangedClassFile(
@@ -1037,7 +1123,7 @@ class IncrementalDexCompiler(
             )
         }
 
-        val finalInputFiles = reconcileBatchWithPreviousDexIfNeeded(
+        val (finalInputFiles, prevMembersByClass) = reconcileBatchWithPreviousDexIfNeeded(
             entries = modifiedClasses,
             initialFiles = initialInputFiles,
             ctx = ctx
@@ -1056,8 +1142,11 @@ class IncrementalDexCompiler(
                     .removeSuffix(".dex")
                     .replace('/', '.')
                 val matchingEntry = entryByClassName[rawDexClassName]
-                val rawBytes = dexFile.readBytes()
+                var rawBytes = dexFile.readBytes()
                 if (matchingEntry != null) {
+                    prevMembersByClass[rawDexClassName]?.let { prevDex ->
+                        rawBytes = AdditiveClassMerger.alignDexMethodAccessFlags(rawBytes, rawDexClassName, prevDex)
+                    }
                     dexBytesByModule.getOrPut(matchingEntry.modulePath) { mutableMapOf() }[rawDexClassName] = rawBytes
                     persistRedefinedDex(matchingEntry.modulePath, rawDexClassName, rawBytes)
                 }
@@ -1179,9 +1268,10 @@ class IncrementalDexCompiler(
         entries: List<ModifiedClassEntry>,
         initialFiles: List<File>,
         ctx: D8BatchContext
-    ): List<File> {
+    ): Pair<List<File>, Map<String, AdditiveClassMerger.DexClassMembers>> {
         val updatedFiles = initialFiles.toMutableList()
         val reconciledFiles = mutableListOf<File>()
+        val prevMembersByClass = LinkedHashMap<String, AdditiveClassMerger.DexClassMembers>()
 
         for ((index, entry) in entries.withIndex()) {
             val mainDexFile = File(ctx.perClassOutDir, "${entry.className.replace('.', '/')}.dex")
@@ -1194,6 +1284,7 @@ class IncrementalDexCompiler(
             }
 
             val prevMembers = resolvePreviousDexMembers(entry, index, ctx) ?: continue
+            prevMembersByClass[entry.className] = prevMembers
             val currentDexBytes = mainDexFile.readBytes()
             val currMembers = AdditiveClassMerger.parseDexMembers(currentDexBytes, entry.className) ?: continue
             val reconciledClassBytes = AdditiveClassMerger.mergeWithPreviousDexMembers(
@@ -1218,7 +1309,7 @@ class IncrementalDexCompiler(
             executeD8(ctx.d8Path, rerunArgs)
         }
 
-        return updatedFiles
+        return updatedFiles to prevMembersByClass
     }
 
     private fun mergeDexMembers(
@@ -1296,8 +1387,7 @@ class IncrementalDexCompiler(
                 }
             }
 
-        ensureAppMergedDexIndexed()
-        baselineDexMembersByClassName[entry.className]?.let { parsed ->
+        lookupInstalledDexMembers(entry.className)?.let { parsed ->
             combined = if (combined == null) parsed else mergeDexMembers(combined!!, parsed)
         }
 
