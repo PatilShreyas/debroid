@@ -1,141 +1,130 @@
 # Live Code & Compose Hot Reload (`debroid hot-reload`)
 
-Instructions for AI agents using `debroid hot-reload` to apply and verify Kotlin/Java logic and Jetpack Compose UI changes on a running Android application without restarting the app.
+Operational playbook for AI agents using `debroid hot-reload` to build, iterate on, and verify Kotlin/Java logic and Jetpack Compose UI on a running Android app in **300ms–800ms** instead of 15s–60s Gradle APK rebuilds.
 
-## Command Signature & Options
+---
+
+## 1. Core Mental Model (Read First)
+
+1. **Standalone JVMTI Watcher (Not JSON, No Daemon):** `debroid hot-reload` runs directly against Gradle + ADB + an on-device JVMTI native agent. You do **not** need `debroid daemon`, and output is **single-line plain-text `[STATUS]` events** (never pipe into `jq`).
+2. **Keep One Watcher Alive for the Whole Task:** Starting the watcher warms an in-process Gradle connection, an in-process `D8` compiler, and your pre-edit `.class`/`.dex` baseline. Never start and stop the watcher per edit.
+3. **Leave Fallback Enabled (Default):** By default, edits that can hot-swap in RAM apply in ~300ms–800ms while preserving app state, and edits that cannot hot-swap (XML resources, `AndroidManifest.xml`, adding interfaces/superclasses to named classes) are caught immediately and fall back to a Gradle `install<Variant>` + app restart (`[FALLBACK_REINSTALL]`). Only pass `--no-fallback` if the user explicitly forbids app restarts.
+4. **RAM Patches vs. Installed APK:** Hot-reloaded bytecode lives in the running process's memory. While the watcher is running, if the app crashes or restarts with a new PID, the watcher **automatically reapplies** all session edits onto the new PID. Once you stop the watcher at the end of a task, run `./gradlew :<app-module>:install<Variant>` once if the user wants the changes permanently baked into the installed APK for future cold launches.
+
+---
+
+## 2. Command Signature & Options
 
 ```bash
 debroid hot-reload <app_id> [-d/--project-dir <path>] [-v/--variant <variant>] [--interval-ms <ms>] [--once] [--no-fallback]
 ```
 
-| Option | Default | Description |
+| Option | Default | When to Use |
 | :--- | :--- | :--- |
-| `<app_id>` | *(Required)* | Target Android application package ID (e.g. `com.example.app`). The app must be running and debuggable (`android:debuggable="true"`). |
-| `-d, --project-dir <path>` | `.` | Root directory of the Android Gradle project (containing `settings.gradle` or `settings.gradle.kts`). |
-| `-v, --variant <variant>` | `debug` *(auto-detected from `<app_id>` when flavored)* | Build variant to compile and watch (e.g. `debug`, `demoDebug`, `freeDebug`). Automatically inferred from `<app_id>` and build metadata when left as default. |
-| `--interval-ms <ms>` | `300` | File polling interval in milliseconds (minimum `100`). |
-| `--once` | `false` | Synchronize with an active background watcher for `<app_id>` (flushing pending edits immediately and returning the `[STATUS]` result), or perform a single reload pass and exit if no watcher is running. |
-| `--no-fallback` | `false` | Disable automatic fallback to full APK installation (`install<Variant>`) when XML resources, `AndroidManifest.xml`, or incompatible class hierarchy changes occur. |
+| `<app_id>` | *(Required)* | Running debuggable Android package ID (e.g. `com.example.app` or `com.example.app.demo.debug`). |
+| `-d, --project-dir <path>` | `.` | Root directory of the Android Gradle project (containing `settings.gradle` / `settings.gradle.kts`). Always pass `-d` if your shell CWD is outside the Android project root. |
+| `-v, --variant <variant>` | `debug` *(auto-inferred from `<app_id>`)* | Build variant (e.g. `debug`, `demoDebug`, `freeDebug`). Auto-resolved from `<app_id>` and build outputs in most projects; pass explicitly only when ambiguous. |
+| `--interval-ms <ms>` | `300` | File watcher polling slice in milliseconds (`>= 100`). Leave at default unless needed. |
+| `--once` | `false` | **Sync barrier for non-streaming harnesses:** Connects to your active background watcher, flushes pending edits immediately, blocks until the reload pass finishes, prints the `[STATUS]` result, and exits. |
+| `--no-fallback` | `false` | Disables automatic `install<Variant>` fallback on resource/manifest/hierarchy changes (emits `[ERROR] code=FALLBACK_DISABLED` instead). **Leave OFF** during normal feature work. |
 
 ---
 
-## Agent Workflow
+## 3. Step-by-Step Agent Playbook
 
-Always keep a **single continuous `debroid hot-reload` watcher** running in the background for the duration of your task so Gradle module metadata, baseline `.class`/`.dex` snapshots, and the in-process `D8` compiler stay warm in memory.
-
-### Choosing How to Read Reload Events (Based on Your Harness)
-
-| Harness Capability | Recommended Mode | How It Works |
-| :--- | :--- | :--- |
-| **Has live background stream monitoring** *(e.g. Claude Code `Monitor` / live background task output, interactive terminals)* | **Continuous Watcher Stream (Preferred)** | Start `debroid hot-reload <app_id> -d <project_dir>` in the background and monitor its streamed stdout directly. **Do not run `--once` after edits** — saving a file automatically triggers the reload and streams `[RELOADED]` / `[COMPILE_ERROR]` / `[RUNTIME_ERROR]` with zero extra commands. |
-| **No live stream monitoring** *(background tasks only notify on exit; `sleep`-polling log files is undesirable)* | **Background Watcher + `--once` Sync Barrier** | Start `debroid hot-reload <app_id> -d <project_dir>` in the background once, then after saving edits run `debroid hot-reload <app_id> -d <project_dir> --once` in the foreground to flush and block until the active watcher finishes its reload pass (instead of `sleep` + log scraping). |
-
-> ⚠️ **Never invoke `--once` standalone without a running background watcher during iteration:** Without an active watcher, `--once` cannot hold a pre-edit baseline or warm compiler state across edits.
-
-### Step 1: Ensure the App is Running on the Target Screen
-1. Check if the process is running (`adb shell pidof <app_id>`). If not, launch it:
+### Step 0: Fast Target Discovery & Pre-Flight Baseline Check
+1. **Discover `<app_id>` and `<MainActivity>` in one command** if the app is already visible on screen:
    ```bash
-   adb shell am start -n <app_id>/<MainActivity>
+   adb shell dumpsys window | grep -E "mCurrentFocus|mFocusedApp"
    ```
-   *(If the APK is not yet installed or is out of sync with the workspace, run `./gradlew :<app-module>:installDebug` once before launching).*
-2. Navigate to the target screen and populate any necessary state (e.g. text inputs, list items, `ViewModel` state) so edits are verified against active state.
-
-### Step 2: Start the Continuous Watcher in the Background
-```bash
-debroid hot-reload <app_id> -d <project_dir>
-```
-Wait for `[WATCHING]` in the output before editing files:
-```text
-[WATCHING] app=<app_id> pid=<pid> modules=<count> interval=300ms
-```
-> ⚠️ Do not edit source files before `[WATCHING]` is printed; the startup scan snapshots current files as the baseline.
-
-### Step 3: Edit, Observe `[STATUS]`, and Verify
-1. **Save changes** to the target `.kt` or `.java` file(s). Multiple rapid/parallel edits are automatically coalesced into a single reload pass.
-2. **Wait for the completion `[STATUS]` event**:
-   - **If your harness supports live background monitoring (Preferred):** Simply wait for the monitored background watcher stream to emit `[RELOADED]` (or `[COMPILE_ERROR]` / `[RUNTIME_ERROR]`) — no extra CLI command needed:
-     - `[RELOADING] modules=[:app] files=[MyScreen.kt]`
-     - `[RELOADED] mode=JVMTI_HOT_SWAP classes=2 new_classes=8 ui=COMPOSE_HOT_RELOAD duration=...ms`
-   - **Only if your harness cannot monitor live background streams:** Use `--once` as a synchronous barrier against the running background watcher instead of guessing `sleep` durations:
+   *(Example match: `com.example.app.demo.debug/com.example.app.MainActivity` $\rightarrow$ `<app_id>` is `com.example.app.demo.debug`, variant is `demoDebug`).*
+2. **Ensure the installed APK matches the current workspace before starting:**
+   - If the app is not installed yet, OR `git status` already shows uncommitted code/resource edits from *before* your session that have not been installed to the device, run `./gradlew :<app-module>:install<Variant>` and launch the app once **before** starting `debroid hot-reload`.
+   - If the app is installed and clean but not running, launch it:
      ```bash
-     debroid hot-reload <app_id> -d <project_dir> --once && android layout --pretty
+     adb shell am start -n <app_id>/<MainActivity>
      ```
-   - *(Note: If an edit only touched comments, imports, formatting, or reverted a `[COMPILE_ERROR]` back to the prior working code, `debroid` still emits `[RELOADING]` followed by `[RELOADED] mode=JVMTI_HOT_SWAP classes=0 new_classes=0 ui=NONE duration=...ms` so every save pairs 1-to-1 with a completion event).*
-3. **Verify the updated behavior on device**:
-   - Visual UI check: `android screen capture -o screen.png` or `adb exec-out screencap -p > screen.png`.
-   - Hierarchy/bounds check: `android layout --pretty` or `adb shell uiautomator dump`.
-   - Event-handler check: If you modified an action method (e.g. a button click handler or `ViewModel` function), trigger the interaction (`adb shell input tap X Y`) to execute the new logic.
-4. Stop the background watcher task once all iterations are complete.
 
----
+### Step 1: Start One Persistent Watcher (Pick Your Harness Pattern)
 
-## Status Events Reference
+| Your Harness Capability | Exact Pattern to Use |
+| :--- | :--- |
+| **Pattern A — Live Background Stream Monitoring** *(e.g. Claude Code `Monitor`, interactive streaming background tasks)* | Start `debroid hot-reload <app_id> -d <project_dir>` in the background and monitor its stdout stream directly. Wait for `[WATCHING]`. **Do not run `--once` after edits** — saving files automatically streams `[RELOADING]` $\rightarrow$ `[RELOADED]`. |
+| **Pattern B — Non-Streaming Background Jobs** *(background shell only notifies on process exit, e.g. OpenCode `shell(background=true)`)* | 1. Start in background redirected to a log file:<br>`debroid hot-reload <app_id> -d <project_dir> > <tmpdir>/hotreload.log 2>&1`<br>2. Read `<tmpdir>/hotreload.log` once (~0.6s later) to confirm `[WATCHING]` is printed.<br>3. After each batch of file edits, run `debroid hot-reload <app_id> -d <project_dir> --once` in the foreground — it blocks on the warm background watcher for the exact reload duration and prints the completion `[STATUS]` line(s) with **zero `sleep` guessing**. |
 
-`debroid hot-reload` streams single-line plain-text events to `stdout`:
+> ⚠️ **Wait for `[WATCHING]` before saving any edits:**
+> ```text
+> [WATCHING] app=com.example.app pid=12345 modules=12 interval=300ms
+> ```
+> Saving files before `[WATCHING]` appears causes those edits to be absorbed into the initial baseline instead of reloaded.
+>
+> ⚠️ **Never use `--once` standalone without a running background watcher:** Without a persistent watcher, `--once` has no pre-edit baseline or warm compiler connection.
 
-| Event | Format | Agent Action |
+### Step 2: Edit Source Files & Interpret `[STATUS]` Events
+Save all related `.kt` / `.java` / `.xml` edits (rapid multi-file edits are automatically coalesced into a single reload pass), then read the resulting `[STATUS]` line(s):
+
+| Status Line | Meaning | What You Should Do Next |
 | :--- | :--- | :--- |
-| `[WATCHING]` | `[WATCHING] app=<appId> pid=<pid> modules=<count> interval=<ms>ms` | Baseline recorded. Begin editing source files. |
-| `[RELOADING]` | `[RELOADING] modules=[<modules>] files=[<files>]` | Modification detected; compilation in progress. Wait for completion event. |
-| `[RELOADED]` | `[RELOADED] mode=<mode> classes=<count> new_classes=<count> ui=<uiRefresh> duration=<ms>ms` | Bytecode swapped and UI refreshed. Proceed with verification. |
-| `[COMPILE_ERROR]` | `[COMPILE_ERROR] module=<module> <diagnostic>` | Compilation failed. **Watcher stays running** and ignores the broken file until modified again. Fix the compiler error and save. |
-| `[RUNTIME_ERROR]` | `[RUNTIME_ERROR] <Exception>: <message> (<File.kt:line>)` | The hot-reloaded code threw an exception during Compose recomposition or on the main thread. Fix the exception at the reported file/line and save to recover. |
-| `[FALLBACK_REINSTALL]` | `[FALLBACK_REINSTALL] reason=<reason> files=[<files>] duration=<ms>ms` | Change required a full Gradle `install<Variant>` and Activity restart (performed automatically). Note that in-memory state was reset. |
-| `[ERROR]` | `[ERROR] code=<code> message=<msg>` | Runtime or connection failure. See Troubleshooting below. |
-| `[STOPPED]` | `[STOPPED] app=<appId>` | Watcher exited cleanly. |
+| `[RELOADING] modules=[...] files=[...]` | Edit detected; incremental compile started. | Wait for the terminal result event (`[RELOADED]`, `[COMPILE_ERROR]`, `[FALLBACK_REINSTALL]`, or `[ERROR]`). |
+| `[RELOADED] mode=... classes=N new_classes=M ui=<uiMode> duration=...ms` | Bytecode swapped into the running VM! *(Also check if a `[RUNTIME_ERROR]` line immediately follows).* | Check `ui=<uiMode>`:<br>• `COMPOSE_HOT_RELOAD`: Screen updated in-place; state preserved. Verify UI.<br>• `ACTIVITY_RECREATE`: Root `Activity`, `View`, or Activity-scoped `ViewModel` updated; Activity recreated. **If your target screen was on a non-default tab without `rememberSaveable`, check `android layout` and re-tap the tab if needed.**<br>• `NONE`: Non-UI/comment-only edit (or `[COMPILE_ERROR]` revert). Trigger the action or continue editing. |
+| `[COMPILE_ERROR] module=<mod> <File.kt:line:col> <msg>` | Compilation failed. **Watcher stays alive** and keeps its last good baseline. | Fix (or revert) the compiler error at `<File.kt:line:col>` and save. Even reverting back to the prior working code will emit `[RELOADING]` $\rightarrow$ `[RELOADED]`. |
+| `[RUNTIME_ERROR] <Exception>: <msg> (<File.kt:line>)` | New code threw an exception during Compose recomposition or main-thread execution. | Fix the bug at `<File.kt:line>` and save. Compose recomposition errors recover in-place on the next reload; if the process crashed, relaunch the app and the active watcher will auto-reapply your edits. |
+| `[FALLBACK_REINSTALL] reason=<reason> files=[...] duration=...ms` | Resource/manifest or non-hot-reloadable hierarchy edit triggered full `install<Variant>` + app restart automatically. | In-memory state was reset by the app restart. Navigate back to your target screen and verify. |
+| `[WATCHING] app=... pid=<newPid> ...` *(mid-session)* | Target app restarted with a new PID; watcher automatically re-bound and is reapplying session edits. | Wait for the immediately following `[RELOADED]` line, then continue. |
+| `[ERROR] code=<code> message=<msg>` | Reload could not be applied. | Follow **Section 5 (Troubleshooting)** for the exact `code=`. |
 
-### `[RELOADED]` Fields
-- `mode=JVMTI_HOT_SWAP`: Existing method/composable bodies were updated in-place.
-- `mode=JVMTI_STRUCTURAL_SWAP`: Structural additions (new methods, fields, properties, or lambdas) were applied in-place.
-- `ui=COMPOSE_HOT_RELOAD`: Affected Jetpack Compose scopes were invalidated and recomposed on the main thread while preserving state.
-- `ui=ACTIVITY_RECREATE`: An `Activity` or `android.view.View` subclass was modified (or no Compose compositions were active), triggering Activity recreation on the main thread.
+### Step 3: Verify UI & Interactive Logic on Device
+1. **Inspect UI hierarchy & text/bounds (fast, low-token):**
+   - Prefer `android layout` (or `android layout --flat`) when `android` CLI is installed, otherwise `adb shell uiautomator dump /sdcard/ui.xml && adb shell cat /sdcard/ui.xml`.
+2. **Test interactive business logic (`ViewModel` actions, filters, clicks):**
+   - Updating an action method (`onClick`, `viewModel.toggle(...)`) hot-swaps the method body immediately, **but the new code only executes when that action is invoked**. Compute element center `(minX+maxX)/2, (minY+maxY)/2` from layout bounds and run `adb shell input tap X Y`, then re-check layout!
+3. **Inspect visual styling (colors, typography, spacing, icons):**
+   - Capture a screenshot (`android screen capture -o <tmpdir>/screen.png` or `adb exec-out screencap -p > <tmpdir>/screen.png`) and view it.
 
----
-
-## Supported Changes & State Behavior
-
-### 1. Jetpack Compose (`@Composable` functions)
-- **Supported:** Any layout container (`Column`, `Row`, `Box`, `Surface`, `Scaffold`, `Card`, `LazyColumn`, etc.), modifiers, styling, gradients, animations (`rememberInfiniteTransition`, `animate*AsState`, `AnimatedVisibility`), and event lambdas.
-- **`remember` State:** `remember { ... }` state is preserved across reloads when a composable's `remember` calls are unchanged. If you add, remove, or reorder `remember` calls inside a `@Composable` function, `debroid` automatically resets the `remember` slots for that specific composable while preserving state in all other composables on screen.
-- **Multi-Screen Navigation:** Only the Compose scopes in the modified classes are invalidated. Editing a child screen updates it in-place without resetting `NavHost` / `rememberNavBackStack` or navigation arguments.
-
-### 2. `ViewModel`, `Repository`, & Domain Classes
-- **Methods & Event Handlers:** Updated in-place on **existing instances** in memory. Existing `MutableStateFlow` and field values are preserved, and the next call to a modified method immediately executes the new code.
-- **New Methods, Fields, & Lambdas:** Adding new helper methods, properties, or `viewModelScope.launch { ... }` blocks is supported in-place.
-- **Static & Top-Level Properties:** Changes to `const val` constants and static top-level / `companion object` / `object` property initializers are automatically updated in memory while keeping unchanged static state intact.
-- **Cross-Module & Composite (`includeBuild`) Edits:** Modifying method signatures, `inline` functions, or `const val` values in a library or `includeBuild` module automatically recompiles dependent modules and reloads all affected call sites together.
-- **Computed Getters (`val x: String get() = ...`):** Re-evaluated automatically during the Compose recomposition triggered at the end of the reload.
-- **Constructors, `init {}` Blocks, & `StateFlow` Pipelines on `ViewModel`s:** Editing a `ViewModel` subclass, an inner coroutine/`Flow` lambda, or a helper in the same `*ViewModel.kt` file automatically evicts active instances from Activity, Fragment, and Jetpack Navigation `ViewModelStore`s so a fresh `ViewModel` is constructed with the updated `<init>()` / `StateFlow` pipeline. (Non-`ViewModel` singletons do not re-run `init {}` on already-constructed instances).
-- **`interface` & `sealed interface` Default Methods:** Editing default methods or properties on Kotlin `interface` / `sealed interface` types hot-reloads in-place without triggering `JVMTI_ERROR_79` fallback reinstalls.
-
-### 3. `Activity`, `Fragment`, & Android `View` Subclasses (Including Hilt `@AndroidEntryPoint`)
-- Modifying an `Activity` or `android.view.View` subclass (including classes annotated with Hilt's `@AndroidEntryPoint` or `@HiltAndroidApp`) hot-reloads in-place and triggers `ui=ACTIVITY_RECREATE`, recreating the active `Activity` through Android's standard saved-instance-state lifecycle without reinstalling the APK.
-
-### 4. Resources (`res/**`) & `AndroidManifest.xml`
-- XML resource and manifest edits cannot be hot-swapped via JVMTI and automatically trigger `[FALLBACK_REINSTALL]` (unless `--no-fallback` is set).
+### Step 4: Clean Up When Finished
+1. Stop/terminate the background `debroid hot-reload` process.
+2. If you applied hot-swaps during the session (without ending on a `[FALLBACK_REINSTALL]`) and want the edits persisted into the installed APK on device for future cold app launches, run `./gradlew :<app-module>:install<Variant>` once.
 
 ---
 
-## Dos, Don'ts, & Gotchas
+## 4. Writing Hot-Reload-Friendly Code (In-Place vs. Reinstall Matrix)
 
-- **DO focus strictly on editing source files, reading `[STATUS]` events, and verifying the app UI.** All compilation, variant resolution, DEX merging, and runtime bytecode swapping are handled automatically by the CLI.
-- **DO NOT run `javap`, `dexdump`, or inspect `.class` / `.dex` / `build/` internals.** Never disassemble bytecode or modify Gradle build logic (such as JaCoCo or compiler flags) to work around hot-reload behavior.
-- **DO keep a single watcher running** across edits instead of starting and stopping it per edit. If the target app crashes or is restarted mid-session while the watcher is running, `debroid` automatically detects the new PID (`[WATCHING] ... pid=<newPid>`) and reapplies all session edits onto the restarted process from cached compiler outputs without requiring a Gradle rebuild or reinstall. (To bake edits permanently into the installed APK after stopping the watcher, run `./gradlew :<app-module>:install<Variant>`).
-- **DO NOT restart the watcher on `[COMPILE_ERROR]`:** The watcher deduplicates failed builds and keeps its baseline anchored to the last successful reload. Fixing or reverting the syntax/type error and saving will always emit `[RELOADING]` followed by `[RELOADED]`.
-- **DO NOT run `./gradlew install<Variant>` or `adb shell am force-stop` unnecessarily while watching:** Killing the app PID resets in-memory UI/`ViewModel` state (though an active watcher will automatically reapply your code edits when the app relaunches).
-- **Automatic `remember` state reset on structural `remember` edits:** When a `@Composable` function's `remember` calls are unchanged, its remembered values are preserved across hot reloads. When `remember` calls in a composable are added, removed, or reordered, `debroid` automatically resets the `remember` slots for that composable so new initial values take effect cleanly without affecting other composables.
-- **New fields on existing instances:** When adding a new field/property to a class that already has live instances in memory, that field reads as its default zero/null value (`0`, `false`, `null`) on pre-existing instances until a new instance is constructed.
-- **Pre-flight class hierarchy checks:** Changing a named class's superclass, implemented interfaces (e.g. adding `: Serializable`), class kind/modifiers, or `interface` method signatures is detected immediately on the host after incremental compilation (before `D8` or device staging) and triggers `[FALLBACK_REINSTALL]` with a descriptive reason such as `INTERFACE_HIERARCHY_CHANGED:<Class>` or `SUPERCLASS_CHANGED:<Class>` (or `[ERROR] code=FALLBACK_DISABLED` when `--no-fallback` is enabled).
+Use these patterns while iterating so 95%+ of your edits hot-swap in **~300ms–600ms** without losing app state:
 
----
-
-## Troubleshooting
-
-| Symptom / Output | Cause | Fix |
+| Code Change | Behavior | Agent Best Practice |
 | :--- | :--- | :--- |
-| `[ERROR] code=APP_NOT_RUNNING` | Target app process is not running or crashed. | Start the app (`adb shell am start -n <app_id>/<Activity>`) and restart `debroid hot-reload`. |
-| `[COMPILE_ERROR] module=...` | Compiler error in modified source file. | Fix the error in the source file and save; the active watcher will automatically retry. |
-| `[RUNTIME_ERROR] <Exception>: ...` | Hot-reloaded code threw a runtime exception during Compose recomposition or main-thread execution. | Inspect the reported exception message and `(<File.kt:line>)`, fix the bug in the source file, and save; Compose recomposition errors recover in-place on the next reload. |
-| File saved, but no `[RELOADING]` event | File was saved before `[WATCHING]` printed, or `-d` points to the wrong directory. | Confirm `-d` points to the Gradle project root and save the file again after `[WATCHING]` is visible. |
-| `ViewModel` method updated and `[RELOADED]` printed, but UI still shows old state | The modified code is inside an action method that hasn't been invoked since the reload. | Trigger the UI action (e.g. `adb shell input tap X Y`) so the `ViewModel` runs the new method and emits updated state. |
-| `[ERROR] code=RELOAD_FAILED` (with `--no-fallback`) | Edit changed class inheritance/interfaces, or the installed APK on device does not match the local Gradle build baseline. | Remove `--no-fallback`, or run `./gradlew :<app-module>:installDebug` once, relaunch the app, and restart `debroid hot-reload`. |
+| **`@Composable` layouts, modifiers, text, themes, lambdas** | **In-place (`COMPOSE_HOT_RELOAD`)**. Only modified composable scopes invalidate; navigation & sibling screens stay intact. | Freely add/remove/nest composables, `Scaffold` slots, `FilterChip`s, animations, and click handlers. |
+| **`remember { ... }` / `collectAsState*()` inside a `@Composable`** | **Preserved** when `remember` calls in that composable are unchanged; **auto-reset for that composable only** when `remember` calls or `collectAsState` flow sources change. | Keep existing `remember` calls in the same order when tweaking UI styling if you want live counter/toggle/input state preserved during iteration. |
+| **Adding fields/params to an existing `data class` or `ViewModel`** | **In-place (`JVMTI_STRUCTURAL_SWAP`)** when old call sites remain binary-compatible. | **Give new `data class` properties a default value** (e.g. `val filter: Filter = Filter.All`). `debroid` synthesizes compatibility `<init>` stubs so existing classes hot-swap without `JVMTI_ERROR_64` reinstalls. *(Note: pre-existing heap instances read `0`/`false`/`null` for brand-new fields until reconstructed).* |
+| **`ViewModel` `init {}`, `StateFlow`, & `combine(...)` lambdas** | **In-place (`JVMTI_HOT_SWAP` / `JVMTI_STRUCTURAL_SWAP`)** + automatic `ViewModelStore` eviction. | Even changing `combine(2 flows)` $\rightarrow$ `combine(4 flows)` hot-reloads in-place! Active `ViewModel` instances in Activity, Fragment, and Navigation stores are automatically evicted and recreated with the new flow pipeline. |
+| **`interface` / `sealed interface` default method bodies** | **In-place (`COMPOSE_HOT_RELOAD`)** — preserves all UI & `ViewModel` state. | Put evolving shared behavior in `interface` default methods freely; editing their bodies hot-swaps in-place. |
+| **Adding/removing abstract methods on an `interface`, OR changing `superclass` / `: ImplementedInterface` on an existing named class** | **Pre-flight `[FALLBACK_REINSTALL]`** (`INTERFACE_STRUCTURE_CHANGED`, `INTERFACE_HIERARCHY_CHANGED`, `SUPERCLASS_CHANGED`). | ART JVMTI forbids changing the type hierarchy of an already-loaded named class. `debroid` detects this immediately on the host after `kotlinc` (skipping `D8`/ADB) and runs fallback reinstall automatically. Batch hierarchy changes together so fallback runs at most once. |
+| **Hilt / Dagger / KSP (`@HiltViewModel`, `@Inject`, `@AndroidEntryPoint`)** | **Editing existing Hilt classes/ViewModels:** In-place (KSP is skipped automatically when DI signatures are unchanged!).<br>**Adding a brand-new `@HiltViewModel` or `@Provides` binding:** Requires `:app` Hilt root component codegen. | When prototyping a **brand-new** `ViewModel` mid-session in a Hilt app, either instantiate via `ViewModelProvider(owner)[MyViewModel::class.java]` while iterating fast, OR run `./gradlew :<app-module>:install<Variant>` once after adding `@HiltViewModel @Inject constructor(...)` so Hilt's `:app` component registers the multibinding. |
+| **XML resources (`res/**`) & `AndroidManifest.xml`** | **Automatic `[FALLBACK_REINSTALL]`** (`reason=RESOURCE_CHANGE`). | Batch XML string/drawable/manifest edits together before saving so fallback `install<Variant>` runs once. |
+
+---
+
+## 5. Troubleshooting & Error Code Reference
+
+| Output / Symptom | Exact Cause | Immediate Fix (Do Not Guess) |
+| :--- | :--- | :--- |
+| `[ERROR] code=APP_NOT_RUNNING` *(on initial startup)* | App is not running on the connected device/emulator. | Launch the app (`adb shell am start -n <app_id>/<MainActivity>`) and start `debroid hot-reload`. |
+| `[ERROR] code=APP_NOT_RUNNING` *(mid-session while watching)* | App crashed or was force-stopped before/during a save. | **Do NOT restart `debroid hot-reload`.** Simply relaunch the app (`adb shell am start -n <app_id>/<MainActivity>`) — the running watcher will automatically detect the new PID and apply all pending + session edits! |
+| `[ERROR] code=APP_NOT_DEBUGGABLE` | Package is not installed, `<app_id>` is missing a flavor/debug suffix (e.g. `.demo.debug`), or a release APK is installed. | Check `adb shell pm list packages \| grep <name>` or `dumpsys window`, install the debug variant (`./gradlew :<app>:install<Variant>`), and retry. |
+| `[ERROR] code=FALLBACK_DISABLED message=Cannot hot-swap <REASON> ...` | `--no-fallback` was passed and the edit changed XML resources or a named class's superclass/interfaces (`<REASON>`). | Either revert the hierarchy/resource change, or restart the watcher **without** `--no-fallback` so it can auto-reinstall when needed. |
+| `[ERROR] code=FALLBACK_FAILED` | Full Gradle `install<Variant>` failed during fallback (e.g. resource merge error, KSP/Dagger error, or device disconnected). | Read the error message, fix the underlying resource/DI/Gradle build error (verify with `./gradlew :<app>:install<Variant>`), ensure the app is running, and continue. |
+| `[ERROR] code=NO_APP_MODULE` | `-d` does not point to the Gradle root containing the `com.android.application` module for `<app_id>`. | Pass `-d <path/to/android/project/root>` where `settings.gradle(.kts)` lives. |
+| `[ERROR] code=AGENT_TIMEOUT` or `ATTACH_AGENT_FAILED` | Main thread of the target app is frozen (ANR / paused on a JDI breakpoint!) so `Agent_OnAttach` could not run on the main looper. | If a `debroid` JDI debug session has threads paused, run `debroid resume <session_id>` or `debroid detach <session_id>`. If the app is ANR-hung, `adb shell am force-stop <app_id> && adb shell am start ...` (watcher will auto-reapply edits). |
+| `[RUNTIME_ERROR] IllegalStateException: Expected the @HiltViewModel-annotated class ...` | A brand-new `@HiltViewModel` was added mid-session without regenerating Hilt's `:app` root component. | Stop watcher, run `./gradlew :<app>:install<Variant>`, relaunch the app, and restart `debroid hot-reload`. |
+| `[RELOADED]` printed, but UI still shows previous screen/tab | `ui=ACTIVITY_RECREATE` recreated the `Activity` (resetting unsaved tab state), OR the edited code is inside an uninvoked click/action handler. | Check `android layout`: re-tap your target tab if `Activity` recreated, or tap the relevant button to fire the updated handler. |
+| Saved file, but `[RELOADING]` never appeared | File was saved before `[WATCHING]` printed, `-d` points to wrong project dir, or file is inside `src/test` / `src/androidTest` (unit/instrumentation tests are intentionally ignored). | Confirm `[WATCHING]` is present and file is under `main`/variant source sets, then save again. |
+
+---
+
+## 6. Strict Anti-Patterns (Never Waste Turns On These)
+
+- **NEVER run `javap`, `dexdump`, or inspect `.class` / `.dex` / `build/` files** to debug or "verify" hot reload. Only edit source files, read `[STATUS]` lines, and inspect the live device UI.
+- **NEVER modify `build.gradle(.kts)`, compiler flags, or JaCoCo/Hilt plugins** to work around hot-reload behavior.
+- **NEVER restart `debroid hot-reload` on `[COMPILE_ERROR]`, `[RUNTIME_ERROR]`, or mid-session app restarts** — restarting the watcher throws away its warm Gradle/`D8` state and pre-edit APK baseline!
+- **NEVER run `sleep N && cat hotreload.log` loops** in non-streaming harnesses — run `debroid hot-reload <app_id> -d <project_dir> --once` against your background watcher for an exact, zero-polling synchronous barrier.
+- **NEVER keep both a suspended JDWP breakpoint (`debroid attach --suspend` / paused `BREAKPOINT_HIT`) AND `debroid hot-reload` active at the exact same moment** — JVMTI `attach-agent` executes on the app's main thread, so a suspended VM cannot process a hot reload until resumed (`debroid resume <session_id>`).

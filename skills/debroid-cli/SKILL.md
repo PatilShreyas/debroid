@@ -1,27 +1,34 @@
 ---
 name: Debroid CLI Debugger
-description: "Orchestrate headless Android debugging via JDWP. ACTIVATE this skill whenever asked to debug an Android application, set line or exception breakpoints, inspect runtime variables or Jetpack Compose state, step through execution, evaluate live expressions, watch fields, or diagnose runtime crashes."
+description: "Headless Android live hot-reload (debroid hot-reload) and JDWP runtime debugger. ACTIVATE this skill whenever iterating on Android Kotlin/Java features, Jetpack Compose UI, or ViewModels on a running device/emulator, OR whenever asked to debug an Android app, set breakpoints/watchpoints, inspect live variables or Compose state, evaluate expressions, or diagnose runtime crashes."
 ---
 
-# Debroid CLI Debugger Skill
+# Debroid CLI Skill
 
-This skill provides mandatory instructions for AI agents to use the `debroid` CLI for headless Android debugging. **Follow these instructions strictly to avoid context window bloat and execution errors.**
+This skill provides instructions for AI agents to use `debroid` for **sub-second Android code & Jetpack Compose hot-reloading** and **headless JDWP debugging**. **Follow these instructions strictly to avoid wasted turns and context bloat.**
+
+## 🧭 Choose the Right Workflow First
+
+| Task | Tool Mode | Output Format | Required Reading |
+| :--- | :--- | :--- | :--- |
+| **Building or iterating on UI, Compose screens, `ViewModel`s, or Kotlin/Java logic on a running app** | `debroid hot-reload` *(standalone JVMTI watcher — **no** `debroid daemon` needed)* | Single-line plain-text `[STATUS]` events | **Read [`references/hot-reload.md`](./references/hot-reload.md) immediately** (`~/.debroid/skills/debroid-cli/references/hot-reload.md`) |
+| **Setting breakpoints/watchpoints, stepping, inspecting heap/locals, or evaluating runtime expressions** | `debroid attach` / `launch` / `break` / `poll` / `pause-state` / `inspect` / `eval` *(daemon-backed JDWP)* | Single-line compact JSON | Follow **Standard Debugging Workflow** below |
 
 ## 🎯 Trigger Conditions
 Activate this skill whenever the user or task involves:
-- Debugging an Android application or process live
+- Iterating on Jetpack Compose UI, `ViewModel` state/flows, navigation, or Kotlin/Java business logic on a connected Android device/emulator (`debroid hot-reload`)
+- Debugging an Android application or process live (`debroid attach`, `debroid launch`)
 - Setting line breakpoints in Kotlin or Java source files (`debroid break`)
 - Catching uncaught or caught runtime exceptions (`debroid catch-exception`)
 - Inspecting live variables, object memory, or Jetpack Compose state (`debroid locals`, `pause-state`, `inspect`)
 - Stepping through Kotlin/Java code execution (`debroid step`)
 - Monitoring field access or modifications with watchpoints (`debroid watch`)
 - Evaluating expressions or mutating variable values in runtime memory (`debroid eval`, `set-var`)
-- Hot-reloading Kotlin/Java source changes or Compose UI live onto running devices without full app rebuilds (`debroid hot-reload`)
 
 ## ⚠️ Critical Agent Rules (DO NOT IGNORE)
-1. **Always use `--with-stacktrace`** when polling to get immediate context.
-2. **Never poll in an infinite loop**. Poll once or twice, and if the app hasn't hit a breakpoint, instruct the user to interact with the app.
-3. **Parse JSON outputs carefully**. All CLI outputs are JSON strings. Extract `sessionId`, `threadId`, `objectId`, `breakpointId`, `exceptionBreakpointId`, `watchpointId`, and `continuationId` **exactly as provided** and reuse them verbatim in subsequent commands. Do not synthesize IDs.
+1. **Always use `--with-stacktrace`** when polling JDWP events to get immediate context.
+2. **Never poll in an infinite loop**. Poll once or twice, and if the app hasn't hit a breakpoint, trigger the UI action autonomously (`android layout` + `adb shell input tap X Y`) or instruct the user to interact with the app.
+3. **Parse JSON outputs carefully for JDWP commands** (`debroid hot-reload` is the sole exception and streams plain-text `[STATUS]` lines). Extract `sessionId`, `threadId`, `objectId`, `breakpointId`, `exceptionBreakpointId`, `watchpointId`, and `continuationId` **exactly as provided** and reuse them verbatim in subsequent commands. Do not synthesize IDs.
 4. **Track trap IDs and remove them when done**. Every `break`, `catch-exception`, and `watch` returns an ID. Use `remove-break`, `remove-catch-exception`, `remove-watch` to clear traps you no longer need so they don't fire unexpectedly and waste poll cycles.
 5. **Keep IDs in working memory, not in long scratch buffers.** A typical session uses 1–3 trap IDs plus 1 thread ID — keep them inline.
 6. **Use Background Tasks**: If you are using an agentic system that supports background tasks, run `debroid daemon` as a background task.
